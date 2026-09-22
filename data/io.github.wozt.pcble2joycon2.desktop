@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Joy-Con 2 Lab
+Comment=Observe an experimental Joy-Con 2 BLE peripheral
+Exec=pcble2joycon2
+Icon=input-gaming
+Terminal=false
+Categories=Utility;GTK;

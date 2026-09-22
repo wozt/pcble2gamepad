@@ -1,0 +1,1 @@
+option('gui', type: 'feature', value: 'auto', description: 'Build the GTK4/libadwaita application')
