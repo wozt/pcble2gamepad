@@ -35,7 +35,7 @@ reports, IMU, rumble and the proprietary reconnect procedure remain unimplemente
 
 ```sh
 sudo apt install build-essential pkg-config meson ninja-build \
-  libglib2.0-dev libjson-glib-dev libgtk-4-dev libadwaita-1-dev bluez dbus-daemon
+  libglib2.0-dev libjson-glib-dev libgtk-4-dev libadwaita-1-dev libbluetooth-dev bluez dbus-daemon
 meson setup build -Dgui=enabled
 meson compile -C build
 meson test -C build --print-errorlogs
@@ -87,6 +87,19 @@ creation, Bluetooth service restart, or raw HCI control is performed. Stop remov
 this application's advertisement and GATT registration. Exiting the daemon closes
 its private D-Bus connection, allowing BlueZ to release its registrations, including
 after abnormal process termination. Other adapter connections are not disconnected.
+
+The separate C diagnostic reads adapter capabilities using only two fixed HCI
+read commands; it does not advertise, disconnect peers or change adapter settings:
+
+```sh
+sudo ./build/pcble2joycon2diag hci0
+```
+
+It emits JSON with the raw LE feature/state bytes, LE 2M and data-length support,
+and the connection/advertising combinations checked by Linux 6.12. The local
+Realtek adapter lacks LE 2M. The reference Joy-Con pairing capture switches to 2M
+before ATT, but this does not establish that the console requires 2M. See the
+[passive GATT experiment](docs/validation.md#passive-gatt-and-radio-capabilities).
 
 For mock mode:
 

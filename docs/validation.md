@@ -175,3 +175,59 @@ Git): the btsnoop capture, decoded btmon log and daemon log. Runtime API fields
 not automatically authenticate a peer as Nintendo or infer identity from its OUI.
 The console test result above is manually correlated evidence, not a per-peer
 authentication capability.
+
+## Passive GATT and radio capabilities
+
+### Reference capture comparison
+
+In the public `btle_joycon2_pairing_decrypted.pcapng` capture from
+[switch2_controller_research](https://github.com/ndeadly/switch2_controller_research/tree/a3306b473acff0d6844fb1e288883a3940df0baf/captures/nrf52840),
+frames 502–515 establish the link, exchange data-length/features, then select
+**LE 2M in both directions** (PHY update instant 12). The first console ATT MTU
+request is frame 529, followed by vendor characteristic access. The local adapter
+reports LE features `bd00000000000000`: data-length extension is supported, but
+LE 2M is not. Its supported states are `ffffffff00000000`, also lacking the
+connection/advertising combinations required by the local Linux kernel.
+
+The new standalone C `pcble2joycon2diag hci0` reproduces both capability reads and
+prints JSON. It uses only LE Read Local Supported Features (`0x2003`) and LE Read
+Supported States (`0x201c`). This narrowly scoped read-only HCI diagnostic addresses
+capabilities absent from the application's D-Bus view; the controller backend still
+uses BlueZ D-Bus. No settings, firmware or NVM are written. Opening the HCI socket
+can succeed without permission to send the reads, so that failure is also reported.
+
+### Real-console test at 19:41 UTC
+
+With no connected peers, a temporary BlueZ runtime service override loaded a copy
+of the system configuration with only `ReverseServiceDiscovery=false` changed.
+The original `/etc/bluetooth/main.conf` was untouched. This disables the incoming
+connection GATT client in
+[BlueZ 5.82 `gatt_client_init`](https://github.com/bluez/bluez/blob/5.82/src/device.c).
+The test runner included automatic restoration after 180 seconds and exit cleanup.
+
+Advertising started at `19:41:09.271485Z`; the previously identified console
+connected at `19:41:09.355599Z`. During approximately 50 seconds before stopping
+advertising, **no ATT packets appeared in either direction**. The earlier BlueZ
+MTU and service-discovery requests were absent. L2CAP connection-parameter traffic
+remained: the initial 15 ms interval changed to 30 ms, then back to 15 ms. The user
+confirmed that the console still displayed only the wired controller. Later the
+interval briefly changed to 10 ms and returned to 15 ms, still without ATT traffic.
+
+Disabling reverse discovery therefore did not suffice to trigger Nintendo pairing.
+Missing LE 2M is a measured difference preceding ATT in the reference capture,
+but is not yet proven to be a console requirement. Host HCI captures cannot reveal
+every over-the-air Link Layer exchange. A comparison using an adapter with verified
+LE 2M support, or an over-the-air capture, is needed to test this hypothesis.
+Changing GATT handles or implementing pairing replies would not explain the current
+absence of any console ATT request.
+
+The application advertisement/GATT registration was stopped, the identified test
+peer explicitly disconnected, and the daemon terminated. The temporary profile
+and service override were removed and normal BlueZ restarted. Final application
+status was idle with no peers. Evidence is stored locally under
+`artifacts/2026-09-22-passive-gatt/` (ignored, restricted permissions).
+
+The four existing regression suites passed in the normal and ASan/UBSan builds.
+The diagnostic was exercised on the real adapter; invalid arguments and an
+unprivileged capability read were also checked. These tests do not establish
+working Joy-Con pairing or input emulation.

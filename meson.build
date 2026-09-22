@@ -1,6 +1,8 @@
 project('pcble2joycon2', 'c', version: '0.1.0', default_options: ['c_std=c11', 'warning_level=3', 'werror=true'])
 gio = dependency('gio-unix-2.0', version: '>=2.74')
 json = dependency('json-glib-1.0')
+bluetooth = dependency('bluez')
+executable('pcble2joycon2diag', 'src/adapter-diag.c', dependencies: [gio, bluetooth], install: true)
 inc = include_directories('src')
 protocol = static_library('joycon2-protocol', 'src/protocol.c', dependencies: gio)
 client = static_library('joycon2-client', 'src/client.c', dependencies: [gio, json])
