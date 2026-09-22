@@ -53,11 +53,48 @@ static void log_cursor(void)
     engine_free(e);
 }
 
+static void targeted_disconnect(void)
+{
+    Engine *e = engine_new("hci0", TRUE, FALSE);
+    const char *addresses[] = {"12:34:56:78:9A:BC", "22:34:56:78:9A:BC"};
+    for (guint i = 0; i < G_N_ELEMENTS(addresses); i++) {
+        JsonObject *peer = json_object_new();
+        json_object_set_string_member(peer, "address", addresses[i]);
+        json_object_set_boolean_member(peer, "connected", TRUE);
+        g_hash_table_insert(e->peers, g_strdup(addresses[i]), peer);
+    }
+    const char *invalid[] = {
+        "{\"version\":1,\"method\":\"disconnect\"}",
+        "{\"version\":1,\"method\":\"disconnect\",\"address\":false}",
+        "{\"version\":1,\"method\":\"disconnect\",\"address\":\"all\"}",
+        "{\"version\":1,\"method\":\"disconnect\",\"address\":\"32:34:56:78:9A:BC\"}"
+    };
+    for (guint i = 0; i < G_N_ELEMENTS(invalid); i++) {
+        g_autoptr(JsonObject) reply = request(e, invalid[i]);
+        g_assert_false(json_object_get_boolean_member(reply, "ok"));
+        g_assert_cmpuint(g_hash_table_size(e->peers), ==, 2);
+    }
+    const char *valid = "{\"version\":1,\"method\":\"disconnect\",\"address\":\"12:34:56:78:9a:bc\"}";
+    e->busy = TRUE;
+    g_autoptr(JsonObject) busy = request(e, valid);
+    g_assert_false(json_object_get_boolean_member(busy, "ok"));
+    g_assert_cmpuint(g_hash_table_size(e->peers), ==, 2);
+    e->busy = FALSE;
+    g_autoptr(JsonObject) reply = request(e, valid);
+    g_assert_true(json_object_get_boolean_member(reply, "ok"));
+    g_assert_cmpuint(g_hash_table_size(e->peers), ==, 1);
+    g_assert_true(g_hash_table_contains(e->peers, addresses[1]));
+    g_autoptr(JsonObject) absent = request(e, valid);
+    g_assert_false(json_object_get_boolean_member(absent, "ok"));
+    engine_free(e);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
     g_test_add_func("/core/invalid-requests", invalid_requests);
     g_test_add_func("/core/lifecycle", lifecycle);
     g_test_add_func("/core/log-cursor", log_cursor);
+    g_test_add_func("/core/targeted-disconnect", targeted_disconnect);
     return g_test_run();
 }

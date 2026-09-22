@@ -3,7 +3,9 @@
 Evidence labels: **community** means documented by reverse engineering;
 **capture** means independently inspected in the public PCAP named below;
 **local** means observed on the development adapter, not on a Switch.
-No console interoperability has been established for this emulator.
+Discovery and an incoming BLE link were observed with the user's Switch 2 on
+2026-09-22; pairing and usable controller operation remain unverified. See
+[the captured console test](validation.md#connection-coexistence-and-first-console-link).
 
 ## Sources inspected
 
@@ -73,7 +75,8 @@ BlueZ `ManufacturerData` maps company ID `0x0553` to the remaining **24 bytes**,
 not to all 26 bytes. The adapter's own manufacturer ID `0x005d` (Realtek) is a
 separate HCI hardware property; it does not need to become Nintendo. The emulator
 keeps the PC adapter's real public address; no Nintendo OUI or identity is copied.
-Address/OUI filtering by the console remains an open question for the hardware test.
+The 2026-09-22 console test accepted this PC public address; address/OUI filtering
+did not prevent that connection. Other consoles and firmware remain untested.
 
 ## Expected GATT database
 

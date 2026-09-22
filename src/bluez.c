@@ -38,6 +38,7 @@ struct Bluez {
     guint changed_subscription, added_subscription, removed_subscription, owner_subscription;
     guint pending;
     gboolean closing;
+    char *disconnect_path;
 };
 
 static const char xml[] =
@@ -242,6 +243,7 @@ static void observe_peer(Bluez *b, const char *path, GVariant *properties, gbool
         json_object_set_string_member(peer, "path", path);
         json_object_set_boolean_member(peer, "connected", FALSE);
         json_object_set_boolean_member(peer, "console_identity_verified", FALSE);
+        json_object_set_boolean_member(peer, "first_seen_in_snapshot", initial);
         g_hash_table_insert(e->peers, g_strdup(path), peer);
     }
     const char *address, *type;
@@ -255,6 +257,8 @@ static void observe_peer(Bluez *b, const char *path, GVariant *properties, gbool
         }
     }
     if (g_variant_lookup(properties, "AddressType", "&s", &type)) json_object_set_string_member(peer, "address_type", type);
+    const char *alias;
+    if (g_variant_lookup(properties, "Alias", "&s", &alias)) json_object_set_string_member(peer, "alias", alias);
     gboolean paired;
     if (g_variant_lookup(properties, "Paired", "b", &paired)) json_object_set_boolean_member(peer, "bluez_paired", paired);
     gint16 rssi;
@@ -262,8 +266,8 @@ static void observe_peer(Bluez *b, const char *path, GVariant *properties, gbool
     if (has_connected) {
         gboolean previous = json_object_get_boolean_member(peer, "connected");
         json_object_set_boolean_member(peer, "connected", connected);
-        if (previous != connected || initial)
-            engine_log(e, "INFO", connected ? "peer_connected" : "peer_disconnected",
+        if (previous != connected)
+            engine_log(e, "INFO", connected ? (initial ? "peer_already_connected" : "peer_connected") : "peer_disconnected",
                 "path=%s initial=%s advertising_registered=%s; peer is not proven to be the Switch; HCI reason/interval/encryption require btmon",
                 path, initial ? "true" : "false", e->advertising ? "true" : "false");
         if (!connected) g_hash_table_remove(e->peers, path);
@@ -375,7 +379,17 @@ static void advertisement_registered(GObject *source, GAsyncResult *result, gpoi
     g_autoptr(GVariant) reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), result, &error);
     if (b->closing) return;
     b->engine->busy = FALSE;
-    if (!reply) { engine_error(b->engine, error->message); return; }
+    if (!reply) {
+        guint peers = g_hash_table_size(b->engine->peers);
+        g_autofree char *message = g_strdup_printf("%s%s", error->message, peers ?
+            ". Existing adapter peers may block connectable advertising on this controller. Check peer addresses and btmon; disconnect only the intended test peer, then retry Sync." :
+            ". Capture btmon and the Bluetooth journal for the underlying management/HCI status.");
+        engine_error(b->engine, message);
+        engine_log(b->engine, "INFO", "advertising_failure_cleanup", "Removing probe GATT services; existing peer links are preserved");
+        b->engine->busy = TRUE;
+        unregister_gatt(b);
+        return;
+    }
     b->engine->advertising = TRUE;
     engine_log(b->engine, "INFO", "advertising_started", "BlueZ registered connectable discovery advertising; validate actual bytes/address using btmon");
 }
@@ -457,6 +471,31 @@ void bluez_stop(Bluez *b)
         g_variant_new("(o)", ADV), NULL, G_DBUS_CALL_FLAGS_NONE, 10000, b->cancel, advertisement_unregistered, b);
 }
 
+static void peer_disconnected(GObject *source, GAsyncResult *result, gpointer data)
+{
+    Bluez *b = data;
+    b->pending--;
+    g_autoptr(GError) error = NULL;
+    g_autoptr(GVariant) reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), result, &error);
+    if (b->closing) return;
+    b->engine->busy = FALSE;
+    if (!reply) engine_error(b->engine, error->message);
+    else {
+        engine_log(b->engine, "INFO", "disconnect_completed", "path=%s; BlueZ completed the explicit disconnect request", b->disconnect_path);
+        g_hash_table_remove(b->engine->peers, b->disconnect_path);
+    }
+    g_clear_pointer(&b->disconnect_path, g_free);
+}
+
+void bluez_disconnect(Bluez *b, const char *path)
+{
+    b->engine->busy = TRUE;
+    b->disconnect_path = g_strdup(path);
+    b->pending++;
+    g_dbus_connection_call(b->bus, "org.bluez", path, DEVICE, "Disconnect", NULL, NULL,
+        G_DBUS_CALL_FLAGS_NONE, 10000, b->cancel, peer_disconnected, b);
+}
+
 Bluez *bluez_new(Engine *engine, GError **error)
 {
     g_autoptr(GError) inspect_error = NULL;
@@ -519,5 +558,6 @@ void bluez_free(Bluez *b)
     g_clear_pointer(&b->xml, g_dbus_node_info_unref);
     g_object_unref(b->cancel);
     g_free(b->adapter_path);
+    g_free(b->disconnect_path);
     g_free(b);
 }

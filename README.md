@@ -4,8 +4,10 @@ Experimental **C11** software for emulating Nintendo Switch 2 Joy-Con 2 controll
 from a Linux PC's standard Bluetooth LE adapter.
 
 The first milestone is deliberately small: advertise one **Joy-Con 2 R** and
-observe whether a real Switch 2 attempts to connect. **Console discovery has not
-yet been verified. This is not a working controller or a completed pairing implementation.**
+observe whether a real Switch 2 attempts to connect. **This milestone was observed
+on the user's console on 2026-09-22: an incoming BLE connection completed successfully.**
+This is not a working controller or a completed pairing implementation; the console
+does not yet display a usable Joy-Con.
 
 ## Current status
 
@@ -18,20 +20,22 @@ Implemented:
   controller's database, with different handles and BlueZ's standard services.
 - Connection/property observation, raw GATT reads/writes, notification subscription
   logs and basic Nintendo command-header diagnostics.
-- Headless daemon, documented Unix socket JSON API, C CLI, GTK4/libadwaita GUI.
+- Headless daemon, documented Unix socket JSON API, C CLI, GTK4/libadwaita GUI,
+  peer addresses and explicit targeted disconnection for repeatable tests.
 - An explicit mock backend for local lifecycle/UI tests without radio activity.
 
 Locally checked on Debian 13 / BlueZ 5.82 / Realtek `hci0`: GATT registration,
 connectable advertising, and clean removal work. HCI monitoring confirms a public
 address and the expected manufacturer payload and flags. **BlueZ reorders the AD
-structures**; see [local validation](docs/validation.md). No Switch connection,
-pairing, buttons, sticks, mouse reports, IMU, rumble, or reconnect is claimed yet.
+structures**; the tested console nevertheless completed a connection. See
+[local validation](docs/validation.md). Nintendo pairing, buttons, sticks, mouse
+reports, IMU, rumble and the proprietary reconnect procedure remain unimplemented.
 
 ## Build
 
 ```sh
 sudo apt install build-essential pkg-config meson ninja-build \
-  libglib2.0-dev libjson-glib-dev libgtk-4-dev libadwaita-1-dev bluez
+  libglib2.0-dev libjson-glib-dev libgtk-4-dev libadwaita-1-dev bluez dbus-daemon
 meson setup build -Dgui=enabled
 meson compile -C build
 meson test -C build --print-errorlogs
@@ -123,6 +127,32 @@ groups rather than running the GUI as root. Captures and verbose command logs ma
 contain peer addresses and, in future pairing tests, key material: redact those
 before publishing. Use `btmon -r switch2-discovery.btsnoop` to decode a saved capture.
 
+### Advertising fails after a previous connection
+
+An existing BLE link can prevent this Realtek adapter from advertising another
+connectable instance. Locally, this produced BlueZ's generic `Failed to register
+advertisement` with management `Invalid Parameters (0x0d)`. Five advertising
+instances do not guarantee simultaneous connection/advertising support.
+
+Use `status` or GTK's peer address display to identify the link. A
+`peer_already_connected` event is a snapshot, not a new console connection.
+Switching the console fully off and observing the peer disappear can identify it;
+a Nintendo address prefix alone cannot. After identifying the intended test peer:
+
+```sh
+./build/pcble2joycon2ctl stop
+# Wait until status is no longer transitioning, then select the exact test peer:
+./build/pcble2joycon2ctl disconnect AA:BB:CC:DD:EE:FF
+# Wait for completion, then restart discovery:
+./build/pcble2joycon2ctl sync
+```
+
+GTK offers **Disconnect peer** when exactly one peer address is available. For
+multiple peers, use the CLI with an explicit address. Nothing automatically
+disconnects another Bluetooth device. A failed advertising registration now rolls
+back the probe GATT application and preserves the diagnostic. Detailed evidence:
+[connection coexistence investigation](docs/validation.md#connection-coexistence-and-first-console-link).
+
 ## Architecture and API
 
 ```text
@@ -151,7 +181,7 @@ Persistent/batched input updates will be added and measured before real-time use
 
 ## Roadmap
 
-1. Verify discovery and an incoming connection attempt on a real Switch 2.
+1. Discovery and an incoming connection on a real Switch 2: **observed 2026-09-22**.
 2. Measure ATT/handle behavior; retain BlueZ where it works, document any blocker.
 3. Implement exact GATT behavior and Nintendo proprietary pairing, then initialization.
 4. Add buttons, both sticks, Home/Capture/C, stick clicks and side buttons as applicable.

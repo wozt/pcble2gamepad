@@ -140,6 +140,39 @@ char *engine_request(Engine *e, const char *request)
         json_object_set_array_member(result, "events", events);
         json_object_set_int_member(result, "cursor", e->sequence);
         json_object_set_int_member(result, "oldest", e->events.head ? json_object_get_int_member(e->events.head->data, "seq") : 0);
+    } else if (g_str_equal(method, "disconnect")) {
+        if (e->busy) {
+            failure = "Operation in progress; query status before retrying";
+            goto done;
+        }
+        JsonNode *address_node = json_object_get_member(o, "address");
+        if (!address_node || json_node_get_value_type(address_node) != G_TYPE_STRING ||
+            !g_regex_match_simple("^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$", json_node_get_string(address_node), 0, 0)) {
+            failure = "disconnect requires an explicit Bluetooth address (AA:BB:CC:DD:EE:FF)";
+            goto done;
+        }
+        const char *address = json_node_get_string(address_node);
+        GHashTableIter it;
+        gpointer key, value;
+        const char *path = NULL;
+        g_hash_table_iter_init(&it, e->peers);
+        while (g_hash_table_iter_next(&it, &key, &value)) {
+            const char *candidate = json_object_get_string_member_with_default(value, "address", "");
+            if (candidate && g_ascii_strcasecmp(candidate, address) == 0 &&
+                json_object_get_boolean_member_with_default(value, "connected", FALSE)) {
+                path = key;
+                break;
+            }
+        }
+        if (!path) {
+            failure = "Address is not a currently observed connected peer on this adapter";
+            goto done;
+        }
+        g_clear_pointer(&e->last_error, g_free);
+        engine_log(e, "INFO", "disconnect_requested", "address=%s path=%s; explicit client request for this peer only", address, path);
+        if (e->mock) g_hash_table_remove(e->peers, path);
+        else bluez_disconnect(e->bluez, path);
+        result = engine_status(e);
     } else if (g_str_equal(method, "start") || g_str_equal(method, "sync") || g_str_equal(method, "stop")) {
         if (e->busy) {
             failure = "Operation in progress; query status before retrying";
@@ -164,7 +197,7 @@ char *engine_request(Engine *e, const char *request)
             result = NULL;
         }
     } else {
-        failure = "Unknown method; supported: status, logs, start, stop, sync";
+        failure = "Unknown method; supported: status, logs, start, stop, sync, disconnect";
     }
 done:
     json_object_set_int_member(response, "version", 1);

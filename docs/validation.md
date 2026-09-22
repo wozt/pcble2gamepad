@@ -1,6 +1,8 @@
 # Local validation — 2026-09-22
 
-These checks do **not** establish Switch 2 interoperability.
+The initial checks below establish adapter behavior only. A later user-assisted
+test reached a real Switch 2 connection; see the final section. Pairing and input
+interoperability remain unimplemented.
 
 ## Environment
 
@@ -70,7 +72,7 @@ connection to a Switch was observed during these short local registration checks
 - GTK Start/Stop buttons were clicked under Xvfb against a mock daemon; independent
   CLI status queries confirmed advertising state became true, then false.
 
-## Still required on hardware
+## Questions recorded before the console test
 
 Run the README's console test and provide daemon logs plus HCI capture. Determine:
 
@@ -81,3 +83,95 @@ Run the README's console test and provide daemon logs plus HCI capture. Determin
 
 Do not mark the first console milestone complete until an actual Switch attempt
 is correlated with the capture. Button/stick/mouse and pairing validation follow later.
+
+## Connection coexistence and first console link
+
+### Registration failure at 19:04 UTC
+
+The user's log showed GATT registration succeeding while advertisement
+registration failed. A peer with Nintendo OUI `38:C6:CE` was already connected
+before the daemon started. It was not evidence of a new connection during those
+failed advertisement attempts. Re-enumeration also incorrectly repeated the
+`peer_connected` log; that diagnostic bug is now fixed.
+
+The failure was reproduced locally without disconnecting the peer. The system
+journal exposed `Invalid Parameters (0x0d)`, hidden by the generic D-Bus error.
+Passive `btmon` observation showed MGMT Add Extended Advertising Parameters
+(`0054`) succeeding, then Add Extended Advertising Data (`0055`) returning status
+`0d`, without a new LE Set Advertising Parameters command reaching the radio.
+
+Read-only HCI inspection showed an existing **LE peripheral** link (PC peripheral)
+and LE Supported States bytes `ff ff ff ff 00 00 00 00`. Bits above 31, including
+bit 38, are absent. Linux 6.12.107's `is_advertising_allowed()` requires bits 38
+and 21 for connectable advertising alongside a peripheral link. It returns false
+here; `hci_enable_advertising_sync()` returns `-EINVAL`, translated to MGMT `0d`.
+This is a restriction based on the controller's advertised capabilities, not a
+malformed Nintendo payload or proof of an intrinsic radio limitation.
+
+Primary sources:
+[Linux 6.12.107 hci_sync.c](https://github.com/gregkh/linux/blob/v6.12.107/net/bluetooth/hci_sync.c),
+[MGMT error mapping](https://github.com/gregkh/linux/blob/v6.12.107/net/bluetooth/mgmt.c),
+[BlueZ 5.82 generic error response](https://github.com/bluez/bluez/blob/5.82/src/advertising.c),
+and [IEEE's OUI registry](https://standards-oui.ieee.org/oui/oui.txt).
+Only a standard read-supported-states command was issued for diagnosis; no raw
+HCI advertising control, address change or firmware/NVM write was used.
+
+### User-assisted Switch test at 19:30 UTC
+
+The user fully powered off the Switch; the connected Nintendo address disappeared
+from both BlueZ and the kernel connection list. Advertising then succeeded again.
+On powering on and opening the controller screen, the same peer connected:
+
+```text
+2026-09-22T19:29:58.231560Z advertising_started
+2026-09-22T19:30:24.409044Z peer_connected initial=false advertising_registered=true
+
+HCI LE Connection Complete: Success (0x00)
+Role: Peripheral (PC)
+Peer address type: Public
+Connection interval: 15.00 ms
+Latency: 0
+Supervision timeout: 2000 ms
+```
+
+**The first milestone is observed: the Switch accepts the advertisement and
+establishes the BLE link.** The manufacturer-first AD order and PC public address
+did not prevent this connection. The user reported that only their wired controller
+was visible on the console; no usable Joy-Con was displayed. Link establishment
+must not be reported as proprietary pairing or working input emulation.
+
+The captured ATT traffic then came from **BlueZ's client toward the console**:
+MTU 517 request (rejected as unsupported), server-feature query, primary-service
+discovery, and reads of the console's GAP name and appearance (`810a`). The console
+answered these requests. The PC also requested new connection parameters; the
+link changed from 15 ms to 30 ms. No Nintendo command write into this application's
+vendor GATT callbacks was observed in this capture. These responses are not the
+console discovering our vendor services. We cannot yet attribute the initialization
+stall specifically to handle mismatch, BlueZ client activity or changed timing.
+
+Next protocol work must compare this sequence with the public pairing capture
+before inventing command replies or switching transport. Exact GATT handles and
+BlueZ's automatic client procedures remain questions for the next experiment.
+
+### Recovery and regression checks
+
+- GTK now displays peer addresses and distinguishes existing snapshot peers.
+- CLI/API can disconnect exactly one explicitly selected connected address; GTK
+  exposes this when only one peer is listed. Stop still does not disconnect peers.
+- Failed advertisement registration rolls back the observation GATT application,
+  retains the error and includes a connection-coexistence troubleshooting hint.
+- A private D-Bus fixture reproduces failure with an existing peer, checks cleanup,
+  duplicate snapshot logging, targeted disconnect and successful subsequent Sync.
+  All four suites pass normally and under AddressSanitizer/UBSan.
+- The updated GTK peer display was visually checked under Xvfb; clicking Disconnect
+  peer against the isolated D-Bus fixture removed that peer, confirmed via CLI status.
+- The real console test link was explicitly disconnected through the new API;
+  after its asynchronous completion, Sync succeeded again. The daemon, its
+  advertisement and test link were then stopped rather than left running.
+
+Local evidence is saved under `artifacts/2026-09-22-switch-discovery/` (ignored by
+Git): the btsnoop capture, decoded btmon log and daemon log. Runtime API fields
+`console_verified` and `console_identity_verified` remain false: the daemon does
+not automatically authenticate a peer as Nintendo or infer identity from its OUI.
+The console test result above is manually correlated evidence, not a per-peer
+authentication capability.

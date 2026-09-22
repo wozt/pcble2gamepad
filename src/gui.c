@@ -6,8 +6,8 @@ typedef struct {
     AdwActionRow *adapter, *state, *connection;
     GtkLabel *error;
     GtkTextBuffer *logs;
-    GtkWidget *start, *stop, *sync;
-    char *socket_path;
+    GtkWidget *start, *stop, *sync, *disconnect;
+    char *socket_path, *peer_address;
     gint64 cursor;
     gboolean busy, closed;
     guint timer;
@@ -15,7 +15,7 @@ typedef struct {
 } Ui;
 
 typedef struct {
-    char *path, *method;
+    char *path, *method, *address;
     gint64 cursor;
 } Request;
 
@@ -27,6 +27,7 @@ static void ui_unref(Ui *ui)
 {
     if (--ui->refs) return;
     g_free(ui->socket_path);
+    g_free(ui->peer_address);
     g_free(ui);
 }
 
@@ -35,6 +36,7 @@ static void request_free(gpointer data)
     Request *r = data;
     g_free(r->path);
     g_free(r->method);
+    g_free(r->address);
     g_free(r);
 }
 
@@ -46,9 +48,9 @@ static void snapshot_free(gpointer data)
     g_free(s);
 }
 
-static JsonObject *get_result(const char *path, const char *method, gint64 cursor, GError **error)
+static JsonObject *get_result(const char *path, const char *method, gint64 cursor, const char *address, GError **error)
 {
-    g_autoptr(JsonObject) response = jc_client_request(path, method, cursor, error);
+    g_autoptr(JsonObject) response = jc_client_request_full(path, method, cursor, address, error);
     if (!response) return NULL;
     if (!json_object_get_boolean_member_with_default(response, "ok", FALSE)) {
         g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "%s",
@@ -68,8 +70,8 @@ static void worker(GTask *task, gpointer source G_GNUC_UNUSED, gpointer task_dat
     Request *r = task_data;
     g_autoptr(GError) error = NULL;
     Snapshot *s = g_new0(Snapshot, 1);
-    s->status = get_result(r->path, r->method, 0, &error);
-    if (s->status) s->logs = get_result(r->path, "logs", r->cursor, &error);
+    s->status = get_result(r->path, r->method, 0, r->address, &error);
+    if (s->status) s->logs = get_result(r->path, "logs", r->cursor, NULL, &error);
     if (error) {
         snapshot_free(s);
         g_task_return_error(task, g_steal_pointer(&error));
@@ -87,6 +89,7 @@ static void update_complete(GObject *source G_GNUC_UNUSED, GAsyncResult *result,
     gtk_widget_set_sensitive(ui->stop, TRUE);
     gtk_widget_set_sensitive(ui->sync, TRUE);
     if (error) {
+        gtk_widget_set_sensitive(ui->disconnect, FALSE);
         gtk_label_set_text(ui->error, error->message);
         adw_action_row_set_subtitle(ui->state, "Daemon unavailable or request failed");
         adw_action_row_set_subtitle(ui->connection, "Unknown");
@@ -109,8 +112,22 @@ static void update_complete(GObject *source G_GNUC_UNUSED, GAsyncResult *result,
     gtk_widget_set_sensitive(ui->stop, !transitioning);
     JsonArray *peers = json_object_get_array_member(s->status, "peers");
     guint count = peers ? json_array_get_length(peers) : 0;
-    g_autofree char *connection = count ? g_strdup_printf("%u adapter peer(s) connected · Console identity unverified", count) : g_strdup("Disconnected");
-    adw_action_row_set_subtitle(ui->connection, connection);
+    g_clear_pointer(&ui->peer_address, g_free);
+    g_autoptr(GString) connection = g_string_new(count ? "" : "Disconnected");
+    for (guint i = 0; i < count; i++) {
+        JsonObject *peer = json_array_get_object_element(peers, i);
+        const char *peer_address = json_object_get_string_member_with_default(peer, "address", "Unknown address");
+        gboolean snapshot = json_object_get_boolean_member_with_default(peer, "first_seen_in_snapshot", FALSE);
+        g_string_append_printf(connection, "%s%s · %s", i ? "\n" : "", peer_address,
+                               snapshot ? "Already connected when observed" : "Connection observed by daemon");
+        if (count == 1 && json_object_has_member(peer, "address")) ui->peer_address = g_strdup(peer_address);
+    }
+    if (count) g_string_append(connection, "\nConsole identity unverified");
+    adw_action_row_set_subtitle(ui->connection, connection->str);
+    gtk_widget_set_sensitive(ui->disconnect, !transitioning && ui->peer_address != NULL);
+    g_autofree char *disconnect_tip = ui->peer_address ? g_strdup_printf("Disconnect only %s; this does not forget pairing", ui->peer_address) :
+        g_strdup("With multiple peers, use the CLI to choose an explicit address");
+    gtk_widget_set_tooltip_text(ui->disconnect, disconnect_tip);
     JsonArray *events = json_object_get_array_member(s->logs, "events");
     gint64 cursor = json_object_get_int_member(s->logs, "cursor");
     if (cursor < ui->cursor) gtk_text_buffer_set_text(ui->logs, "Daemon restarted; log cursor reset.\n", -1);
@@ -138,15 +155,18 @@ static void update_complete(GObject *source G_GNUC_UNUSED, GAsyncResult *result,
 static void request_update(Ui *ui, const char *method)
 {
     if (ui->busy || ui->closed) return;
+    if (g_str_equal(method, "disconnect") && !ui->peer_address) return;
     ui->busy = TRUE;
     ui->refs++;
     Request *r = g_new0(Request, 1);
     r->path = g_strdup(ui->socket_path);
     r->method = g_strdup(method);
+    if (g_str_equal(method, "disconnect")) r->address = g_strdup(ui->peer_address);
     r->cursor = ui->cursor;
     gtk_widget_set_sensitive(ui->start, FALSE);
     gtk_widget_set_sensitive(ui->stop, FALSE);
     gtk_widget_set_sensitive(ui->sync, FALSE);
+    gtk_widget_set_sensitive(ui->disconnect, FALSE);
     g_autoptr(GTask) task = g_task_new(NULL, NULL, update_complete, ui);
     g_task_set_task_data(task, r, request_free);
     g_task_run_in_thread(task, worker);
@@ -216,15 +236,17 @@ static void activate(GtkApplication *application, gpointer data G_GNUC_UNUSED)
     adw_preferences_group_set_description(group, "Discovery only. Pairing and input reports are not implemented.");
     ui->adapter = add_row(group, "Bluetooth adapter");
     ui->state = add_row(group, "Emulator state");
-    ui->connection = add_row(group, "Connection state");
+    ui->connection = add_row(group, "Connected adapter peers");
+    adw_preferences_row_set_use_markup(ADW_PREFERENCES_ROW(ui->connection), FALSE);
     gtk_box_append(GTK_BOX(body), GTK_WIDGET(group));
     GtkWidget *buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     ui->start = gtk_button_new_with_label("Start advertising");
     ui->stop = gtk_button_new_with_label("Stop advertising");
     ui->sync = gtk_button_new_with_label("Sync");
-    GtkWidget *actions[] = {ui->start, ui->stop, ui->sync};
-    const char *methods[] = {"start", "stop", "sync"};
-    for (guint i = 0; i < 3; i++) {
+    ui->disconnect = gtk_button_new_with_label("Disconnect peer");
+    GtkWidget *actions[] = {ui->start, ui->stop, ui->sync, ui->disconnect};
+    const char *methods[] = {"start", "stop", "sync", "disconnect"};
+    for (guint i = 0; i < G_N_ELEMENTS(actions); i++) {
         g_object_set_data(G_OBJECT(actions[i]), "method", (gpointer)methods[i]);
         g_signal_connect(actions[i], "clicked", G_CALLBACK(action_clicked), ui);
         gtk_box_append(GTK_BOX(buttons), actions[i]);

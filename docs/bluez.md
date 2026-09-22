@@ -38,8 +38,8 @@ BR/EDR or disturb other Bluetooth peripherals.
 
 BlueZ 5.82 emitted manufacturer data **before** Flags. Both AD structures, values,
 length and PDU type match the reference, but byte-for-byte ordering does not.
-Standard AD parsing is order-independent; whether Nintendo's filter accepts this
-ordering is **unverified**. D-Bus offers structured advertisement data rather than
+The user's console accepted a connection with this ordering on 2026-09-22;
+this does not establish compatibility with every console/firmware. D-Bus offers structured advertisement data rather than
 full PDU ownership. Do not claim an exact replay.
 
 The backend keeps the real adapter identity. D-Bus does not offer a per-advertisement
@@ -98,6 +98,11 @@ backend. No failed attempt before Device1 creation can be guaranteed visible in
 GTK's D-Bus event log.
 
 ## Escalation order and evidence needed
+
+The first console test reached a BLE connection. The registration failure seen
+on subsequent starts was traced to an existing peripheral link and the adapter's
+reported LE state combinations; it did not require replacing D-Bus. See
+[the measured failure and recovery](validation.md#connection-coexistence-and-first-console-link).
 
 1. **D-Bus:** current discovery probe; capture accepted/rejected advertising,
    incoming link attempts and actual ATT handle use on the console.

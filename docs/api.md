@@ -20,6 +20,7 @@ client allows 2 MiB) and apply a timeout.
 {"version":1,"method":"start"}
 {"version":1,"method":"sync"}
 {"version":1,"method":"stop"}
+{"version":1,"method":"disconnect","address":"AA:BB:CC:DD:EE:FF"}
 {"version":1,"method":"logs","after":0}
 ```
 
@@ -35,6 +36,11 @@ accepted. Missing `after` defaults to zero.
   pairing is initiated. Calling start/sync while advertising is idempotent.
 - `stop`: unregister this application's advertisement and GATT application. Existing
   adapter links are not forcibly disconnected. Idempotent when already stopped.
+- `disconnect`: explicitly disconnect one currently observed adapter peer, selected
+  by its full Bluetooth address (case-insensitive). No wildcard or implicit peer
+  selection is accepted. The peer need not be a Switch: check its identity first.
+  This calls Device1.Disconnect, not RemoveDevice, and never forgets pairing.
+  Other peer links and this application's advertising registration are unchanged.
 - `logs`: events with sequence greater than `after`, plus `cursor` and `oldest`.
 
 ## Responses
@@ -47,12 +53,16 @@ accepted. Missing `after` defaults to zero.
 The first example is abbreviated. Successful mutation responses include the same
 complete status schema as `status`. `ok:true` means the request was accepted:
 **poll status until `state` is no longer `transitioning`**. Registration can fail
-asynchronously, leaving `state:error` with a diagnostic. A failed advertisement
-registration can leave `gatt_registered:true`; `stop` removes it.
+asynchronously. A failed advertisement registration automatically unregisters the
+probe GATT application, then leaves `state:error` with a diagnostic. Cleanup does
+not disconnect any peer. If cleanup itself fails, inspect `gatt_registered` and
+use `stop` or exit the daemon to release its D-Bus registrations.
 
 States: `idle`, `transitioning`, `advertising`, `error`. Connection state is separate:
 `peers` lists connected devices on this adapter, not authenticated Switch sessions.
-Peers observed during daemon startup are logged with `initial=true`. The daemon
+Peers first seen in an adapter snapshot are logged once as `peer_already_connected`
+with `initial=true`, and have `first_seen_in_snapshot:true` in status. Repeated
+snapshot reads do not invent connection events. The daemon
 neither initiates connections nor knows which local GATT service caused a link.
 `bluez_paired`, when present, is BlueZ's property, not Nintendo pairing completion.
 `advertising_registered` tracks registration, not continuous on-air transmission
@@ -69,6 +79,8 @@ restart: if `cursor < after`, reset to zero. Logs are not a durable audit store.
 
 `src/client.h` provides `jc_client_request(path, method, after, error)` returning an
 owned `JsonObject`. Link the client library with GIO and JSON-GLib; GTK is unnecessary.
+Use `jc_client_request_full(path, "disconnect", 0, peer_address, error)` for a
+targeted disconnect; the simpler entry point remains available for existing clients.
 For a shell probe (optional `socat` and `jq` packages):
 
 ```sh
@@ -78,10 +90,13 @@ printf '%s\n' '{"version":1,"method":"status"}' |
 
 The GUI uses this same API from worker tasks so slow IPC cannot block GTK. A custom
 socket can be selected for the GUI with `PCBLE2JOYCON2_SOCKET`.
+Its Disconnect peer button targets the displayed address and is enabled only
+when exactly one connected peer is available; multiple peers require an explicit
+CLI address. No program automatically disconnects a peer on advertisement failure.
 
 ## Future control API
 
-Buttons, sticks, mouse deltas, reconnect, disconnect and forget-pairing are not
+Buttons, sticks, mouse deltas, reconnect and forget-pairing are not
 implemented and are rejected as unknown methods. A later version will separate
 persistent controller state from accumulated mouse deltas and allow atomic updates
 of both in one report. Sustained low-latency input transport requires measurements,

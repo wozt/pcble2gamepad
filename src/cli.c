@@ -9,20 +9,22 @@ int main(int argc, char **argv)
         {"after", 0, 0, G_OPTION_ARG_INT64, &after, "Read logs after this sequence", "SEQ"},
         {NULL}
     };
-    g_autoptr(GOptionContext) context = g_option_context_new("status|start|stop|sync|logs");
+    g_autoptr(GOptionContext) context = g_option_context_new("status|start|stop|sync|logs|disconnect ADDRESS");
     g_option_context_add_main_entries(context, options, NULL);
     g_autoptr(GError) error = NULL;
     if (!g_option_context_parse(context, &argc, &argv, &error)) {
         g_printerr("%s\n", error->message);
         return 2;
     }
-    if (argc != 2 || after < 0) {
+    gboolean disconnect = argc > 1 && g_str_equal(argv[1], "disconnect");
+    if (argc != (disconnect ? 3 : 2) || after < 0) {
         g_autofree char *help = g_option_context_get_help(context, TRUE, NULL);
         g_printerr("%s", help);
         return 2;
     }
     if (!socket_path) socket_path = jc_socket_path();
-    g_autoptr(JsonObject) response = jc_client_request(socket_path, argv[1], after, &error);
+    g_autoptr(JsonObject) response = jc_client_request_full(socket_path, argv[1], after,
+                                                         disconnect ? argv[2] : NULL, &error);
     if (!response) { g_printerr("%s\n", error->message); return 1; }
     g_autoptr(JsonNode) node = json_node_new(JSON_NODE_OBJECT);
     json_node_set_object(node, response);
