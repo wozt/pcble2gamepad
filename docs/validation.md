@@ -231,3 +231,37 @@ The four existing regression suites passed in the normal and ASan/UBSan builds.
 The diagnostic was exercised on the real adapter; invalid arguments and an
 unprivileged capability read were also checked. These tests do not establish
 working Joy-Con pairing or input emulation.
+
+## Second adapter: CSR comparison
+
+On 2026-09-22 the user attached a USB `0a12:0001` dongle reporting product
+`CSR8510 A10`, HCI/LMP 4.0, revision/subversion `0x22bb`. It appeared as `hci1`
+at `00:1A:7D:DA:71:13`. Read-only diagnostics returned LE features
+`0100000000000000` and supported states `ffffff1f00000000`: neither LE 2M nor
+data-length extension is advertised. These are controller-reported identities
+and capabilities, not verification of the silicon's authenticity.
+
+The existing C daemon was run with `--adapter hci1`, normal system BlueZ settings,
+and the same right-controller advertisement/GATT definitions. No driver, firmware,
+system configuration or Realtek adapter settings were changed.
+
+Advertising started at `19:49:09.913107Z`; the previously identified Switch address
+connected at `19:49:09.958004Z`. HCI reported success, PC peripheral role, 15 ms
+connection interval, zero latency and 2000 ms supervision timeout. Approximately
+24 seconds elapsed before advertising was stopped. All observed ATT requests
+originated at the PC: BlueZ's MTU request was rejected, then its discovery and GAP
+reads received responses. No console-initiated ATT request, Nintendo command or
+vendor GATT callback was observed. No connection-update-complete event was present
+in the observation window. The user again saw only their wired controller.
+
+This reproduces the initialization stall on a second controller implementation;
+switching from Realtek to this CSR dongle alone does not resolve it. It does not
+prove a mandatory LE 2M requirement, since neither adapter supports that mode.
+The passive GATT experiment above was performed on Realtek only; this CSR test
+used normal reverse discovery and should not be described as a passive-server test.
+
+Advertisement/GATT registrations were removed, the selected console peer was
+disconnected, and the daemon and monitor stopped. Local evidence is saved in
+`artifacts/2026-09-22-csr-discovery/`, including capabilities, daemon log, HCI capture,
+decoded traffic and final status. This was a hardware experiment with unchanged
+application code; no new unit tests were needed.
