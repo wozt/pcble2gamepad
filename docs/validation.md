@@ -265,3 +265,45 @@ disconnected, and the daemon and monitor stopped. Local evidence is saved in
 `artifacts/2026-09-22-csr-discovery/`, including capabilities, daemon log, HCI capture,
 decoded traffic and final status. This was a hardware experiment with unchanged
 application code; no new unit tests were needed.
+
+### CSR passive server and 15 ms preference
+
+Two further controlled tests on 2026-09-22 used temporary BlueZ runtime profiles,
+with the original system configuration left untouched:
+
+| Test | Reverse discovery | Preferred interval | Observation |
+| --- | --- | --- | --- |
+| CSR baseline, 19:49 UTC | Enabled | Default 30–50 ms | Console answers BlueZ; no console ATT requests |
+| CSR passive, 19:51 UTC | Disabled | Default 30–50 ms | No ATT packets; PC sends L2CAP parameter request |
+| CSR passive, 19:52 UTC | Disabled | 15 ms | No ATT packets and no L2CAP parameter request |
+
+The passive test connected at `19:51:17.508225Z` and advertised until
+`19:51:48.364155Z`. The 15 ms test connected at `19:52:10.604165Z`; the first link
+was observed for about 47 seconds before an explicit test disconnect. Because
+advertising was still active, the console immediately reconnected. Advertising
+was subsequently stopped and that second link explicitly disconnected too.
+Neither connection showed ATT traffic. No additional console-screen report was
+received during these two tests; the result is based on captured host traffic.
+
+The second profile added `[LE] MinConnectionInterval=12` and
+`MaxConnectionInterval=12` (1.25 ms units). The capture confirms successful MGMT
+Set Default System Configuration with both values `0x000c`, and a successful
+incoming connection at 15 ms. Unlike the earlier passive test, Linux did not send
+an L2CAP Connection Parameter Update Request. Thus this experiment actually
+removed both observed host-initiated procedures; merely editing configuration
+was not treated as evidence that the radio behavior changed.
+
+Before removing the temporary override, the original interval preferences were
+explicitly restored to 24/40 units. The capture confirms a successful management
+command carrying `0x0018` and `0x0028`. The normal BlueZ service was then restored;
+final application status was idle with no peers, and both test processes stopped.
+Evidence is under `artifacts/2026-09-22-csr-passive/` and
+`artifacts/2026-09-22-csr-15ms/` with restricted local permissions.
+
+These changes do not suffice to trigger console ATT activity. Neither this result
+nor the earlier comparisons proves that LE 2M is mandatory, or identifies a driver
+defect. The remaining pre-ATT Link Layer exchanges are not fully observable in
+these host captures. Exact GATT implementation and pairing responses remain future
+work, but cannot yet be exercised by the console. Further experiments should target
+an independently evidenced difference rather than repeat these settings or claim
+that rewriting the Linux driver will supply missing radio capabilities.
