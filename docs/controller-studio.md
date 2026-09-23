@@ -17,7 +17,14 @@ controller backend. The interface has five pages:
   copy them to the clipboard and can enable detailed HID traffic when needed.
 
 Profiles are stored as readable INI files in
-`~/.config/pcble2gamepad/profiles`. The default profile is created on first run.
+`~/.config/pcble2gamepad/profiles`. Profile-level input settings are written
+automatically when changed. The default profile is created on first run.
+
+Controller Studio keeps launch/runtime preferences in
+`~/.config/pcble2gamepad/settings.ini`, including the last profile, input source,
+Enable input state, preferred physical gamepad GUID, automatic gamepad selection
+and detailed HID logging. The Nintendo face-button layout option swaps A/B and X/Y
+for SDL gamepads only; keyboard actions retain their explicit Nintendo labels.
 The live controller drawing previews the composed input frame before it is sent.
 
 ## Process boundary

@@ -102,9 +102,15 @@ the console as a complete pair.
 
 Select **Keyboard** or **PC controller**, configure the corresponding bindings,
 then enable input. Escape immediately pauses keyboard input. The backend returns
-buttons and sticks to neutral if updates stop for 500 ms. Closing Controller
-Studio stops the session and restores BlueZ. Profiles are INI files under
-`~/.config/pcble2gamepad/profiles`.
+buttons and sticks to neutral if updates stop for 500 ms. PC-controller input can
+use the Nintendo face-button layout option, which swaps A/B and X/Y without
+changing explicit keyboard bindings.
+
+Controller Studio remembers the last profile, input source, Enable input state,
+preferred physical gamepad, automatic gamepad selection and diagnostics preference
+in `~/.config/pcble2gamepad/settings.ini`. Input-profile settings are saved under
+`~/.config/pcble2gamepad/profiles`. Closing Controller Studio stops the session and
+restores BlueZ.
 
 Repetitive HID receive packets and periodic status lines are hidden by default.
 Enable **Detailed HID traffic** on the Diagnostics page when protocol-level output

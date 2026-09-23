@@ -54,6 +54,7 @@ static void test_profile_roundtrip(void)
     original.invert[3] = TRUE;
     original.swap_sticks = TRUE;
     original.background = TRUE;
+    original.swap_face_buttons = FALSE;
     original.emulated_controller = 1;
     original.keys[0] = 'p';
     g_autofree char *path = g_strdup_printf("%s/input-profile-%u.ini", g_get_tmp_dir(), g_random_int());
@@ -68,6 +69,7 @@ static void test_profile_roundtrip(void)
     g_assert_true(loaded.invert[3]);
     g_assert_true(loaded.swap_sticks);
     g_assert_true(loaded.background);
+    g_assert_false(loaded.swap_face_buttons);
     g_assert_cmpint(loaded.emulated_controller, ==, 1);
     g_unlink(path);
 }
@@ -87,11 +89,14 @@ static void test_legacy_profile_defaults_to_pro(void)
     g_assert_no_error(error);
     g_assert_true(g_key_file_remove_group(key_file, "Controller", &error));
     g_assert_no_error(error);
+    g_assert_true(g_key_file_remove_key(key_file, "Input", "swap_face_buttons", &error));
+    g_assert_no_error(error);
     g_assert_true(g_key_file_save_to_file(key_file, path, &error));
     g_assert_no_error(error);
     g_assert_true(input_profile_load(&loaded, path, &error));
     g_assert_no_error(error);
     g_assert_cmpint(loaded.emulated_controller, ==, 0);
+    g_assert_true(loaded.swap_face_buttons);
     g_unlink(path);
 }
 
@@ -114,8 +119,14 @@ static void test_virtual_gamepad(void)
     g_assert_cmpint(SDL_JoystickSetVirtualAxis(joystick, SDL_CONTROLLER_AXIS_LEFTX, 32767), ==, 0);
     SDL_GameControllerUpdate();
     input_gamepad(&profile, controller, pressed, axes);
-    g_assert_true(pressed[0]);
+    g_assert_false(pressed[0]);
+    g_assert_true(pressed[1]);
     g_assert_cmpfloat(axes[0], >, .99);
+
+    profile.swap_face_buttons = FALSE;
+    input_gamepad(&profile, controller, pressed, axes);
+    g_assert_true(pressed[0]);
+    g_assert_false(pressed[1]);
     SDL_GameControllerClose(controller);
     g_assert_cmpint(SDL_JoystickDetachVirtual(device), ==, 0);
     SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);

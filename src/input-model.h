@@ -8,7 +8,7 @@ typedef struct {
     int buttons[INPUT_BUTTONS];
     int emulated_controller;
     double deadzone, sensitivity;
-    gboolean invert[4], swap_sticks, background;
+    gboolean invert[4], swap_sticks, background, swap_face_buttons;
 } InputProfile;
 typedef struct { guint8 buttons[3]; guint16 sticks[4]; double axes[4]; gboolean active[INPUT_ACTIONS]; } InputFrame;
 extern const char *input_action_names[INPUT_ACTIONS];

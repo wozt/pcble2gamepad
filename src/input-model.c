@@ -9,6 +9,7 @@ void input_profile_defaults(InputProfile *p,gboolean azerty) {
     memcpy(p->keys,keys,sizeof(keys));if(azerty){p->keys[18]='z';p->keys[20]='q';}
     const int buttons[INPUT_BUTTONS]={SDL_CONTROLLER_BUTTON_A,SDL_CONTROLLER_BUTTON_B,SDL_CONTROLLER_BUTTON_X,SDL_CONTROLLER_BUTTON_Y,SDL_CONTROLLER_BUTTON_LEFTSHOULDER,SDL_CONTROLLER_BUTTON_RIGHTSHOULDER,SDL_CONTROLLER_BUTTON_MAX,SDL_CONTROLLER_BUTTON_MAX+1,SDL_CONTROLLER_BUTTON_BACK,SDL_CONTROLLER_BUTTON_START,SDL_CONTROLLER_BUTTON_GUIDE,SDL_CONTROLLER_BUTTON_MISC1,SDL_CONTROLLER_BUTTON_LEFTSTICK,SDL_CONTROLLER_BUTTON_RIGHTSTICK,SDL_CONTROLLER_BUTTON_DPAD_UP,SDL_CONTROLLER_BUTTON_DPAD_DOWN,SDL_CONTROLLER_BUTTON_DPAD_LEFT,SDL_CONTROLLER_BUTTON_DPAD_RIGHT};
     memcpy(p->buttons,buttons,sizeof(buttons));p->deadzone=.12;p->sensitivity=1;
+    p->swap_face_buttons=TRUE;
 }
 gboolean input_profile_save(const InputProfile *p,const char *path,GError **error) {
     g_autoptr(GKeyFile) k=g_key_file_new();
@@ -23,6 +24,7 @@ gboolean input_profile_save(const InputProfile *p,const char *path,GError **erro
     g_key_file_set_double(k,"Sticks","deadzone",p->deadzone);g_key_file_set_double(k,"Sticks","sensitivity",p->sensitivity);
     g_key_file_set_boolean_list(k,"Sticks","invert",invert,4);
     g_key_file_set_boolean(k,"Sticks","swap",p->swap_sticks);g_key_file_set_boolean(k,"Input","background",p->background);
+    g_key_file_set_boolean(k,"Input","swap_face_buttons",p->swap_face_buttons);
     return g_key_file_save_to_file(k,path,error);
 }
 gboolean input_profile_load(InputProfile *p,const char *path,GError **error) {
@@ -43,6 +45,8 @@ gboolean input_profile_load(InputProfile *p,const char *path,GError **error) {
     invert=g_key_file_get_boolean_list(k,"Sticks","invert",&n,NULL);
     if(!invert || n!=4)goto invalid;
     memcpy(next.invert,invert,sizeof(next.invert));next.swap_sticks=g_key_file_get_boolean(k,"Sticks","swap",NULL);next.background=g_key_file_get_boolean(k,"Input","background",NULL);
+    if(g_key_file_has_key(k,"Input","swap_face_buttons",NULL))
+        next.swap_face_buttons=g_key_file_get_boolean(k,"Input","swap_face_buttons",NULL);
     *p=next;return TRUE;
 invalid:
     g_set_error_literal(error,G_IO_ERROR,G_IO_ERROR_INVALID_DATA,"Invalid controller profile");return FALSE;
@@ -53,6 +57,10 @@ void input_gamepad(const InputProfile *p,SDL_GameController *pad,gboolean presse
     for(int i=0;i<INPUT_BUTTONS;i++) {
         int b=p->buttons[i];if(b<0)continue;
         pressed[i]=b<SDL_CONTROLLER_BUTTON_MAX?SDL_GameControllerGetButton(pad,(SDL_GameControllerButton)b)!=0:SDL_GameControllerGetAxis(pad,b==SDL_CONTROLLER_BUTTON_MAX?SDL_CONTROLLER_AXIS_TRIGGERLEFT:SDL_CONTROLLER_AXIS_TRIGGERRIGHT)>16000;
+    }
+    if(p->swap_face_buttons) {
+        gboolean value=pressed[0];pressed[0]=pressed[1];pressed[1]=value;
+        value=pressed[2];pressed[2]=pressed[3];pressed[3]=value;
     }
     for(int i=0;i<4;i++)axes[i]=SDL_GameControllerGetAxis(pad,(SDL_GameControllerAxis)i)/32768.0;
     axes[1]=-axes[1];axes[3]=-axes[3];
