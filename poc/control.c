@@ -14,6 +14,8 @@ struct ProControl {
     char *peer;
     unsigned tx,rx;
     GQueue logs;
+    ProReconnectFunc reconnect;
+    gpointer reconnect_data;
 };
 void pro_control_log(ProControl *c,const char *event,const char *detail) {
     if(!c)return;
@@ -62,6 +64,22 @@ static char *request(gpointer data,const char *text) {
         c->state->sticks[2]=2070;c->state->sticks[3]=2013;*c->release_at=0;
     } else if(!strcmp(method,"stop")) {
         g_timeout_add(100,stop,c->loop);
+    } else if(!strcmp(method,"reconnect")) {
+        const char *address=json_object_get_string_member_with_default(o,"address","");
+
+        if(!c->reconnect)
+            return failure("Reconnect is not available for this controller session");
+
+        if(!g_regex_match_simple("^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$",
+                                 address,0,0))
+            return failure("Reconnect requires a valid Bluetooth address");
+
+        GError *error=NULL;
+        if(!c->reconnect(address,c->reconnect_data,&error)) {
+            char *response=failure(error?error->message:"Reconnect failed");
+            g_clear_error(&error);
+            return response;
+        }
     } else if(!strcmp(method,"logging")) {
         JsonNode *enabled=json_object_get_member(o,"enabled");
         if(!enabled || !JSON_NODE_HOLDS_VALUE(enabled) || json_node_get_value_type(enabled)!=G_TYPE_BOOLEAN)return failure("Expected enabled boolean");
@@ -102,6 +120,12 @@ ProControl *pro_control_new(ProState *state,gint64 *release_at,gboolean *verbose
     if(!c->ipc) {g_free(c);return NULL;}
     pro_control_log(c,"ipc_ready",path);return c;
 }
+void pro_control_set_reconnect(ProControl *c,ProReconnectFunc callback,gpointer user_data) {
+    if(!c)return;
+    c->reconnect=callback;
+    c->reconnect_data=user_data;
+}
+
 void pro_control_update(ProControl *c,const char *peer,gboolean initialized,unsigned tx,unsigned rx) {
     if(!c)return;
     g_free(c->peer);c->peer=g_strdup(peer);c->initialized=initialized;c->tx=tx;c->rx=rx;

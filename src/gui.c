@@ -8,7 +8,7 @@
 #include <glib/gstdio.h>
 
 typedef struct {
-    int refs;gboolean closed,closing,busy,online,loading;
+    int refs;gboolean closed,closing,busy,online,connected,loading;
     GtkApplication *app;GtkWindow *window;AdwToastOverlay *toast;
     GtkStack *stack;GtkLabel *status,*peer,*error,*metrics,*source_hint,*controller_hint,*hero_title,*paired_console;
     GtkWidget *drawing,*start,*sync,*stop,*arm,*capture_hint,*secondary_row;
@@ -50,7 +50,13 @@ static void update_controls(Ui *u) {
     gboolean can_reconnect=!pair_mode(u) &&
         u->paired_switch_address && *u->paired_switch_address &&
         paired_adapter_selected(u);
-    gtk_widget_set_sensitive(u->start,!u->online && !u->launcher && adapters_ok && can_reconnect);
+    gboolean reconnect_existing=
+        u->online && !u->connected && !pair_mode(u) && can_reconnect;
+    gboolean reconnect_new=
+        !u->online && !u->launcher && can_reconnect;
+
+    gtk_widget_set_sensitive(u->start,
+        adapters_ok && (reconnect_existing || reconnect_new));
     gtk_widget_set_sensitive(u->sync,!u->online && !u->launcher && adapters_ok);
     gtk_widget_set_sensitive(u->stop,u->online);
     gtk_widget_set_sensitive(GTK_WIDGET(u->controllers),!u->online && !u->launcher);
@@ -396,6 +402,7 @@ static void complete(GObject *source,GAsyncResult *result,gpointer data) {
     u->online=o && json_object_get_boolean_member_with_default(o,"ok",FALSE);
     if(u->online) {
         JsonObject *s=json_object_get_object_member(o,"result");const char *state=json_object_get_string_member_with_default(s,"state","waiting");
+        u->connected=!strcmp(state,"connected");
         gboolean simulated=json_object_get_boolean_member_with_default(s,"simulated",FALSE);
         gtk_label_set_text(u->status,simulated?"SIMULATION":!strcmp(state,"connected")?"CONNECTED":"WAITING FOR CONSOLE");
         const char *peer_address=json_object_get_string_member_with_default(s,"peer","");
@@ -426,6 +433,7 @@ static void complete(GObject *source,GAsyncResult *result,gpointer data) {
         if(logs)for(guint i=0;i<json_array_get_length(logs);i++)g_string_append_printf(text,"%s\n",json_array_get_string_element(logs,i));
         gtk_text_buffer_set_text(u->logs,text->str,-1);g_string_free(text,TRUE);
     } else {
+        u->connected=FALSE;
         gtk_label_set_text(u->status,"OFFLINE");gtk_label_set_text(u->peer,"Start a Bluetooth session to connect your console.");
         if(o)gtk_label_set_text(u->error,json_object_get_string_member_with_default(o,"error","Request failed"));
         else if(strcmp(method,"status"))gtk_label_set_text(u->error,e?e->message:"Backend unavailable");
@@ -442,7 +450,11 @@ static void request(Ui *u,const char *method) {
     if(!strcmp(method,"input")){
         JsonArray *a=json_array_new();for(int i=0;i<3;i++)json_array_add_int_element(a,u->frame.buttons[i]);json_object_set_array_member(r->request,"buttons",a);
         a=json_array_new();for(int i=0;i<4;i++)json_array_add_int_element(a,u->frame.sticks[i]);json_object_set_array_member(r->request,"sticks",a);
-    } else if(!strcmp(method,"logging"))json_object_set_boolean_member(r->request,"enabled",gtk_switch_get_active(u->traffic_logs));
+    } else if(!strcmp(method,"reconnect")) {
+        if(u->paired_switch_address)
+            json_object_set_string_member(r->request,"address",u->paired_switch_address);
+    } else if(!strcmp(method,"logging"))
+        json_object_set_boolean_member(r->request,"enabled",gtk_switch_get_active(u->traffic_logs));
     u->refs++;GTask *task=g_task_new(NULL,NULL,complete,u);g_task_set_task_data(task,r,request_free);g_task_run_in_thread(task,worker);g_object_unref(task);
 }
 static gboolean tick(gpointer data) {
@@ -638,6 +650,18 @@ static void launch_switch_session(Ui *u,gboolean reconnect) {
 
 static void start(GtkButton *b,Ui *u) {
     (void)b;
+
+    /*
+     * Prefer reconnecting inside the existing privileged backend. This keeps
+     * the Bluetooth identity and BlueZ state established during pairing.
+     */
+    if(u->online && !u->connected) {
+        gtk_label_set_text(u->status,"RECONNECTING");
+        gtk_label_set_text(u->error,"");
+        request(u,"reconnect");
+        return;
+    }
+
     launch_switch_session(u,TRUE);
 }
 static void sync_clicked(GtkButton *b,Ui *u) {

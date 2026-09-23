@@ -21,13 +21,15 @@ static GDBusConnection *bus;
 static ProControl *desktop;
 static gboolean mock_mode;
 static GMainLoop *loop;
-static char adapter[64], allowed_adapter[64], peer[18];
+static char adapter[64], allowed_adapter[64], peer[18], last_peer[18];
 static ControllerType controller_type=CONTROLLER_PRO;
 static const char *controller_alias="Pro Controller",*control_socket="pro.sock";
 static gboolean shared_profile;
 static gboolean verbose_traffic;
 static gboolean reconnect_mode;
 static char reconnect_peer[18];
+static bdaddr_t selected_local_address;
+static gboolean have_selected_local_address;
 static gboolean select_controller(const char *type) {
     if(!strcmp(type,"pro")){controller_type=CONTROLLER_PRO;controller_alias="Pro Controller";control_socket="pro.sock";return TRUE;}
     if(!strcmp(type,"joycon-l")){controller_type=CONTROLLER_JOYCON_L;controller_alias="Joy-Con (L)";control_socket="joycon-left.sock";return TRUE;}
@@ -239,6 +241,7 @@ static gboolean connect_outbound(const bdaddr_t *local,const char *address) {
     }
 
     g_strlcpy(peer,address,sizeof(peer));
+    g_strlcpy(last_peer,address,sizeof(last_peer));
     slow_input_frequency=TRUE;
     saw_interrupt_output=FALSE;
     next_report_at=0;
@@ -271,6 +274,44 @@ failed:
     return FALSE;
 }
 
+static gboolean reconnect_from_control(const char *address,
+                                       gpointer user_data,
+                                       GError **error) {
+    (void)user_data;
+
+    if(controller_type!=CONTROLLER_PRO) {
+        g_set_error_literal(error,G_IO_ERROR,G_IO_ERROR_NOT_SUPPORTED,
+                            "Reconnect is currently available for Pro Controller only");
+        return FALSE;
+    }
+
+    if(!have_selected_local_address) {
+        g_set_error_literal(error,G_IO_ERROR,G_IO_ERROR_FAILED,
+                            "Bluetooth adapter address is unavailable");
+        return FALSE;
+    }
+
+    if(channels[0]>=0 || channels[1]>=0) {
+        g_set_error_literal(error,G_IO_ERROR,G_IO_ERROR_BUSY,
+                            "Controller is already connected");
+        return FALSE;
+    }
+
+    reconnect_mode=TRUE;
+    g_strlcpy(reconnect_peer,address,sizeof(reconnect_peer));
+
+    log_event("reconnect_in_session",
+        "Reusing the active pairing backend and BlueZ controller state");
+
+    if(!connect_outbound(&selected_local_address,address)) {
+        g_set_error_literal(error,G_IO_ERROR,G_IO_ERROR_FAILED,
+                            "Switch rejected the outbound HID connection");
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
 static gboolean accept_peer(gint fd,GIOCondition cond,gpointer user) {
     (void)cond;int index=GPOINTER_TO_INT(user);
     struct sockaddr_l2 addr={0};socklen_t size=sizeof(addr);
@@ -280,7 +321,9 @@ static gboolean accept_peer(gint fd,GIOCondition cond,gpointer user) {
     if(channels[index]>=0 || (peer[0] && strcmp(peer,address))) {
         log_event("peer_rejected",address);close(client);return G_SOURCE_CONTINUE;
     }
-    g_strlcpy(peer,address,sizeof(peer));channels[index]=client;
+    g_strlcpy(peer,address,sizeof(peer));
+    g_strlcpy(last_peer,address,sizeof(last_peer));
+    channels[index]=client;
     watches[index]=g_unix_fd_add(client,G_IO_IN|G_IO_HUP|G_IO_ERR,receive_packet,GINT_TO_POINTER(index));
     char msg[100];snprintf(msg,sizeof(msg),"peer=%s psm=%d",address,index?19:17);log_event("l2cap_connected",msg);
     if(channels[0]>=0 && channels[1]>=0) {
@@ -454,7 +497,10 @@ int main(int argc,char **argv) {
     GDBusNodeInfo *node=g_dbus_node_info_new_for_xml(xml,NULL);
     GVariant *v=property("Address");if(!v) goto cleanup;
     const char *address=g_variant_get_string(v,NULL);bdaddr_t local;
-    str2ba(address,&local);uint8_t mac[6];for(int i=0;i<6;i++) mac[i]=local.b[5-i];
+    str2ba(address,&local);
+    bacpy(&selected_local_address,&local);
+    have_selected_local_address=TRUE;
+    uint8_t mac[6];for(int i=0;i<6;i++) mac[i]=local.b[5-i];
     controller_init(&state,controller_type,mac);log_event("adapter_selected",address);g_variant_unref(v);
     for(int i=0;i<6;i++) {saved[i]=property(keys[i]);if(!saved[i]) goto cleanup;}
     if(!g_variant_get_boolean(saved[0])) {
@@ -573,6 +619,9 @@ int main(int argc,char **argv) {
     if(desktop_mode) {
         desktop=pro_control_new(&state,&release_at,&verbose_traffic,desktop_owner,FALSE,control_socket,loop,&err);
         if(!desktop)goto cleanup;
+
+        pro_control_set_reconnect(desktop,reconnect_from_control,NULL);
+
         while(!g_queue_is_empty(&pending_logs)) {
             PendingLog *item=g_queue_pop_head(&pending_logs);
             pro_control_log(desktop,item->event,item->detail);pending_log_free(item);
