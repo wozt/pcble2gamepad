@@ -110,55 +110,10 @@ static void changed(GDBusConnection *c,const char *sender,const char *path,const
     const char *signal,GVariant *args,gpointer data) {
     (void)c;(void)sender;(void)iface;(void)signal;(void)data;
     if (!g_str_has_prefix(path,adapter)) return;
-
     char *v=g_variant_print(args,TRUE), *msg=g_strdup_printf("path=%s %s",path,v);
     log_event("bluez_properties",msg);g_free(msg);g_free(v);
-
-    const char *changed_iface=NULL;
-    GVariant *properties=NULL,*invalidated=NULL;
-    g_variant_get(args,"(&s@a{sv}@as)",&changed_iface,&properties,&invalidated);
-
-    if(!strcmp(changed_iface,"org.bluez.Device1")) {
-        gboolean paired=FALSE,bonded=FALSE;
-
-        GVariant *value=g_variant_lookup_value(properties,"Paired",G_VARIANT_TYPE_BOOLEAN);
-        if(value) {
-            paired=g_variant_get_boolean(value);
-            g_variant_unref(value);
-        }
-
-        value=g_variant_lookup_value(properties,"Bonded",G_VARIANT_TYPE_BOOLEAN);
-        if(value) {
-            bonded=g_variant_get_boolean(value);
-            g_variant_unref(value);
-        }
-
-        if(paired || bonded) {
-            GError *error=NULL;
-            GVariant *reply=g_dbus_connection_call_sync(
-                bus,"org.bluez",path,
-                "org.freedesktop.DBus.Properties","Set",
-                g_variant_new("(ssv)",
-                    "org.bluez.Device1","Trusted",
-                    g_variant_new_boolean(TRUE)),
-                NULL,G_DBUS_CALL_FLAGS_NONE,3000,NULL,&error);
-
-            if(reply) {
-                g_variant_unref(reply);
-                log_event("bond_state",
-                    bonded
-                        ?"Switch reports bonded; marked trusted"
-                        :"Switch reports paired; marked trusted");
-            } else {
-                log_event("trust_error",error->message);
-                g_error_free(error);
-            }
-        }
-    }
-
-    g_variant_unref(properties);
-    g_variant_unref(invalidated);
 }
+
 static void reset_link(void) {
     for(int i=0;i<2;i++) {
         if(watches[i]) {g_source_remove(watches[i]);watches[i]=0;}
@@ -238,37 +193,10 @@ static gboolean connect_outbound(const bdaddr_t *local,const char *address) {
         }
 
         /*
-         * A paired Switch expects the returning controller link to be
-         * authenticated and encrypted before the HID L2CAP channel is
-         * established. Without an explicit security requirement Linux may
-         * leave the freshly-created ACL link unencrypted long enough for the
-         * Switch to terminate it before PSM 17 is even negotiated.
+         * Reconnect deliberately uses a plain Classic L2CAP socket.
+         * JoyControl and NXBT do not request an additional BlueZ
+         * authentication/security level for this path.
          */
-        struct bt_security security={0};
-        /*
-         * Switch controller bonds may use an unauthenticated BR/EDR link key.
-         * MEDIUM requests authentication/encryption without requiring a
-         * MITM-authenticated key as HIGH does.
-         */
-        security.level=BT_SECURITY_MEDIUM;
-
-        if(setsockopt(fd,SOL_BLUETOOTH,BT_SECURITY,
-                      &security,sizeof(security))<0) {
-            char failure[160];
-            snprintf(failure,sizeof(failure),
-                "psm=%d level=medium error=%s",
-                i?19:17,strerror(errno));
-            log_event("reconnect_security_error",failure);
-            close(fd);
-            goto failed;
-        }
-
-        char security_detail[96];
-        snprintf(security_detail,sizeof(security_detail),
-            "psm=%d level=BT_SECURITY_MEDIUM",
-            i?19:17);
-        log_event("reconnect_security",security_detail);
-
         struct sockaddr_l2 source={0};
         source.l2_family=AF_BLUETOOTH;
         bacpy(&source.l2_bdaddr,local);
@@ -537,50 +465,75 @@ int main(int argc,char **argv) {
     if(dd<0 || hci_read_class_of_dev(dd,old_class,2000)<0) {log_event("hci_error",strerror(errno));goto cleanup;}
     have_class=TRUE;
     static const GDBusInterfaceVTable av={.method_call=agent},pv={.method_call=profile};
-    agent_id=g_dbus_connection_register_object(bus,ROOT "/agent",node->interfaces[0],&av,NULL,NULL,&err);
-    profile_id=g_dbus_connection_register_object(bus,ROOT "/profile",node->interfaces[1],&pv,NULL,NULL,&err);
-    if(!agent_id || !profile_id) goto cleanup;
-    if(!invoke("/org/bluez","org.bluez.AgentManager1","RegisterAgent",g_variant_new("(os)",ROOT "/agent","DisplayYesNo"))) goto cleanup;
-    registered_agent=TRUE;
-    if(!invoke("/org/bluez","org.bluez.AgentManager1","RequestDefaultAgent",g_variant_new("(o)",ROOT "/agent"))) goto cleanup;
-    log_event("agent_registered","DisplayYesNo; accepts requests only on selected adapter");
-    char *record=NULL;if(!g_file_get_contents(argv[2],&record,NULL,&err)) goto cleanup;
-    GVariantBuilder opts;g_variant_builder_init(&opts,G_VARIANT_TYPE_VARDICT);
-    g_variant_builder_add(&opts,"{sv}","ServiceRecord",g_variant_new_string(record));g_free(record);
-    g_variant_builder_add(&opts,"{sv}","Role",g_variant_new_string("server"));
-    /*
-     * Require a genuine BR/EDR pairing before HID becomes usable.
-     * Without this BlueZ can complete a non-bonding association that appears
-     * Paired during the session but produces no persistent LinkKey.
-     */
-    g_variant_builder_add(&opts,"{sv}","RequireAuthentication",g_variant_new_boolean(TRUE));
-    g_variant_builder_add(&opts,"{sv}","RequireAuthorization",g_variant_new_boolean(FALSE));
-    g_variant_builder_add(&opts,"{sv}","AutoConnect",g_variant_new_boolean(TRUE));
-    if(!shared_profile) {
-        if(!invoke("/org/bluez","org.bluez.ProfileManager1","RegisterProfile",g_variant_new("(osa{sv})",ROOT "/profile","00001000-0000-1000-8000-00805f9b34fb",&opts))) goto cleanup;
-        registered_profile=TRUE;log_event("sdp_registered","Nintendo Switch controller HID record");
-    } else log_event("sdp_shared","Using the companion controller's HID profile");
+
+    if(!reconnect_mode) {
+        agent_id=g_dbus_connection_register_object(bus,ROOT "/agent",node->interfaces[0],&av,NULL,NULL,&err);
+        profile_id=g_dbus_connection_register_object(bus,ROOT "/profile",node->interfaces[1],&pv,NULL,NULL,&err);
+        if(!agent_id || !profile_id) goto cleanup;
+
+        if(!invoke("/org/bluez","org.bluez.AgentManager1","RegisterAgent",
+                   g_variant_new("(os)",ROOT "/agent","DisplayYesNo")))
+            goto cleanup;
+        registered_agent=TRUE;
+
+        if(!invoke("/org/bluez","org.bluez.AgentManager1","RequestDefaultAgent",
+                   g_variant_new("(o)",ROOT "/agent")))
+            goto cleanup;
+
+        log_event("agent_registered",
+            "DisplayYesNo; accepts requests only on selected adapter");
+
+        char *record=NULL;
+        if(!g_file_get_contents(argv[2],&record,NULL,&err))
+            goto cleanup;
+
+        GVariantBuilder opts;
+        g_variant_builder_init(&opts,G_VARIANT_TYPE_VARDICT);
+        g_variant_builder_add(&opts,"{sv}","ServiceRecord",
+                              g_variant_new_string(record));
+        g_free(record);
+
+        g_variant_builder_add(&opts,"{sv}","Role",
+                              g_variant_new_string("server"));
+        g_variant_builder_add(&opts,"{sv}","RequireAuthentication",
+                              g_variant_new_boolean(FALSE));
+        g_variant_builder_add(&opts,"{sv}","RequireAuthorization",
+                              g_variant_new_boolean(FALSE));
+        g_variant_builder_add(&opts,"{sv}","AutoConnect",
+                              g_variant_new_boolean(TRUE));
+
+        if(!shared_profile) {
+            if(!invoke("/org/bluez","org.bluez.ProfileManager1","RegisterProfile",
+                       g_variant_new("(osa{sv})",
+                           ROOT "/profile",
+                           "00001000-0000-1000-8000-00805f9b34fb",
+                           &opts)))
+                goto cleanup;
+
+            registered_profile=TRUE;
+            log_event("sdp_registered",
+                "Nintendo Switch controller HID record");
+        } else {
+            log_event("sdp_shared",
+                "Using the companion controller's HID profile");
+        }
+    } else {
+        log_event("reconnect_minimal",
+            "Skipping Agent, SDP and pairing configuration for outbound reconnect");
+    }
     if(reconnect_mode) {
         /*
-         * Normal use after the first pairing: do not advertise a new
-         * controller. Reuse the stored BlueZ bond and initiate HID from
-         * this controller identity toward the known Switch.
+         * Minimal reconnect path: preserve the current BlueZ state and only
+         * initiate the two Classic HID L2CAP channels to the known console.
          */
-        if(!set_property("Alias",g_variant_new_string(controller_alias)) ||
-           !set_property("Pairable",g_variant_new_boolean(FALSE)) ||
-           !set_property("Discoverable",g_variant_new_boolean(FALSE))) goto cleanup;
-
-        if(hci_write_class_of_dev(dd,0x002508,2000)<0) {
-            log_event("class_error",strerror(errno));goto cleanup;
-        }
-
         char ready[180];
         snprintf(ready,sizeof(ready),
-            "Name=%s class=0x002508 reconnect=%s; initiating PSM 17/19",
-            controller_alias,reconnect_peer);
+            "Minimal reconnect to %s; initiating PSM 17/19",
+            reconnect_peer);
         log_event("ready",ready);
 
-        if(!connect_outbound(&local,reconnect_peer))goto cleanup;
+        if(!connect_outbound(&local,reconnect_peer))
+            goto cleanup;
     } else {
         /*
          * First pairing / new console: the Switch initiates the HID
@@ -588,26 +541,6 @@ int main(int argc,char **argv) {
          */
         for(int i=0;i<2;i++) {
             listeners[i]=socket(AF_BLUETOOTH,SOCK_SEQPACKET|SOCK_NONBLOCK|SOCK_CLOEXEC,BTPROTO_L2CAP);
-
-            if(listeners[i]>=0) {
-                struct bt_security security={0};
-                security.level=BT_SECURITY_MEDIUM;
-
-                if(setsockopt(listeners[i],SOL_BLUETOOTH,BT_SECURITY,
-                              &security,sizeof(security))<0) {
-                    char detail[160];
-                    snprintf(detail,sizeof(detail),
-                        "psm=%d level=medium error=%s",
-                        i?19:17,strerror(errno));
-                    log_event("pairing_security_error",detail);
-                    goto cleanup;
-                }
-
-                char detail[96];
-                snprintf(detail,sizeof(detail),
-                    "psm=%d level=BT_SECURITY_MEDIUM",i?19:17);
-                log_event("pairing_security",detail);
-            }
 
             struct sockaddr_l2 bind_addr={.l2_family=AF_BLUETOOTH,.l2_psm=htobs(i?19:17)};
             bacpy(&bind_addr.l2_bdaddr,&local);

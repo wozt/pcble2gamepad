@@ -60,8 +60,19 @@ for controller in /sys/class/bluetooth/hci*; do
     }
 done
 dropin=/run/systemd/system/bluetooth.service.d/90-pcble2gamepad-pro-poc.conf
-[[ ! -e "$dropin" ]] || { echo 'A POC service override already exists'; exit 1; }
-systemctl is-active --quiet bluetooth || { echo 'Bluetooth service must already be active'; exit 1; }
+bluetooth_overridden=false
+
+if [[ -z $reconnect ]]; then
+    [[ ! -e "$dropin" ]] || {
+        echo 'A pcble2gamepad Bluetooth service override already exists'
+        exit 1
+    }
+fi
+
+systemctl is-active --quiet bluetooth || {
+    echo 'Bluetooth service must already be active'
+    exit 1
+}
 capture_owner=${PKEXEC_UID:-${SUDO_UID:-0}}
 
 # Runtime diagnostics are temporary session artifacts, not persistent state.
@@ -78,10 +89,12 @@ cleanup() {
     done
     for pid in "${backend_pids[@]}"; do wait "$pid" 2>/dev/null || true; done
     for pid in "${monitor_pids[@]}"; do kill -INT "$pid" 2>/dev/null || true; wait "$pid" || true; done
-    rm -f "$dropin"
-    rmdir /run/systemd/system/bluetooth.service.d 2>/dev/null || true
-    systemctl daemon-reload
-    systemctl restart bluetooth
+    if $bluetooth_overridden; then
+        rm -f "$dropin"
+        rmdir /run/systemd/system/bluetooth.service.d 2>/dev/null || true
+        systemctl daemon-reload
+        systemctl restart bluetooth
+    fi
     find "$capture" -type f -exec chmod 600 {} +
     if [[ $capture_owner != 0 ]]; then chown -R "$capture_owner" "$capture"; fi
     echo "Normal BlueZ restored. Private capture: $capture"
@@ -90,14 +103,20 @@ trap cleanup EXIT
 # The foreground timeout forwards terminal signals to the POC, which restores adapter properties.
 trap 'exit 130' INT
 trap 'exit 143' TERM
-mkdir -p /run/systemd/system/bluetooth.service.d
-cat > "$dropin" <<'SERVICE'
+if [[ -z $reconnect ]]; then
+    mkdir -p /run/systemd/system/bluetooth.service.d
+    cat > "$dropin" <<'SERVICE'
 [Service]
 ExecStart=
-ExecStart=/usr/libexec/bluetooth/bluetoothd --compat --noplugin=*
+ExecStart=/usr/libexec/bluetooth/bluetoothd --compat --noplugin=input
 SERVICE
-systemctl daemon-reload
-systemctl restart bluetooth
+    bluetooth_overridden=true
+    systemctl daemon-reload
+    systemctl restart bluetooth
+else
+    echo 'Reconnect mode: keeping the existing BlueZ service and controller state.'
+fi
+
 btmon -i "$adapter" -w "$capture/hci.btsnoop" > "$capture/btmon.log" 2>&1 &
 monitor_pids+=("$!")
 if [[ -n $secondary ]]; then

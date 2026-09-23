@@ -37,10 +37,10 @@ operations.
   HID PSM 17/19.
 - After the first successful Pro Controller session, the console Bluetooth address
   and the local Bluetooth adapter address are persisted in `settings.ini`.
-- **Reconnect paired Switch** reuses that BlueZ bond and local controller identity.
-  The PC initiates L2CAP control PSM 17 followed by interrupt PSM 19 toward the
-  stored Switch address. The console should be powered on and outside
-  Change Grip/Order.
+- **Reconnect paired Switch** uses a minimal outbound path. It leaves the normal
+  BlueZ service untouched and directly initiates L2CAP control PSM 17 followed by
+  interrupt PSM 19 toward the stored Switch address. The console should be powered
+  on and outside Change Grip/Order.
 - Reconnection is adapter-specific because the Bluetooth bond belongs to that local
   adapter identity.
 
@@ -52,9 +52,11 @@ profile has been validated on real hardware.
 The GTK process never opens Bluetooth sockets and does not run as root. Starting a
 session invokes the installed `run-classic.sh` through `pkexec`. Its Polkit action
 allows the exact root-owned launcher for an active local session without a password;
-it does not authorize arbitrary commands. The runner
-starts a C backend that owns the temporary Agent1, SDP record and L2CAP PSM 17/19
-listeners. The backend temporarily powers the selected adapter if BlueZ's restart
+it does not authorize arbitrary commands. For first pairing, the runner temporarily
+restarts BlueZ with only the `input` plugin disabled and starts a C backend that owns
+the temporary Agent1, SDP record and L2CAP PSM 17/19 listeners. Reconnect sessions do
+not restart BlueZ or register a new pairing agent/profile; they only open the outbound
+Classic HID channels. The backend temporarily powers the selected adapter if BlueZ's restart
 left it off, then restores the previous power state. It also records a private
 `btmon` capture in a per-session `/tmp/pcble2gamepad-UID-XXXXXXXX` directory.
 The backend accepts commands

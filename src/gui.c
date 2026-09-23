@@ -703,7 +703,7 @@ static void activate(GtkApplication *app,gpointer unused) {
     u->controller_hint=GTK_LABEL(label("First pairing uses Pair / Sync new Switch and Change Grip/Order. Normal use should use Reconnect paired Switch without opening the pairing screen.","dim-label"));gtk_box_append(GTK_BOX(box),GTK_WIDGET(u->controller_hint));
 
     u->paired_console=GTK_LABEL(label("Not paired yet","dim-label"));
-    row(g,"Paired Switch","Stored after the first successful pairing. Reconnect uses the same Bluetooth adapter and BlueZ bond.",GTK_WIDGET(u->paired_console));
+    row(g,"Paired Switch","Stored after the first successful pairing. Reconnect uses the same Bluetooth adapter identity and console address.",GTK_WIDGET(u->paired_console));
     update_paired_console(u);
 
     GtkWidget *actions=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);

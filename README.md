@@ -87,10 +87,10 @@ Studio deliberately separates **Pair / Sync new Switch** from **Reconnect paired
 Switch**.
 
 The first pairing requires **Controllers -> Change Grip/Order**. After a successful
-pairing, Controller Studio stores the Switch address and the Bluetooth adapter
-identity. Normal sessions use **Reconnect paired Switch**: the PC initiates the HID
-control and interrupt L2CAP channels toward the stored Switch and does not require
-the Change Grip/Order screen.
+pairing, Controller Studio stores the Switch address and Bluetooth adapter identity.
+Normal sessions use **Reconnect paired Switch**: the normal BlueZ service is left
+running and the PC directly initiates HID control PSM 17 and interrupt PSM 19 toward
+the stored Switch. This does not require the Change Grip/Order screen.
 
 The
 application invokes its narrow backend with `pkexec`, temporarily restarts BlueZ
