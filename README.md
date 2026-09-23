@@ -125,9 +125,10 @@ Repetitive HID receive packets and periodic status lines are hidden by default.
 Enable **Detailed HID traffic** on the Diagnostics page when protocol-level output
 is needed; the switch also works during an active session.
 
-The session stores a private HCI capture and backend log under
-`/var/lib/pcble2gamepad/UID` when installed, or `artifacts/` when run from a
-checkout. These files can contain Bluetooth addresses and pairing material.
+Each session stores its private HCI capture and backend log in a temporary
+directory such as `/tmp/pcble2gamepad-UID-XXXXXXXX`. The directory is mode `0700`
+and is handed back to the desktop user when the session ends. These files can
+contain Bluetooth addresses and pairing material and are intentionally temporary.
 See [Controller Studio](docs/controller-studio.md) for the UI and architecture.
 
 ## Run the earlier BLE lab

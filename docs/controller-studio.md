@@ -56,7 +56,8 @@ it does not authorize arbitrary commands. The runner
 starts a C backend that owns the temporary Agent1, SDP record and L2CAP PSM 17/19
 listeners. The backend temporarily powers the selected adapter if BlueZ's restart
 left it off, then restores the previous power state. It also records a private
-`btmon` capture. The backend accepts commands
+`btmon` capture in a per-session `/tmp/pcble2gamepad-UID-XXXXXXXX` directory.
+The backend accepts commands
 only from the desktop UID over the local socket documented in [the API](api.md).
 For the Pro Controller profile, the backend uses a reduced report cadence during
 Change Grip/Order. After HID initialization, A, B or HOME marks the menu-exit

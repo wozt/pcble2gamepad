@@ -63,15 +63,10 @@ dropin=/run/systemd/system/bluetooth.service.d/90-pcble2gamepad-pro-poc.conf
 [[ ! -e "$dropin" ]] || { echo 'A POC service override already exists'; exit 1; }
 systemctl is-active --quiet bluetooth || { echo 'Bluetooth service must already be active'; exit 1; }
 capture_owner=${PKEXEC_UID:-${SUDO_UID:-0}}
-if $installed; then
-    capture_base="/var/lib/pcble2gamepad/$capture_owner"
-else
-    capture_base="$project_dir/artifacts"
-fi
-mkdir -p "$capture_base"
-if [[ $capture_owner != 0 ]]; then chown "$capture_owner" "$capture_base"; fi
-chmod 700 "$capture_base"
-capture=$(mktemp -d "$capture_base/pro-classic-XXXXXXXX")
+
+# Runtime diagnostics are temporary session artifacts, not persistent state.
+# Keep every capture in a private random directory under /tmp.
+capture=$(mktemp -d "/tmp/pcble2gamepad-${capture_owner}-XXXXXXXX")
 chmod 700 "$capture"
 monitor_pids=()
 backend_pids=()
