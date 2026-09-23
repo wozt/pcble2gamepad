@@ -191,6 +191,33 @@ static gboolean connect_outbound(const bdaddr_t *local,const char *address) {
             goto failed;
         }
 
+        /*
+         * A paired Switch expects the returning controller link to be
+         * authenticated and encrypted before the HID L2CAP channel is
+         * established. Without an explicit security requirement Linux may
+         * leave the freshly-created ACL link unencrypted long enough for the
+         * Switch to terminate it before PSM 17 is even negotiated.
+         */
+        struct bt_security security={0};
+        security.level=BT_SECURITY_HIGH;
+
+        if(setsockopt(fd,SOL_BLUETOOTH,BT_SECURITY,
+                      &security,sizeof(security))<0) {
+            char failure[160];
+            snprintf(failure,sizeof(failure),
+                "psm=%d level=high error=%s",
+                i?19:17,strerror(errno));
+            log_event("reconnect_security_error",failure);
+            close(fd);
+            goto failed;
+        }
+
+        char security_detail[96];
+        snprintf(security_detail,sizeof(security_detail),
+            "psm=%d level=BT_SECURITY_HIGH",
+            i?19:17);
+        log_event("reconnect_security",security_detail);
+
         struct sockaddr_l2 source={0};
         source.l2_family=AF_BLUETOOTH;
         bacpy(&source.l2_bdaddr,local);
