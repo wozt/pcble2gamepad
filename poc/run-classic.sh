@@ -2,7 +2,7 @@
 # Run the reversible Classic HID backend.
 set -euo pipefail
 [[ $EUID == 0 ]] || { echo 'Run through pkexec or sudo.' >&2; exit 1; }
-[[ $# -ge 1 && $1 =~ ^hci[0-9]+$ ]] || { echo "Usage: $0 hciN [--desktop] [--profile pro|joycon-pair] [--secondary hciN] [--verbose] [--reconnect MAC]" >&2; exit 2; }
+[[ $# -ge 1 && $1 =~ ^hci[0-9]+$ ]] || { echo "Usage: $0 hciN [--desktop] [--profile pro|joycon-pair] [--secondary hciN] [--verbose] [--reconnect MAC | --initiate-pair MAC]" >&2; exit 2; }
 script_dir=$(cd -- "$(dirname -- "$0")" && pwd)
 adapter=$1
 shift
@@ -10,6 +10,7 @@ desktop=false
 profile=pro
 secondary=
 reconnect=
+initiate_pair=
 verbose=false
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -19,6 +20,11 @@ while [[ $# -gt 0 ]]; do
         --reconnect)
             [[ $# -ge 2 && $2 =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]] || { echo 'Invalid reconnect MAC' >&2; exit 2; }
             reconnect=$2
+            shift 2
+            ;;
+        --initiate-pair)
+            [[ $# -ge 2 && $2 =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]] || { echo 'Invalid pairing MAC' >&2; exit 2; }
+            initiate_pair=$2
             shift 2
             ;;
         --verbose) verbose=true; shift ;;
@@ -31,9 +37,12 @@ if [[ $profile == joycon-pair ]]; then
     [[ -n $secondary && $secondary != "$adapter" ]] || { echo 'Joy-Con pair requires two distinct adapters' >&2; exit 2; }
 fi
 [[ -z $reconnect || $profile == pro ]] || { echo 'Reconnect is currently implemented for the Pro Controller profile only.' >&2; exit 2; }
+[[ -z $initiate_pair || $profile == pro ]] || { echo 'Initiated pairing is currently implemented for the Pro Controller profile only.' >&2; exit 2; }
+[[ -z $reconnect || -z $initiate_pair ]] || { echo 'Reconnect and initiated pairing are mutually exclusive.' >&2; exit 2; }
 backend_options=()
 $verbose && backend_options+=(--verbose)
 [[ -n $reconnect ]] && backend_options+=(--reconnect "$reconnect")
+[[ -n $initiate_pair ]] && backend_options+=(--initiate-pair "$initiate_pair")
 installed=false
 if [[ -x "$script_dir/pcble2gamepad-controller-backend" && -f "$script_dir/pro-controller.xml" ]]; then
     app="$script_dir/pcble2gamepad-controller-backend"
@@ -103,6 +112,8 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 if [[ -n $reconnect ]]; then
     echo 'Reconnect mode: starting isolated BlueZ and restoring persistent controller pairing.'
+elif [[ -n $initiate_pair ]]; then
+    echo "Pairing mode: Linux will initiate a dedicated bond to $initiate_pair."
 else
     echo 'Pairing mode: starting isolated BlueZ compatibility service.'
 fi

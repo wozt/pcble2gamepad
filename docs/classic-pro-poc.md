@@ -93,6 +93,22 @@ restored normally, discovery was off, and the adapter alias read back as
 `BlueZ 5.82`. The final POC now reports incomplete restoration as an error instead
 of unconditionally claiming success. The runner still restores normal BlueZ.
 
+## Dedicated bonding experiment, 2026-09-24
+
+Fresh pairing from Change Grip/Order succeeds, but its SSP IO Capability exchange
+has the Switch request No Bonding (`0x00`). Linux follows that request in responder
+role, reports `store_hint=0`, and the Switch later rejects the locally restored key.
+The backend now has one bounded alternative for a previously learned console
+address: `MGMT_OP_PAIR_DEVICE` with `NoInputNoOutput`. Linux 6.12 starts that path
+with `BT_SECURITY_MEDIUM` and `HCI_AT_DEDICATED_BONDING`.
+
+The HCI monitor logs `pairing_local_io` as well as `pairing_peer_io`, so the hardware
+test can distinguish the intended local `0x02` reply from the responder path that
+falls back to `0x00`. Success requires a management Link Key event with
+`store_hint=1` followed by a reconnect that reaches Authentication Complete without
+a second SSP exchange. This path is implemented but is not yet claimed as validated
+on the Switch 2.
+
 ## Change Grip/Order transition investigation
 
 The initial real-console validation kept the Switch 2 on Change Grip/Order, so the

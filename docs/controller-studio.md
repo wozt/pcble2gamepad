@@ -32,9 +32,11 @@ The live controller drawing previews the composed input frame before it is sent.
 Controller Studio treats first pairing and normal reconnection as different
 operations.
 
-- **Pair / Sync new Switch** makes the emulated controller discoverable and
-  pairable. The console must be on Controllers -> Change Grip/Order and initiates
-  HID PSM 17/19.
+- **Pair / Sync new Switch** requires Controllers -> Change Grip/Order. When the
+  console address is already known, the backend sends `MGMT_OP_PAIR_DEVICE` with
+  `NoInputNoOutput`; Linux initiates SSP with Dedicated Bonding before either side
+  opens HID PSM 17/19. With no known address, the backend remains passively
+  discoverable for the first session and learns it from the incoming connection.
 - After the first successful Pro Controller session, the console Bluetooth address
   and local Bluetooth adapter address are persisted in `settings.ini`. The privileged
   backend separately persists the generated BR/EDR Link Key in a root-private pairing
@@ -43,9 +45,9 @@ operations.
   reloads the stored Link Key into the kernel through the Bluetooth Management API,
   restores the Pro Controller identity and initiates L2CAP control PSM 17 followed
   by interrupt PSM 19 toward the stored Switch address.
-- The persistent pairing is expected to survive application restarts, Stop session,
-  PC restarts and Switch restarts. Reconnection remains adapter-specific because
-  the Switch paired to that Bluetooth controller identity.
+- Reconnection remains adapter-specific because the Switch pairs to that Bluetooth
+  controller identity. Persistence across application, PC and Switch restarts is
+  pending a real-console validation of the initiated Dedicated Bonding exchange.
 
 Joy-Con-pair outbound reconnect is intentionally deferred until the two-adapter
 profile has been validated on real hardware.

@@ -624,6 +624,11 @@ static void launch_switch_session(Ui *u,gboolean reconnect) {
     if(reconnect) {
         args[n++]="--reconnect";
         args[n++]=u->paired_switch_address;
+    } else if(!pair_mode(u) &&
+              u->paired_switch_address &&
+              *u->paired_switch_address) {
+        args[n++]="--initiate-pair";
+        args[n++]=u->paired_switch_address;
     }
 
     if(gtk_switch_get_active(u->traffic_logs))
@@ -644,8 +649,12 @@ static void launch_switch_session(Ui *u,gboolean reconnect) {
     gtk_label_set_text(u->status,reconnect?"RECONNECTING":"WAITING FOR PAIRING");
     gtk_label_set_text(u->error,"");
 
-    if(!reconnect)
-        toast(u,"Open Controllers → Change Grip/Order on the Switch for first pairing.");
+    if(!reconnect) {
+        if(!pair_mode(u) && u->paired_switch_address && *u->paired_switch_address)
+            toast(u,"Dedicated bonding started. Keep Change Grip/Order open on the Switch.");
+        else
+            toast(u,"Open Controllers → Change Grip/Order on the Switch for first pairing.");
+    }
 }
 
 static void start(GtkButton *b,Ui *u) {
@@ -724,7 +733,7 @@ static void activate(GtkApplication *app,gpointer unused) {
     row(g,"Primary adapter","Pro Controller, or left Joy-Con. Choose by address; hci numbers can change after reboot.",GTK_WIDGET(u->adapters));
     u->secondary_names=gtk_string_list_new(NULL);u->secondary=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->secondary_names),NULL));gtk_widget_set_size_request(GTK_WIDGET(u->secondary),280,-1);
     u->secondary_row=row(g,"Right Joy-Con adapter","A pair requires a second, distinct Classic Bluetooth identity.",GTK_WIDGET(u->secondary));gtk_widget_set_visible(u->secondary_row,FALSE);
-    u->controller_hint=GTK_LABEL(label("First pairing uses Pair / Sync new Switch and Change Grip/Order. Normal use should use Reconnect paired Switch without opening the pairing screen.","dim-label"));gtk_box_append(GTK_BOX(box),GTK_WIDGET(u->controller_hint));
+    u->controller_hint=GTK_LABEL(label("Open Change Grip/Order before Pair / Sync. If this Switch address is already known, the PC initiates dedicated bonding; normal use then uses Reconnect paired Switch.","dim-label"));gtk_box_append(GTK_BOX(box),GTK_WIDGET(u->controller_hint));
 
     u->paired_console=GTK_LABEL(label("Not paired yet","dim-label"));
     row(g,"Paired Switch","Stored after the first successful pairing. Reconnect uses the same Bluetooth adapter identity and console address.",GTK_WIDGET(u->paired_console));
