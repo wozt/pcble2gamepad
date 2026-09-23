@@ -4,9 +4,9 @@
 
 char *jc_socket_path(void)
 {
-    const char *override = g_getenv("PCBLE2JOYCON2_SOCKET");
+    const char *override = g_getenv("PCBLE2GAMEPAD_SOCKET");
     if (override && *override) return g_strdup(override);
-    return g_build_filename(g_get_user_runtime_dir(), "pcble2joycon2", "control.sock", NULL);
+    return g_build_filename(g_get_user_runtime_dir(), "pcble2gamepad", "control.sock", NULL);
 }
 
 JsonObject *jc_client_request(const char *path, const char *method, gint64 after, GError **error)

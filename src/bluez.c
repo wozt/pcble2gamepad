@@ -2,7 +2,7 @@
 #include "protocol.h"
 #include <string.h>
 
-#define ROOT "/io/github/wozt/pcble2joycon2"
+#define ROOT "/io/github/wozt/pcble2gamepad"
 #define APP ROOT "/gatt"
 #define ADV ROOT "/advertisement"
 #define OM "org.freedesktop.DBus.ObjectManager"

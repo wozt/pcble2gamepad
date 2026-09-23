@@ -189,7 +189,7 @@ reports LE features `bd00000000000000`: data-length extension is supported, but
 LE 2M is not. Its supported states are `ffffffff00000000`, also lacking the
 connection/advertising combinations required by the local Linux kernel.
 
-The new standalone C `pcble2joycon2diag hci0` reproduces both capability reads and
+The new standalone C `pcble2gamepaddiag hci0` reproduces both capability reads and
 prints JSON. It uses only LE Read Local Supported Features (`0x2003`) and LE Read
 Supported States (`0x201c`). This narrowly scoped read-only HCI diagnostic addresses
 capabilities absent from the application's D-Bus view; the controller backend still

@@ -291,7 +291,7 @@ static void activate(GtkApplication *application, gpointer data G_GNUC_UNUSED)
 
 int main(int argc, char **argv)
 {
-    g_autoptr(AdwApplication) application = adw_application_new("io.github.wozt.pcble2joycon2", G_APPLICATION_DEFAULT_FLAGS);
+    g_autoptr(AdwApplication) application = adw_application_new("io.github.wozt.pcble2gamepad", G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect(application, "activate", G_CALLBACK(activate), NULL);
     return g_application_run(G_APPLICATION(application), argc, argv);
 }

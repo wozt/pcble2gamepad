@@ -1,4 +1,4 @@
-# pcble2joycon2
+# pcble2gamepad
 
 Experimental **C11** software for emulating Nintendo Switch 2 Joy-Con 2 controllers
 from a Linux PC's standard Bluetooth LE adapter.
@@ -56,19 +56,19 @@ meson install -C build
 Start the daemon as your regular desktop user, in one terminal:
 
 ```sh
-./build/pcble2joycon2d --adapter hci0 --verbose 2>&1 | tee daemon.log
+./build/pcble2gamepadd --adapter hci0 --verbose 2>&1 | tee daemon.log
 ```
 
 In a second terminal, open the GUI or use the CLI:
 
 ```sh
-./build/pcble2joycon2
+./build/pcble2gamepad
 # Or:
-./build/pcble2joycon2ctl status
-./build/pcble2joycon2ctl sync
-./build/pcble2joycon2ctl status
-./build/pcble2joycon2ctl logs
-./build/pcble2joycon2ctl stop
+./build/pcble2gamepadctl status
+./build/pcble2gamepadctl sync
+./build/pcble2gamepadctl status
+./build/pcble2gamepadctl logs
+./build/pcble2gamepadctl stop
 ```
 
 The GUI is a client of the running daemon. Closing the GUI does not stop the daemon.
@@ -92,7 +92,7 @@ The separate C diagnostic reads adapter capabilities using only two fixed HCI
 read commands; it does not advertise, disconnect peers or change adapter settings:
 
 ```sh
-sudo ./build/pcble2joycon2diag hci0
+sudo ./build/pcble2gamepaddiag hci0
 ```
 
 It emits JSON with the raw LE feature/state bytes, LE 2M and data-length support,
@@ -104,11 +104,11 @@ before ATT, but this does not establish that the console requires 2M. See the
 For mock mode:
 
 ```sh
-./build/pcble2joycon2d --mock
+./build/pcble2gamepadd --mock
 ```
 
-The default socket is `$XDG_RUNTIME_DIR/pcble2joycon2/control.sock`. Use
-`PCBLE2JOYCON2_SOCKET` for all three programs or `--socket PATH` for daemon/CLI.
+The default socket is `$XDG_RUNTIME_DIR/pcble2gamepad/control.sock`. Use
+`PCBLE2GAMEPAD_SOCKET` for all three programs or `--socket PATH` for daemon/CLI.
 A custom socket's parent must be a private directory owned by you (mode `0700`).
 The socket is `0600`, checks peer credentials, and accepts only the daemon's UID.
 
@@ -121,10 +121,10 @@ The socket is `0600`, checks peer credentials, and accepts only the daemon's UID
    ```
 
 2. Start the daemon with `--verbose`, then open the Switch 2 controller pairing
-   screen and run `pcble2joycon2ctl sync` (or click **Sync**).
+   screen and run `pcble2gamepadctl sync` (or click **Sync**).
 3. Leave discovery active for about 30 seconds. Save CLI `status`, `logs`, the daemon
    log, and the HCI capture. Record the exact console screen and visible behavior.
-4. Run `pcble2joycon2ctl stop`, then stop the daemon and `btmon` with Ctrl+C.
+4. Run `pcble2gamepadctl stop`, then stop the daemon and `btmon` with Ctrl+C.
 
 A successful registration is only a Linux-side check. A peer connection event is
 not proof that the peer is a Switch; correlate its address and timing with the
@@ -153,11 +153,11 @@ Switching the console fully off and observing the peer disappear can identify it
 a Nintendo address prefix alone cannot. After identifying the intended test peer:
 
 ```sh
-./build/pcble2joycon2ctl stop
+./build/pcble2gamepadctl stop
 # Wait until status is no longer transitioning, then select the exact test peer:
-./build/pcble2joycon2ctl disconnect AA:BB:CC:DD:EE:FF
+./build/pcble2gamepadctl disconnect AA:BB:CC:DD:EE:FF
 # Wait for completion, then restart discovery:
-./build/pcble2joycon2ctl sync
+./build/pcble2gamepadctl sync
 ```
 
 GTK offers **Disconnect peer** when exactly one peer address is available. For

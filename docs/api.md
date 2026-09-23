@@ -2,8 +2,8 @@
 
 Transport: Linux `AF_UNIX`, `SOCK_STREAM`. UTF-8 JSON, one request terminated by
 LF, one JSON response terminated by LF, then connection close. No GUI involvement.
-Default: `$XDG_RUNTIME_DIR/pcble2joycon2/control.sock` (GLib user runtime directory
-fallback if unset). `PCBLE2JOYCON2_SOCKET` overrides it.
+Default: `$XDG_RUNTIME_DIR/pcble2gamepad/control.sock` (GLib user runtime directory
+fallback if unset). `PCBLE2GAMEPAD_SOCKET` overrides it.
 
 The server uses asynchronous I/O and dispatches engine actions in one GLib main
 context. Clients may connect concurrently. Only one lifecycle transition is
@@ -85,11 +85,11 @@ For a shell probe (optional `socat` and `jq` packages):
 
 ```sh
 printf '%s\n' '{"version":1,"method":"status"}' |
-  socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/pcble2joycon2/control.sock" | jq
+  socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/pcble2gamepad/control.sock" | jq
 ```
 
 The GUI uses this same API from worker tasks so slow IPC cannot block GTK. A custom
-socket can be selected for the GUI with `PCBLE2JOYCON2_SOCKET`.
+socket can be selected for the GUI with `PCBLE2GAMEPAD_SOCKET`.
 Its Disconnect peer button targets the displayed address and is enabled only
 when exactly one connected peer is available; multiple peers require an explicit
 CLI address. No program automatically disconnects a peer on advertisement failure.
