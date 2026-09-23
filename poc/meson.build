@@ -1,5 +1,6 @@
 project('pcble2gamepad-pro-poc', 'c', default_options: ['c_std=c11', 'warning_level=3', 'werror=true'])
 gio = dependency('gio-unix-2.0')
 bt = dependency('bluez')
-executable('pcble2gamepad-pro-poc', ['pro-controller.c', 'protocol.c'], dependencies: [gio, bt])
+json = dependency('json-glib-1.0')
+executable('pcble2gamepad-pro-poc', ['pro-controller.c', 'protocol.c', 'control.c', '../src/ipc.c'], dependencies: [gio, bt, json])
 test('pro-wire', executable('test-pro-protocol', ['test-protocol.c', 'protocol.c'], dependencies: gio))

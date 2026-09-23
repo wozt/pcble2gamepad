@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "protocol.h"
+#include "control.h"
 #include <gio/gio.h>
 #include <glib-unix.h>
 #include <bluetooth/bluetooth.h>
@@ -16,6 +17,8 @@
 
 #define ROOT "/io/github/wozt/pcble2gamepad/pro_poc"
 static GDBusConnection *bus;
+static ProControl *desktop;
+static gboolean mock_mode;
 static GMainLoop *loop;
 static char adapter[64], peer[18];
 static int channels[2]={-1,-1}, listeners[2]={-1,-1};
@@ -24,7 +27,19 @@ static ProState state;
 static unsigned sent, received;
 static gboolean initialized;
 static gint64 release_at;
+typedef struct { char *event, *detail; } PendingLog;
+static GQueue pending_logs = G_QUEUE_INIT;
+static gboolean desktop_requested;
+static void pending_log_free(PendingLog *item) {
+    g_free(item->event);g_free(item->detail);g_free(item);
+}
 static void log_event(const char *event, const char *detail) {
+    if(desktop)pro_control_log(desktop,event,detail);
+    else if(desktop_requested && strcmp(event,"hid_rx")) {
+        PendingLog *item=g_new0(PendingLog,1);item->event=g_strdup(event);item->detail=g_strdup(detail);
+        g_queue_push_tail(&pending_logs,item);
+        while(g_queue_get_length(&pending_logs)>60)pending_log_free(g_queue_pop_head(&pending_logs));
+    }
     GDateTime *now=g_date_time_new_now_utc();
     char *time=g_date_time_format_iso8601(now);
     g_print("%s %s %s\n",time,event,detail); fflush(stdout);
@@ -144,6 +159,10 @@ static gboolean accept_peer(gint fd,GIOCondition cond,gpointer user) {
 }
 static gboolean tick(gpointer unused) {
     (void)unused;
+    if(pro_control_expired(desktop)) {
+        log_event("desktop_timeout","No UI request for five seconds; stopping session");
+        g_main_loop_quit(loop);return G_SOURCE_REMOVE;
+    }
     if(release_at && g_get_monotonic_time()>=release_at) {
         memset(state.buttons,0,3);state.sticks[0]=0x86f;state.sticks[1]=0x77c;state.sticks[2]=0x816;state.sticks[3]=0x7dd;
         release_at=0;log_event("input_released","neutral");
@@ -152,6 +171,7 @@ static gboolean tick(gpointer unused) {
         uint8_t out[50];pro_input(&state,timer_byte(),out);
         if(!send_report(out)) reset_link();
     }
+    pro_control_update(desktop,mock_mode?"Simulation":peer,mock_mode || initialized,sent,received);
     return G_SOURCE_CONTINUE;
 }
 static gboolean stats(gpointer unused) {
@@ -194,7 +214,19 @@ static const char xml[]=
 "<method name='NewConnection'><arg type='o' direction='in'/><arg type='h' direction='in'/><arg type='a{sv}' direction='in'/></method>"
 "<method name='RequestDisconnection'><arg type='o' direction='in'/></method></interface></node>";
 int main(int argc,char **argv) {
-    if(argc!=3 || !g_regex_match_simple("^hci[0-9]+$",argv[1],0,0)) {
+    mock_mode=argc==2 && !strcmp(argv[1],"--mock");
+    if(mock_mode) {
+        uint8_t addr[6]={0};pro_init(&state,addr);
+        loop=g_main_loop_new(NULL,FALSE);GError *error=NULL;
+        desktop=pro_control_new(&state,&release_at,getuid(),TRUE,loop,&error);
+        if(!desktop) {g_printerr("%s\n",error->message);g_error_free(error);return 1;}
+        g_unix_signal_add(SIGINT,quit,NULL);g_unix_signal_add(SIGTERM,quit,NULL);
+        g_timeout_add(15,tick,NULL);log_event("mock_ready","No Bluetooth activity");
+        g_main_loop_run(loop);pro_control_free(desktop);g_main_loop_unref(loop);return 0;
+    }
+    gboolean desktop_mode=argc==5 && !strcmp(argv[3],"--desktop");
+    desktop_requested=desktop_mode;
+    if((argc!=3 && !desktop_mode) || !g_regex_match_simple("^hci[0-9]+$",argv[1],0,0)) {
         fprintf(stderr,"Usage: %s hciN SDP_XML\n",argv[0]);return 2;
     }
     int result=1,dd=-1;uint8_t old_class[3]={0};gboolean have_class=FALSE;
@@ -249,12 +281,24 @@ int main(int argc,char **argv) {
     log_event("ready","Name=Pro Controller class=0x002508 discoverable=true pairable=true PSM=17/19; open Change Grip/Order");
     g_dbus_connection_signal_subscribe(bus,"org.bluez","org.freedesktop.DBus.Properties","PropertiesChanged",NULL,NULL,0,changed,NULL,NULL);
     loop=g_main_loop_new(NULL,FALSE);g_unix_signal_add(SIGINT,quit,NULL);g_unix_signal_add(SIGTERM,quit,NULL);
-    g_timeout_add(15,tick,NULL);g_timeout_add_seconds(5,stats,NULL);g_timeout_add_seconds(600,quit,NULL);
+    if(desktop_mode) {
+        char *end=NULL;guint64 owner=g_ascii_strtoull(argv[4],&end,10);
+        if(!end || *end || owner>G_MAXUINT32 || getuid()!=0) {log_event("error","Invalid desktop owner");goto cleanup;}
+        desktop=pro_control_new(&state,&release_at,(uid_t)owner,FALSE,loop,&err);
+        if(!desktop)goto cleanup;
+        while(!g_queue_is_empty(&pending_logs)) {
+            PendingLog *item=g_queue_pop_head(&pending_logs);
+            pro_control_log(desktop,item->event,item->detail);pending_log_free(item);
+        }
+    }
+    g_timeout_add(15,tick,NULL);g_timeout_add_seconds(5,stats,NULL);
+    if(!desktop_mode)g_timeout_add_seconds(600,quit,NULL);
     GIOChannel *io=g_io_channel_unix_new(STDIN_FILENO);
     g_io_channel_set_flags(io,g_io_channel_get_flags(io)|G_IO_FLAG_NONBLOCK,NULL);
     g_io_add_watch(io,G_IO_IN|G_IO_HUP,input,NULL);
     g_main_loop_run(loop);g_io_channel_unref(io);g_main_loop_unref(loop);result=0;
 cleanup:
+    pro_control_free(desktop);desktop=NULL;
     if(err) {log_event("error",err->message);g_error_free(err);}
     reset_link();for(int i=0;i<2;i++) if(listeners[i]>=0) close(listeners[i]);
     if(registered_profile) invoke("/org/bluez","org.bluez.ProfileManager1","UnregisterProfile",g_variant_new("(o)",ROOT "/profile"));
@@ -268,5 +312,7 @@ cleanup:
     if(dd>=0) close(dd);
     if(profile_id) g_dbus_connection_unregister_object(bus,profile_id);
     if(agent_id) g_dbus_connection_unregister_object(bus,agent_id);
-    g_dbus_node_info_unref(node);g_object_unref(bus);log_event("stopped",restored?"Adapter properties restored; pairing keys retained by BlueZ":"Adapter restoration incomplete; inspect earlier errors");return restored?result:1;
+    g_dbus_node_info_unref(node);g_object_unref(bus);desktop_requested=FALSE;
+    g_queue_clear_full(&pending_logs,(GDestroyNotify)pending_log_free);
+    log_event("stopped",restored?"Adapter properties restored; pairing keys retained by BlueZ":"Adapter restoration incomplete; inspect earlier errors");return restored?result:1;
 }

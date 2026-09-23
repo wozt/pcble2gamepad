@@ -2,17 +2,23 @@
 
 Experimental **C11** software for emulating console controllers from a Linux PC.
 
-The immediate milestone is a software-only **Switch 1 Pro Controller over Classic
-Bluetooth HID**, tested against a real Switch 2. The standalone [C POC](poc/README.md)
-has paired and appeared as a Pro Controller on the console; detailed validation
-and limitations are in [the experiment report](docs/classic-pro-poc.md).
-No real Joy-Con or Pro Controller is required in the emulation chain.
-General backend abstractions and capture2cloud integration remain deferred.
+The current application is a software-only **Switch 1 Pro Controller over Classic
+Bluetooth HID**, tested against a real Switch 2. Its GTK Controller Studio maps a
+keyboard or a PC gamepad to the emulated controller. No real Joy-Con or Pro
+Controller is required in the chain. Detailed console evidence and limitations are
+in [the experiment report](docs/classic-pro-poc.md).
+
+Controller Studio includes remappable keyboard and SDL gamepad bindings, saved
+profiles, radial stick dead zones, sensitivity, axis inversion, stick swapping,
+live input preview and session diagnostics. The Bluetooth backend stays in C and
+is controlled through a private Unix socket. Keyboard input has been exercised
+end to end against the backend simulation. A physical source gamepad remains to
+be tested when one is available.
 
 ## Earlier Joy-Con 2 BLE work
 
-The existing daemon, CLI and GTK application below currently implement the earlier
-Joy-Con 2 discovery experiment. The Classic POC is a separate executable.
+The daemon, CLI and `pcble2gamepad-ble-lab` retain the earlier Joy-Con 2 discovery
+experiment. This path is separate from Controller Studio.
 
 The first milestone is deliberately small: advertise one **Joy-Con 2 R** and
 observe whether a real Switch 2 attempts to connect. **This milestone was observed
@@ -20,7 +26,7 @@ on the user's console on 2026-09-22: an incoming BLE connection completed succes
 This is not a working controller or a completed pairing implementation; the console
 does not yet display a usable Joy-Con.
 
-## Current status
+## Earlier BLE status
 
 Implemented:
 
@@ -46,7 +52,8 @@ reports, IMU, rumble and the proprietary reconnect procedure remain unimplemente
 
 ```sh
 sudo apt install build-essential pkg-config meson ninja-build \
-  libglib2.0-dev libjson-glib-dev libgtk-4-dev libadwaita-1-dev libbluetooth-dev bluez dbus-daemon
+  libglib2.0-dev libjson-glib-dev libgtk-4-dev libadwaita-1-dev \
+  libsdl2-dev libbluetooth-dev bluez dbus-daemon pkexec
 meson setup build -Dgui=enabled
 meson compile -C build
 meson test -C build --print-errorlogs
@@ -62,7 +69,30 @@ meson configure build --prefix="$HOME/.local"
 meson install -C build
 ```
 
-## Run
+## Run Controller Studio
+
+```sh
+./build/pcble2gamepad
+```
+
+Choose the Bluetooth adapter by address and click **Connect to Switch**. The
+application invokes its narrow backend with `pkexec`, temporarily restarts BlueZ
+in Classic HID compatibility mode, and restores the normal service when the
+session stops. This pauses other Bluetooth services for the duration. On first
+pairing, open **Controllers -> Change Grip/Order** on the console.
+
+Select **Keyboard** or **PC controller**, configure the corresponding bindings,
+then enable input. Escape immediately pauses keyboard input. The backend returns
+buttons and sticks to neutral if updates stop for 500 ms. Closing Controller
+Studio stops the session and restores BlueZ. Profiles are INI files under
+`~/.config/pcble2gamepad/profiles`.
+
+The session stores a private HCI capture and backend log under
+`/var/lib/pcble2gamepad/UID` when installed, or `artifacts/` when run from a
+checkout. These files can contain Bluetooth addresses and pairing material.
+See [Controller Studio](docs/controller-studio.md) for the UI and architecture.
+
+## Run the earlier BLE lab
 
 Start the daemon as your regular desktop user, in one terminal:
 
@@ -70,10 +100,10 @@ Start the daemon as your regular desktop user, in one terminal:
 ./build/pcble2gamepadd --adapter hci0 --verbose 2>&1 | tee daemon.log
 ```
 
-In a second terminal, open the GUI or use the CLI:
+In a second terminal, open the BLE lab or use the CLI:
 
 ```sh
-./build/pcble2gamepad
+./build/pcble2gamepad-ble-lab
 # Or:
 ./build/pcble2gamepadctl status
 ./build/pcble2gamepadctl sync
@@ -82,7 +112,7 @@ In a second terminal, open the GUI or use the CLI:
 ./build/pcble2gamepadctl stop
 ```
 
-The GUI is a client of the running daemon. Closing the GUI does not stop the daemon.
+The BLE lab is a client of the running daemon. Closing it does not stop the daemon.
 `start` and `sync` currently both request standard discovery advertising; `sync`
 **does not perform Nintendo pairing**. Start/stop are asynchronous: an initial
 `transitioning` response means the request was accepted, not that registration has
@@ -180,30 +210,24 @@ back the probe GATT application and preserves the diagnostic. Detailed evidence:
 ## Architecture and API
 
 ```text
-GTK application       C CLI       future capture2cloud
-        \               |               /
-              Unix socket JSON API
-                       |
-                C engine / daemon
-                 |             |
-         Joy-Con 2 protocol   BlueZ D-Bus backend
-                                 |
-                             Linux hci0
+keyboard / gamepad -> Controller Studio -> private input API -> Classic HID backend
+
+BLE lab / C CLI -----------------------> discovery API -> Joy-Con 2 BLE daemon
 ```
 
-- `src/protocol.*`: observed bytes, vendor GATT schema, command-header inspection.
+- `poc/protocol.*`: Switch 1 Pro Controller reports and subcommand responses.
+- `poc/pro-controller.c`: Agent1, SDP, L2CAP transport and input watchdog.
+- `src/gui.c` and `src/input-model.*`: Controller Studio and input composition.
+- `src/protocol.*`: observed Joy-Con 2 bytes and vendor GATT schema.
 - `src/core.*`: lifecycle, status, bounded structured event history and API dispatch.
 - `src/bluez.*`: D-Bus objects, advertisement/GATT registration, adapter events.
 - `src/ipc.*`: bounded asynchronous local control transport.
-- `src/client.*`: shared client code for CLI and GUI.
-- `src/gui.c`: presentation and asynchronous IPC only, no Bluetooth logic.
+- `src/client.*`: shared unprivileged client code.
 
-[API specification](docs/api.md) · [Protocol research](docs/protocol.md) ·
+[Controller Studio](docs/controller-studio.md) · [API specification](docs/api.md) · [Protocol research](docs/protocol.md) ·
 [BlueZ feasibility](docs/bluez.md) · [Validation](docs/validation.md).
-The current JSON request-per-connection transport is a discovery administration API.
-Persistent/batched input updates will be added and measured before real-time use.
 
-## Roadmap
+## Joy-Con 2 roadmap
 
 1. Discovery and an incoming connection on a real Switch 2: **observed 2026-09-22**.
 2. Measure ATT/handle behavior; retain BlueZ where it works, document any blocker.

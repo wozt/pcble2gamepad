@@ -17,16 +17,21 @@ JsonObject *jc_client_request(const char *path, const char *method, gint64 after
 JsonObject *jc_client_request_full(const char *path, const char *method, gint64 after,
                                   const char *peer_address, GError **error)
 {
-    g_autoptr(GSocketClient) client = g_socket_client_new();
-    g_socket_client_set_timeout(client, 4);
-    g_autoptr(GSocketAddress) address = g_unix_socket_address_new(path);
-    g_autoptr(GSocketConnection) connection = g_socket_client_connect(client, G_SOCKET_CONNECTABLE(address), NULL, error);
-    if (!connection) return NULL;
     g_autoptr(JsonObject) request = json_object_new();
     json_object_set_int_member(request, "version", 1);
     json_object_set_string_member(request, "method", method);
     if (peer_address) json_object_set_string_member(request, "address", peer_address);
     if (g_str_equal(method, "logs")) json_object_set_int_member(request, "after", after);
+    return jc_client_request_object(path, request, error);
+}
+
+JsonObject *jc_client_request_object(const char *path, JsonObject *request, GError **error)
+{
+    g_autoptr(GSocketClient) client = g_socket_client_new();
+    g_socket_client_set_timeout(client, 2);
+    g_autoptr(GSocketAddress) address = g_unix_socket_address_new(path);
+    g_autoptr(GSocketConnection) connection = g_socket_client_connect(client, G_SOCKET_CONNECTABLE(address), NULL, error);
+    if (!connection) return NULL;
     g_autoptr(JsonNode) node = json_node_new(JSON_NODE_OBJECT);
     json_node_set_object(node, request);
     g_autofree char *json = json_to_string(node, FALSE);

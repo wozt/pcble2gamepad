@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
-Name=Joy-Con 2 Lab
-Comment=Observe an experimental Joy-Con 2 BLE peripheral
+Name=pcble2gamepad Controller Studio
+Comment=Use a keyboard or PC gamepad as a console controller
 Exec=pcble2gamepad
 Icon=input-gaming
 Terminal=false

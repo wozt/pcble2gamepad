@@ -9,7 +9,9 @@
 #include <string.h>
 
 struct IpcServer {
-    Engine *engine;
+    IpcDispatch dispatch;
+    gpointer data;
+    uid_t owner;
     GSocketService *service;
     GList *clients;
     char *path;
@@ -74,7 +76,7 @@ static void read_request(GObject *source, GAsyncResult *result, gpointer data)
     g_byte_array_append(c->input, chunk, (guint)length);
     if (newline) {
         g_byte_array_append(c->input, (const guint8 *)"", 1);
-        g_autofree char *response = engine_request(c->server->engine, (const char *)c->input->data);
+        g_autofree char *response = c->server->dispatch(c->server->data, (const char *)c->input->data);
         respond(c, response);
     } else {
         g_input_stream_read_bytes_async(G_INPUT_STREAM(source), 1024, G_PRIORITY_DEFAULT, c->cancel, read_request, c);
@@ -86,7 +88,7 @@ static gboolean incoming(GSocketService *service G_GNUC_UNUSED, GSocketConnectio
 {
     IpcServer *s = data;
     g_autoptr(GCredentials) credentials = g_socket_get_credentials(g_socket_connection_get_socket(connection), NULL);
-    if (g_list_length(s->clients) >= 32 || !credentials || g_credentials_get_unix_user(credentials, NULL) != getuid()) {
+    if (g_list_length(s->clients) >= 32 || !credentials || g_credentials_get_unix_user(credentials, NULL) != s->owner) {
         g_io_stream_close(G_IO_STREAM(connection), NULL, NULL);
         return TRUE;
     }
@@ -102,18 +104,18 @@ static gboolean incoming(GSocketService *service G_GNUC_UNUSED, GSocketConnectio
     return TRUE;
 }
 
-IpcServer *ipc_server_new(Engine *engine, const char *path, GError **error)
+IpcServer *ipc_server_new_full(IpcDispatch dispatch, gpointer data, const char *path, uid_t owner, GError **error)
 {
     g_autoptr(GSocketAddress) address = NULL;
     g_autofree char *directory = g_path_get_dirname(path);
     struct stat st;
     if (g_mkdir_with_parents(directory, 0700) < 0 || lstat(directory, &st) < 0 ||
-        !S_ISDIR(st.st_mode) || st.st_uid != getuid() || (st.st_mode & 0077)) {
+        !S_ISDIR(st.st_mode) || st.st_uid != owner || (st.st_mode & 0077)) {
         g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED, "Socket parent must be an owned private directory (mode 0700)");
         return NULL;
     }
     IpcServer *s = g_new0(IpcServer, 1);
-    s->engine = engine;
+    s->dispatch = dispatch; s->data = data; s->owner = owner;
     s->lock_fd = -1;
     g_autofree char *lock_path = g_strconcat(path, ".lock", NULL);
     s->lock_fd = open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
@@ -122,7 +124,7 @@ IpcServer *ipc_server_new(Engine *engine, const char *path, GError **error)
         goto fail;
     }
     if (lstat(path, &st) == 0) {
-        if (!S_ISSOCK(st.st_mode) || st.st_uid != getuid()) {
+        if (!S_ISSOCK(st.st_mode) || st.st_uid != owner) {
             g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_EXISTS, "Refusing to replace a non-socket or another user's socket");
             goto fail;
         }
@@ -137,13 +139,12 @@ IpcServer *ipc_server_new(Engine *engine, const char *path, GError **error)
     if (!g_socket_listener_add_address(G_SOCKET_LISTENER(s->service), address, G_SOCKET_TYPE_STREAM,
         G_SOCKET_PROTOCOL_DEFAULT, NULL, NULL, error)) goto fail;
     s->path = g_strdup(path);
-    if (g_chmod(path, 0600) < 0) {
+    if (g_chmod(path, 0600) < 0 || (owner != getuid() && chown(path, owner, (gid_t)-1) < 0)) {
         g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Cannot set socket permissions");
         goto fail;
     }
     g_signal_connect(s->service, "incoming", G_CALLBACK(incoming), s);
     g_socket_service_start(s->service);
-    engine_log(engine, "INFO", "ipc_listening", "path=%s mode=0600 same-user-only", path);
     return s;
 fail:
     ipc_server_free(s);

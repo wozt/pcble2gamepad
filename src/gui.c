@@ -1,297 +1,339 @@
 #include "client.h"
+#include "input-model.h"
+#include "config.h"
 #include <adwaita.h>
+#include <math.h>
+#include <signal.h>
+#include <unistd.h>
+#include <glib/gstdio.h>
 
 typedef struct {
-    GtkWindow *window;
-    AdwActionRow *adapter, *state, *connection;
-    GtkLabel *error;
-    GtkTextBuffer *logs;
-    GtkWidget *start, *stop, *sync, *disconnect;
-    char *socket_path, *peer_address;
-    gint64 cursor;
-    gboolean busy, closed;
-    guint timer;
-    gint refs;
+    int refs;gboolean closed,closing,busy,online,loading;
+    GtkApplication *app;GtkWindow *window;AdwToastOverlay *toast;
+    GtkStack *stack;GtkLabel *status,*peer,*error,*metrics,*source_hint;
+    GtkWidget *drawing,*start,*stop,*arm,*capture_hint;
+    GtkDropDown *adapters,*devices,*source,*profiles;
+    GtkStringList *adapter_names,*device_names,*profile_names;
+    GPtrArray *adapter_ids,*device_ids;
+    GtkButton *key_buttons[INPUT_ACTIONS],*pad_buttons[INPUT_BUTTONS];
+    GtkScale *deadzone,*sensitivity;GtkSwitch *invert[4],*swap,*background;
+    GtkTextBuffer *logs;GHashTable *keys;
+    InputProfile profile;InputFrame frame;
+    SDL_GameController *pad;int joystick_count,learn_key,learn_pad;
+    gboolean previous_pad[SDL_CONTROLLER_BUTTON_MAX+2];
+    char *socket,*config_dir,*profile_name,*pending;
+    guint timer,ticks;GSubprocess *launcher;
 } Ui;
-
-typedef struct {
-    char *path, *method, *address;
-    gint64 cursor;
-} Request;
-
-typedef struct {
-    JsonObject *status, *logs;
-} Snapshot;
-
-static void ui_unref(Ui *ui)
-{
-    if (--ui->refs) return;
-    g_free(ui->socket_path);
-    g_free(ui->peer_address);
-    g_free(ui);
+typedef struct {char *path;JsonObject *request;} Request;
+static void refresh_bindings(Ui *u);
+static void request(Ui *u,const char *method);
+static void toast(Ui *u,const char *message) {adw_toast_overlay_add_toast(u->toast,adw_toast_new(message));}
+static void ui_unref(Ui *u) {
+    if(--u->refs)return;
+    if(u->pad)SDL_GameControllerClose(u->pad);
+    g_clear_object(&u->launcher);g_hash_table_unref(u->keys);
+    g_ptr_array_unref(u->adapter_ids);g_ptr_array_unref(u->device_ids);
+    g_free(u->socket);g_free(u->config_dir);g_free(u->profile_name);g_free(u->pending);g_free(u);
 }
-
-static void request_free(gpointer data)
-{
-    Request *r = data;
-    g_free(r->path);
-    g_free(r->method);
-    g_free(r->address);
-    g_free(r);
+static void margin(GtkWidget *w,int m) {gtk_widget_set_margin_start(w,m);gtk_widget_set_margin_end(w,m);gtk_widget_set_margin_top(w,m);gtk_widget_set_margin_bottom(w,m);}
+static GtkWidget *label(const char *s,const char *css) {GtkWidget *w=gtk_label_new(s);gtk_label_set_xalign(GTK_LABEL(w),0);gtk_label_set_wrap(GTK_LABEL(w),TRUE);if(css)gtk_widget_add_css_class(w,css);return w;}
+static GtkWidget *row(AdwPreferencesGroup *g,const char *title,const char *subtitle,GtkWidget *suffix) {
+    GtkWidget *r=adw_action_row_new();adw_preferences_row_set_title(ADW_PREFERENCES_ROW(r),title);
+    if(subtitle)adw_action_row_set_subtitle(ADW_ACTION_ROW(r),subtitle);
+    if(suffix){gtk_widget_set_valign(suffix,GTK_ALIGN_CENTER);adw_action_row_add_suffix(ADW_ACTION_ROW(r),suffix);}
+    adw_preferences_group_add(g,r);return r;
 }
-
-static void snapshot_free(gpointer data)
-{
-    Snapshot *s = data;
-    if (s->status) json_object_unref(s->status);
-    if (s->logs) json_object_unref(s->logs);
-    g_free(s);
+static AdwPreferencesGroup *group(GtkWidget *box,const char *title,const char *description) {
+    AdwPreferencesGroup *g=ADW_PREFERENCES_GROUP(adw_preferences_group_new());adw_preferences_group_set_title(g,title);
+    if(description)adw_preferences_group_set_description(g,description);
+    gtk_box_append(GTK_BOX(box),GTK_WIDGET(g));return g;
 }
-
-static JsonObject *get_result(const char *path, const char *method, gint64 cursor, const char *address, GError **error)
-{
-    g_autoptr(JsonObject) response = jc_client_request_full(path, method, cursor, address, error);
-    if (!response) return NULL;
-    if (!json_object_get_boolean_member_with_default(response, "ok", FALSE)) {
-        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "%s",
-            json_object_get_string_member_with_default(response, "error", "Daemon rejected request"));
-        return NULL;
+static GtkWidget *page(Ui *u,const char *id,const char *title,const char *subtitle) {
+    GtkWidget *scroll=gtk_scrolled_window_new(),*clamp=adw_clamp_new(),*box=gtk_box_new(GTK_ORIENTATION_VERTICAL,24);
+    adw_clamp_set_maximum_size(ADW_CLAMP(clamp),860);margin(box,28);
+    gtk_box_append(GTK_BOX(box),label(title,"title-1"));gtk_box_append(GTK_BOX(box),label(subtitle,"dim-label"));
+    adw_clamp_set_child(ADW_CLAMP(clamp),box);gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll),clamp);
+    gtk_stack_add_titled(u->stack,scroll,id,title);return box;
+}
+static void neutral(Ui *u) {g_hash_table_remove_all(u->keys);gtk_switch_set_active(GTK_SWITCH(u->arm),FALSE);}
+static char *profile_path(Ui *u,const char *name) {char *file=g_strconcat(name,".ini",NULL);char *path=g_build_filename(u->config_dir,file,NULL);g_free(file);return path;}
+static void profile_scan(Ui *u) {
+    u->loading=TRUE;gtk_string_list_splice(u->profile_names,0,g_list_model_get_n_items(G_LIST_MODEL(u->profile_names)),NULL);
+    GDir *d=g_dir_open(u->config_dir,0,NULL);const char *name;guint selected=0,i=0;
+    if(d){while((name=g_dir_read_name(d)))if(g_str_has_suffix(name,".ini")) {
+        char *s=g_strndup(name,strlen(name)-4);if(!strcmp(s,u->profile_name))selected=i;gtk_string_list_append(u->profile_names,s);g_free(s);i++;
+    }g_dir_close(d);}
+    gtk_drop_down_set_selected(u->profiles,selected);u->loading=FALSE;
+}
+static void profile_saved(GtkButton *b,Ui *u) {
+    (void)b;g_autofree char *path=profile_path(u,u->profile_name);g_autoptr(GError) e=NULL;
+    if(input_profile_save(&u->profile,path,&e))toast(u,"Profile saved");else toast(u,e->message);
+}
+static void profile_selected(GObject *o,GParamSpec *p,Ui *u) {
+    (void)o;(void)p;if(u->loading)return;
+    guint i=gtk_drop_down_get_selected(u->profiles);const char *name=gtk_string_list_get_string(u->profile_names,i);if(!name)return;
+    g_autofree char *path=profile_path(u,name);g_autoptr(GError) e=NULL;
+    if(!input_profile_load(&u->profile,path,&e)){toast(u,e->message);return;}
+    g_free(u->profile_name);u->profile_name=g_strdup(name);neutral(u);refresh_bindings(u);
+}
+static void new_profile_response(AdwAlertDialog *dialog,const char *response,Ui *u) {
+    if(strcmp(response,"save"))return;
+    GtkWidget *entry=adw_alert_dialog_get_extra_child(dialog);const char *name=gtk_editable_get_text(GTK_EDITABLE(entry));
+    if(!g_regex_match_simple("^[A-Za-z0-9 _-]{1,40}$",name,0,0)){toast(u,"Use 1–40 letters, numbers, spaces, hyphens or underscores");return;}
+    g_autofree char *path=profile_path(u,name);
+    if(g_file_test(path,G_FILE_TEST_EXISTS)){toast(u,"A profile with this name already exists");return;}
+    g_free(u->profile_name);u->profile_name=g_strdup(name);profile_saved(NULL,u);profile_scan(u);
+}
+static void new_profile(GtkButton *b,Ui *u) {
+    (void)b;neutral(u);AdwDialog *d=adw_alert_dialog_new("Save a new profile","Copy the current bindings and stick settings.");
+    adw_alert_dialog_set_extra_child(ADW_ALERT_DIALOG(d),gtk_entry_new());
+    adw_alert_dialog_add_responses(ADW_ALERT_DIALOG(d),"cancel","Cancel","save","Save",NULL);
+    adw_alert_dialog_set_response_appearance(ADW_ALERT_DIALOG(d),"save",ADW_RESPONSE_SUGGESTED);
+    g_signal_connect(d,"response",G_CALLBACK(new_profile_response),u);adw_dialog_present(d,GTK_WIDGET(u->window));
+}
+static void settings_changed(GObject *o,GParamSpec *p,Ui *u) {
+    (void)o;(void)p;if(u->loading)return;
+    u->profile.deadzone=gtk_range_get_value(GTK_RANGE(u->deadzone))/100.;
+    u->profile.sensitivity=gtk_range_get_value(GTK_RANGE(u->sensitivity))/100.;
+    for(int i=0;i<4;i++)u->profile.invert[i]=gtk_switch_get_active(u->invert[i]);
+    u->profile.swap_sticks=gtk_switch_get_active(u->swap);u->profile.background=gtk_switch_get_active(u->background);
+}
+static void scale_changed(GtkRange *r,Ui *u){settings_changed(G_OBJECT(r),NULL,u);}
+static void refresh_bindings(Ui *u) {
+    for(int i=0;i<INPUT_ACTIONS;i++) {
+        const char *name=u->profile.keys[i]?gdk_keyval_name(u->profile.keys[i]):"Unbound";
+        gtk_button_set_label(u->key_buttons[i],name?name:"Unbound");
     }
-    JsonNode *result = json_object_get_member(response, "result");
-    if (!result || !JSON_NODE_HOLDS_OBJECT(result)) {
-        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "Missing daemon result");
-        return NULL;
+    for(int i=0;i<INPUT_BUTTONS;i++) {
+        int b=u->profile.buttons[i];const char *name=b<0?"Unbound":b==SDL_CONTROLLER_BUTTON_MAX?"Left trigger":b==SDL_CONTROLLER_BUTTON_MAX+1?"Right trigger":SDL_GameControllerGetStringForButton((SDL_GameControllerButton)b);
+        gtk_button_set_label(u->pad_buttons[i],name?name:"Unbound");
     }
-    return json_object_ref(json_node_get_object(result));
+    u->loading=TRUE;gtk_range_set_value(GTK_RANGE(u->deadzone),u->profile.deadzone*100);gtk_range_set_value(GTK_RANGE(u->sensitivity),u->profile.sensitivity*100);
+    for(int i=0;i<4;i++)gtk_switch_set_active(u->invert[i],u->profile.invert[i]);
+    gtk_switch_set_active(u->swap,u->profile.swap_sticks);gtk_switch_set_active(u->background,u->profile.background);u->loading=FALSE;
 }
-
-static void worker(GTask *task, gpointer source G_GNUC_UNUSED, gpointer task_data, GCancellable *cancel G_GNUC_UNUSED)
-{
-    Request *r = task_data;
-    g_autoptr(GError) error = NULL;
-    Snapshot *s = g_new0(Snapshot, 1);
-    s->status = get_result(r->path, r->method, 0, r->address, &error);
-    if (s->status) s->logs = get_result(r->path, "logs", r->cursor, NULL, &error);
-    if (error) {
-        snapshot_free(s);
-        g_task_return_error(task, g_steal_pointer(&error));
-    } else g_task_return_pointer(task, s, snapshot_free);
+static void bind_key(GtkButton *b,Ui *u) {
+    neutral(u);u->learn_pad=-1;u->learn_key=GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b),"index"));
+    refresh_bindings(u);gtk_button_set_label(b,"Press a key…");gtk_label_set_text(GTK_LABEL(u->capture_hint),"Press a key. Escape cancels; Backspace clears this binding.");
 }
-
-static void update_complete(GObject *source G_GNUC_UNUSED, GAsyncResult *result, gpointer data)
-{
-    Ui *ui = data;
-    g_autoptr(GError) error = NULL;
-    Snapshot *s = g_task_propagate_pointer(G_TASK(result), &error);
-    ui->busy = FALSE;
-    if (ui->closed) { if (s) snapshot_free(s); ui_unref(ui); return; }
-    gtk_widget_set_sensitive(ui->start, TRUE);
-    gtk_widget_set_sensitive(ui->stop, TRUE);
-    gtk_widget_set_sensitive(ui->sync, TRUE);
-    if (error) {
-        gtk_widget_set_sensitive(ui->disconnect, FALSE);
-        gtk_label_set_text(ui->error, error->message);
-        adw_action_row_set_subtitle(ui->state, "Daemon unavailable or request failed");
-        adw_action_row_set_subtitle(ui->connection, "Unknown");
-        ui_unref(ui);
-        return;
+static void bind_pad(GtkButton *b,Ui *u) {
+    neutral(u);if(!u->pad){toast(u,"Connect and select a PC controller first");return;}
+    u->learn_key=-1;u->learn_pad=GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b),"index"));refresh_bindings(u);gtk_button_set_label(b,"Press a button…");
+    toast(u,"Press a controller button or trigger. Escape cancels.");
+}
+static gboolean key_pressed(GtkEventControllerKey *c,guint key,guint code,GdkModifierType modifiers,Ui *u) {
+    (void)c;(void)code;(void)modifiers;key=gdk_keyval_to_lower(key);
+    if(u->learn_key>=0) {
+        if(key!=GDK_KEY_Escape){guint value=key==GDK_KEY_BackSpace?0:key;for(int i=0;i<INPUT_ACTIONS;i++)if(value && u->profile.keys[i]==value)u->profile.keys[i]=0;u->profile.keys[u->learn_key]=value;}
+        u->learn_key=-1;refresh_bindings(u);gtk_label_set_text(GTK_LABEL(u->capture_hint),"Click a binding to change it. Save your profile when finished.");return TRUE;
     }
-    const char *backend_error = json_object_get_string_member_with_default(s->status, "error", "");
-    gtk_label_set_text(ui->error, backend_error ? backend_error : "");
-    const char *address = json_object_get_string_member_with_default(s->status, "local_address", "No address");
-    const char *adapter = json_object_get_string_member_with_default(s->status, "adapter", "Unknown");
-    gboolean simulated = json_object_get_boolean_member_with_default(s->status, "simulated", FALSE);
-    g_autofree char *adapter_text = g_strdup_printf("%s · %s%s", adapter, address ? address : "No address", simulated ? " · Simulation" : "");
-    adw_action_row_set_subtitle(ui->adapter, adapter_text);
-    const char *state = json_object_get_string_member_with_default(s->status, "state", "unknown");
-    adw_action_row_set_subtitle(ui->state, state);
-    gboolean transitioning = g_str_equal(state, "transitioning");
-    gboolean advertising = json_object_get_boolean_member_with_default(s->status, "advertising_registered", FALSE);
-    gtk_widget_set_sensitive(ui->start, !transitioning && !advertising);
-    gtk_widget_set_sensitive(ui->sync, !transitioning && !advertising);
-    gtk_widget_set_sensitive(ui->stop, !transitioning);
-    JsonArray *peers = json_object_get_array_member(s->status, "peers");
-    guint count = peers ? json_array_get_length(peers) : 0;
-    g_clear_pointer(&ui->peer_address, g_free);
-    g_autoptr(GString) connection = g_string_new(count ? "" : "Disconnected");
-    for (guint i = 0; i < count; i++) {
-        JsonObject *peer = json_array_get_object_element(peers, i);
-        const char *peer_address = json_object_get_string_member_with_default(peer, "address", "Unknown address");
-        gboolean snapshot = json_object_get_boolean_member_with_default(peer, "first_seen_in_snapshot", FALSE);
-        g_string_append_printf(connection, "%s%s · %s", i ? "\n" : "", peer_address,
-                               snapshot ? "Already connected when observed" : "Connection observed by daemon");
-        if (count == 1 && json_object_has_member(peer, "address")) ui->peer_address = g_strdup(peer_address);
-    }
-    if (count) g_string_append(connection, "\nConsole identity unverified");
-    adw_action_row_set_subtitle(ui->connection, connection->str);
-    gtk_widget_set_sensitive(ui->disconnect, !transitioning && ui->peer_address != NULL);
-    g_autofree char *disconnect_tip = ui->peer_address ? g_strdup_printf("Disconnect only %s; this does not forget pairing", ui->peer_address) :
-        g_strdup("With multiple peers, use the CLI to choose an explicit address");
-    gtk_widget_set_tooltip_text(ui->disconnect, disconnect_tip);
-    JsonArray *events = json_object_get_array_member(s->logs, "events");
-    gint64 cursor = json_object_get_int_member(s->logs, "cursor");
-    if (cursor < ui->cursor) gtk_text_buffer_set_text(ui->logs, "Daemon restarted; log cursor reset.\n", -1);
-    if (events) for (guint i = 0; i < json_array_get_length(events); i++) {
-        JsonObject *event = json_array_get_object_element(events, i);
-        g_autofree char *line = g_strdup_printf("%s  %-5s  %s\n%s\n\n",
-            json_object_get_string_member(event, "time"), json_object_get_string_member(event, "level"),
-            json_object_get_string_member(event, "event"), json_object_get_string_member(event, "message"));
-        GtkTextIter end;
-        gtk_text_buffer_get_end_iter(ui->logs, &end);
-        gtk_text_buffer_insert(ui->logs, &end, line, -1);
-    }
-    ui->cursor = cursor;
-    gint lines = gtk_text_buffer_get_line_count(ui->logs);
-    if (lines > 3000) {
-        GtkTextIter start, cutoff;
-        gtk_text_buffer_get_start_iter(ui->logs, &start);
-        gtk_text_buffer_get_iter_at_line(ui->logs, &cutoff, lines - 3000);
-        gtk_text_buffer_delete(ui->logs, &start, &cutoff);
-    }
-    snapshot_free(s);
-    ui_unref(ui);
-}
-
-static void request_update(Ui *ui, const char *method)
-{
-    if (ui->busy || ui->closed) return;
-    if (g_str_equal(method, "disconnect") && !ui->peer_address) return;
-    ui->busy = TRUE;
-    ui->refs++;
-    Request *r = g_new0(Request, 1);
-    r->path = g_strdup(ui->socket_path);
-    r->method = g_strdup(method);
-    if (g_str_equal(method, "disconnect")) r->address = g_strdup(ui->peer_address);
-    r->cursor = ui->cursor;
-    gtk_widget_set_sensitive(ui->start, FALSE);
-    gtk_widget_set_sensitive(ui->stop, FALSE);
-    gtk_widget_set_sensitive(ui->sync, FALSE);
-    gtk_widget_set_sensitive(ui->disconnect, FALSE);
-    g_autoptr(GTask) task = g_task_new(NULL, NULL, update_complete, ui);
-    g_task_set_task_data(task, r, request_free);
-    g_task_run_in_thread(task, worker);
-}
-
-static gboolean poll_status(gpointer data)
-{
-    request_update(data, "status");
-    return G_SOURCE_CONTINUE;
-}
-
-static void action_clicked(GtkButton *button, gpointer data)
-{
-    request_update(data, g_object_get_data(G_OBJECT(button), "method"));
-}
-
-static void copy_logs(GtkButton *button G_GNUC_UNUSED, gpointer data)
-{
-    Ui *ui = data;
-    GtkTextIter start, end;
-    gtk_text_buffer_get_bounds(ui->logs, &start, &end);
-    g_autofree char *text = gtk_text_buffer_get_text(ui->logs, &start, &end, FALSE);
-    gdk_clipboard_set_text(gtk_widget_get_clipboard(GTK_WIDGET(ui->window)), text);
-}
-
-static gboolean close_window(GtkWindow *window G_GNUC_UNUSED, gpointer data)
-{
-    Ui *ui = data;
-    ui->closed = TRUE;
-    g_source_remove(ui->timer);
-    ui_unref(ui);
+    if(key==GDK_KEY_Escape){u->learn_pad=-1;neutral(u);refresh_bindings(u);return TRUE;}
+    if(!gtk_switch_get_active(GTK_SWITCH(u->arm)) || gtk_drop_down_get_selected(u->source)!=0)return FALSE;
+    for(int i=0;i<INPUT_ACTIONS;i++)if(u->profile.keys[i]==key){g_hash_table_add(u->keys,GUINT_TO_POINTER(key));return TRUE;}
     return FALSE;
 }
-
-static AdwActionRow *add_row(AdwPreferencesGroup *group, const char *title)
-{
-    AdwActionRow *row = ADW_ACTION_ROW(adw_action_row_new());
-    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), title);
-    adw_action_row_set_subtitle(row, "Waiting for daemon");
-    adw_preferences_group_add(group, GTK_WIDGET(row));
-    return row;
+static void key_released(GtkEventControllerKey *c,guint key,guint code,GdkModifierType mod,Ui *u){(void)c;(void)code;(void)mod;g_hash_table_remove(u->keys,GUINT_TO_POINTER(gdk_keyval_to_lower(key)));}
+static void focus_changed(GObject *o,GParamSpec *p,Ui *u){(void)o;(void)p;if(!gtk_window_is_active(u->window)){g_hash_table_remove_all(u->keys);if(u->online)request(u,"release");}}
+static void armed_changed(GObject *o,GParamSpec *p,Ui *u){(void)o;(void)p;g_hash_table_remove_all(u->keys);if(gtk_switch_get_active(GTK_SWITCH(u->arm)))gtk_widget_grab_focus(u->drawing);else if(u->online)request(u,"release");}
+static void source_changed(GObject *o,GParamSpec *p,Ui *u){(void)o;(void)p;neutral(u);gtk_label_set_text(u->source_hint,gtk_drop_down_get_selected(u->source)==0?"Keyboard input works while this window is focused. Escape pauses input.":"Standard SDL gamepad mapping. Customize buttons and stick settings below.");}
+static void device_selected(GObject *o,GParamSpec *p,Ui *u) {
+    (void)o;(void)p;if(u->loading)return;neutral(u);
+    if(u->pad){SDL_GameControllerClose(u->pad);u->pad=NULL;}
+    guint i=gtk_drop_down_get_selected(u->devices);
+    if(i>0 && i<u->device_ids->len)u->pad=SDL_GameControllerOpen(GPOINTER_TO_INT(g_ptr_array_index(u->device_ids,i)));
+    if(i>0 && !u->pad)toast(u,SDL_GetError());
 }
-
-static void activate(GtkApplication *application, gpointer data G_GNUC_UNUSED)
-{
-    GtkWindow *existing = gtk_application_get_active_window(application);
-    if (existing) { gtk_window_present(existing); return; }
-    Ui *ui = g_new0(Ui, 1);
-    ui->refs = 1;
-    ui->socket_path = jc_socket_path();
-    ui->window = GTK_WINDOW(adw_application_window_new(application));
-    gtk_window_set_title(ui->window, "Joy-Con 2 Lab");
-    gtk_window_set_default_size(ui->window, 760, 760);
-    GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    GtkWidget *header = adw_header_bar_new();
-    adw_header_bar_set_title_widget(ADW_HEADER_BAR(header), adw_window_title_new("Joy-Con 2 Lab", "Linux BLE discovery probe"));
-    gtk_box_append(GTK_BOX(outer), header);
-    GtkWidget *body = gtk_box_new(GTK_ORIENTATION_VERTICAL, 18);
-    gtk_widget_set_margin_start(body, 24);
-    gtk_widget_set_margin_end(body, 24);
-    gtk_widget_set_margin_top(body, 12);
-    gtk_widget_set_margin_bottom(body, 24);
-    gtk_widget_set_vexpand(body, TRUE);
-    gtk_box_append(GTK_BOX(outer), body);
-    AdwPreferencesGroup *group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
-    adw_preferences_group_set_title(group, "Joy-Con 2 R");
-    adw_preferences_group_set_description(group, "Discovery only. Pairing and input reports are not implemented.");
-    ui->adapter = add_row(group, "Bluetooth adapter");
-    ui->state = add_row(group, "Emulator state");
-    ui->connection = add_row(group, "Connected adapter peers");
-    adw_preferences_row_set_use_markup(ADW_PREFERENCES_ROW(ui->connection), FALSE);
-    gtk_box_append(GTK_BOX(body), GTK_WIDGET(group));
-    GtkWidget *buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    ui->start = gtk_button_new_with_label("Start advertising");
-    ui->stop = gtk_button_new_with_label("Stop advertising");
-    ui->sync = gtk_button_new_with_label("Sync");
-    ui->disconnect = gtk_button_new_with_label("Disconnect peer");
-    GtkWidget *actions[] = {ui->start, ui->stop, ui->sync, ui->disconnect};
-    const char *methods[] = {"start", "stop", "sync", "disconnect"};
-    for (guint i = 0; i < G_N_ELEMENTS(actions); i++) {
-        g_object_set_data(G_OBJECT(actions[i]), "method", (gpointer)methods[i]);
-        g_signal_connect(actions[i], "clicked", G_CALLBACK(action_clicked), ui);
-        gtk_box_append(GTK_BOX(buttons), actions[i]);
+static void devices_scan(Ui *u) {
+    SDL_JoystickID selected=u->pad?SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(u->pad)):-1;
+    u->loading=TRUE;gtk_string_list_splice(u->device_names,0,g_list_model_get_n_items(G_LIST_MODEL(u->device_names)),NULL);g_ptr_array_set_size(u->device_ids,0);
+    gtk_string_list_append(u->device_names,"Select a controller");g_ptr_array_add(u->device_ids,GINT_TO_POINTER(-1));guint choice=0;
+    for(int i=0;i<SDL_NumJoysticks();i++)if(SDL_IsGameController(i)) {
+        gtk_string_list_append(u->device_names,SDL_GameControllerNameForIndex(i));g_ptr_array_add(u->device_ids,GINT_TO_POINTER(i));
+        if(SDL_JoystickGetDeviceInstanceID(i)==selected)choice=u->device_ids->len-1;
     }
-    gtk_widget_add_css_class(ui->start, "suggested-action");
-    gtk_widget_set_tooltip_text(ui->sync, "Advertise for discovery; Nintendo pairing is not yet implemented");
-    gtk_box_append(GTK_BOX(body), buttons);
-    ui->error = GTK_LABEL(gtk_label_new(""));
-    gtk_label_set_wrap(ui->error, TRUE);
-    gtk_label_set_xalign(ui->error, 0);
-    gtk_widget_add_css_class(GTK_WIDGET(ui->error), "error");
-    gtk_box_append(GTK_BOX(body), GTK_WIDGET(ui->error));
-    GtkWidget *log_header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    GtkWidget *label = gtk_label_new("Live logs");
-    gtk_widget_add_css_class(label, "heading");
-    gtk_widget_set_hexpand(label, TRUE);
-    gtk_label_set_xalign(GTK_LABEL(label), 0);
-    gtk_box_append(GTK_BOX(log_header), label);
-    GtkWidget *copy = gtk_button_new_with_label("Copy logs");
-    g_signal_connect(copy, "clicked", G_CALLBACK(copy_logs), ui);
-    gtk_box_append(GTK_BOX(log_header), copy);
-    gtk_box_append(GTK_BOX(body), log_header);
-    GtkWidget *scroller = gtk_scrolled_window_new();
-    gtk_widget_set_vexpand(scroller, TRUE);
-    GtkWidget *view = gtk_text_view_new();
-    gtk_text_view_set_editable(GTK_TEXT_VIEW(view), FALSE);
-    gtk_text_view_set_monospace(GTK_TEXT_VIEW(view), TRUE);
-    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(view), GTK_WRAP_WORD_CHAR);
-    gtk_text_view_set_left_margin(GTK_TEXT_VIEW(view), 12);
-    gtk_text_view_set_right_margin(GTK_TEXT_VIEW(view), 12);
-    gtk_text_view_set_top_margin(GTK_TEXT_VIEW(view), 12);
-    ui->logs = gtk_text_view_get_buffer(GTK_TEXT_VIEW(view));
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroller), view);
-    gtk_widget_add_css_class(scroller, "card");
-    gtk_box_append(GTK_BOX(body), scroller);
-    adw_application_window_set_content(ADW_APPLICATION_WINDOW(ui->window), outer);
-    g_signal_connect(ui->window, "close-request", G_CALLBACK(close_window), ui);
-    ui->timer = g_timeout_add_seconds(1, poll_status, ui);
-    request_update(ui, "status");
-    gtk_window_present(ui->window);
+    gtk_drop_down_set_selected(u->devices,choice);u->loading=FALSE;u->joystick_count=SDL_NumJoysticks();
+    if(!choice && u->pad){SDL_GameControllerClose(u->pad);u->pad=NULL;neutral(u);toast(u,"Controller disconnected; inputs released");}
 }
-
-int main(int argc, char **argv)
-{
-    g_autoptr(AdwApplication) application = adw_application_new("io.github.wozt.pcble2gamepad", G_APPLICATION_DEFAULT_FLAGS);
-    g_signal_connect(application, "activate", G_CALLBACK(activate), NULL);
-    return g_application_run(G_APPLICATION(application), argc, argv);
+static void draw(GtkDrawingArea *area,cairo_t *cr,int width,int height,gpointer data) {
+    (void)area;Ui *u=data;double scale=MIN(width/640.,height/270.);cairo_translate(cr,(width-640*scale)/2,(height-270*scale)/2);cairo_scale(cr,scale,scale);
+    cairo_set_source_rgb(cr,.12,.15,.18);cairo_move_to(cr,155,45);cairo_curve_to(cr,70,40,48,205,100,234);cairo_curve_to(cr,140,260,178,180,210,178);cairo_line_to(cr,430,178);cairo_curve_to(cr,465,180,505,260,545,234);cairo_curve_to(cr,595,205,570,40,485,45);cairo_close_path(cr);cairo_fill_preserve(cr);cairo_set_source_rgb(cr,.24,.29,.32);cairo_set_line_width(cr,2);cairo_stroke(cr);
+    for(int i=0;i<2;i++){double x=i?396:183,y=i?170:103;cairo_set_source_rgb(cr,.07,.09,.11);cairo_arc(cr,x,y,39,0,2*G_PI);cairo_fill(cr);cairo_set_source_rgb(cr,.25,.32,.36);cairo_arc(cr,x+u->frame.axes[2*i]*22,y-u->frame.axes[2*i+1]*22,22,0,2*G_PI);cairo_fill(cr);cairo_set_source_rgb(cr,.32,.88,.68);cairo_arc(cr,x+u->frame.axes[2*i]*22,y-u->frame.axes[2*i+1]*22,3,0,2*G_PI);cairo_fill(cr);}
+    const double x[]={518,490,490,462},y[]={106,134,78,106};const char *names[]={"A","B","X","Y"};
+    for(int i=0;i<4;i++){if(u->frame.active[i])cairo_set_source_rgb(cr,.28,.85,.65);else cairo_set_source_rgb(cr,.23,.28,.32);cairo_arc(cr,x[i],y[i],17,0,2*G_PI);cairo_fill(cr);cairo_set_source_rgb(cr,.9,.94,.97);cairo_set_font_size(cr,14);cairo_move_to(cr,x[i]-5,y[i]+5);cairo_show_text(cr,names[i]);}
+    for(int i=0;i<4;i++){double dx[]={0,0,-20,20},dy[]={-20,20,0,0};if(u->frame.active[14+i])cairo_set_source_rgb(cr,.28,.85,.65);else cairo_set_source_rgb(cr,.23,.28,.32);cairo_rectangle(cr,260+dx[i],154+dy[i],16,16);cairo_fill(cr);}
+    cairo_set_source_rgb(cr,.44,.53,.59);cairo_set_font_size(cr,12);cairo_move_to(cr,276,77);cairo_show_text(cr,"pcble2gamepad");
+    for(int i=0;i<4;i++){cairo_set_source_rgb(cr,.28,.85,.65);cairo_rectangle(cr,298+i*13,116,7,3);cairo_fill(cr);}
 }
+static void adapters_scan(GtkButton *b,Ui *u) {
+    (void)b;g_autoptr(GError)e=NULL;g_autoptr(GDBusConnection)bus=g_bus_get_sync(G_BUS_TYPE_SYSTEM,NULL,&e);if(!bus){toast(u,e->message);return;}
+    g_autoptr(GVariant)reply=g_dbus_connection_call_sync(bus,"org.bluez","/","org.freedesktop.DBus.ObjectManager","GetManagedObjects",NULL,G_VARIANT_TYPE("(a{oa{sa{sv}}})"),0,1500,NULL,&e);
+    if(!reply){toast(u,e->message);return;}
+    gtk_string_list_splice(u->adapter_names,0,g_list_model_get_n_items(G_LIST_MODEL(u->adapter_names)),NULL);g_ptr_array_set_size(u->adapter_ids,0);
+    GVariantIter *objects;g_variant_get(reply,"(a{oa{sa{sv}}})",&objects);char *path;GVariant *interfaces;
+    guint selected=0;
+    while(g_variant_iter_next(objects,"{o@a{sa{sv}}}",&path,&interfaces)) {
+        GVariant *props=g_variant_lookup_value(interfaces,"org.bluez.Adapter1",G_VARIANT_TYPE_VARDICT);
+        if(props){const char *address="",*alias="Bluetooth adapter";g_variant_lookup(props,"Address","&s",&address);g_variant_lookup(props,"Alias","&s",&alias);
+            char *id=g_path_get_basename(path),*name=g_strdup_printf("%s · %s · %s",id,address,alias);gtk_string_list_append(u->adapter_names,name);g_ptr_array_add(u->adapter_ids,id);g_free(name);
+            if(!strcmp(address,"E0:AD:47:40:70:D9"))selected=u->adapter_ids->len-1;
+            g_variant_unref(props);
+        }g_free(path);g_variant_unref(interfaces);
+    }g_variant_iter_free(objects);gtk_drop_down_set_selected(u->adapters,selected);
+}
+static void request_free(gpointer data){Request *r=data;g_free(r->path);json_object_unref(r->request);g_free(r);}
+static void worker(GTask *task,gpointer source,gpointer data,GCancellable *cancel) {
+    (void)source;(void)cancel;Request *r=data;GError *e=NULL;JsonObject *o=jc_client_request_object(r->path,r->request,&e);
+    if(!o)g_task_return_error(task,e);else g_task_return_pointer(task,o,(GDestroyNotify)json_object_unref);
+}
+static void finish_close(Ui *u){u->closed=TRUE;gtk_window_destroy(u->window);g_application_quit(G_APPLICATION(u->app));ui_unref(u);}
+static void complete(GObject *source,GAsyncResult *result,gpointer data) {
+    (void)source;Ui *u=data;g_autoptr(GError)e=NULL;g_autoptr(JsonObject)o=g_task_propagate_pointer(G_TASK(result),&e);u->busy=FALSE;
+    Request *r=g_task_get_task_data(G_TASK(result));const char *method=json_object_get_string_member(r->request,"method");
+    if(u->closed){ui_unref(u);return;}
+    if(u->closing && (!u->launcher && (!strcmp(method,"stop") || e))){finish_close(u);ui_unref(u);return;}
+    u->online=o && json_object_get_boolean_member_with_default(o,"ok",FALSE);
+    if(u->online) {
+        JsonObject *s=json_object_get_object_member(o,"result");const char *state=json_object_get_string_member_with_default(s,"state","waiting");
+        gboolean simulated=json_object_get_boolean_member_with_default(s,"simulated",FALSE);
+        gtk_label_set_text(u->status,simulated?"SIMULATION":!strcmp(state,"connected")?"CONNECTED":"WAITING FOR CONSOLE");
+        gtk_label_set_text(u->peer,json_object_get_string_member_with_default(s,"peer",""));
+        char *metrics=g_strdup_printf("%"G_GINT64_FORMAT" reports sent  ·  %"G_GINT64_FORMAT" received",json_object_get_int_member_with_default(s,"tx",0),json_object_get_int_member_with_default(s,"rx",0));gtk_label_set_text(u->metrics,metrics);g_free(metrics);
+        gtk_label_set_text(u->error,"");
+        JsonArray *logs=json_object_get_array_member(s,"logs");GString *text=g_string_new(NULL);
+        if(logs)for(guint i=0;i<json_array_get_length(logs);i++)g_string_append_printf(text,"%s\n",json_array_get_string_element(logs,i));
+        gtk_text_buffer_set_text(u->logs,text->str,-1);g_string_free(text,TRUE);
+    } else {
+        gtk_label_set_text(u->status,"OFFLINE");gtk_label_set_text(u->peer,"Start a Bluetooth session to connect your console.");
+        if(o)gtk_label_set_text(u->error,json_object_get_string_member_with_default(o,"error","Request failed"));
+        else if(strcmp(method,"status"))gtk_label_set_text(u->error,e?e->message:"Backend unavailable");
+    }
+    gtk_widget_set_sensitive(u->start,!u->online && !u->launcher);gtk_widget_set_sensitive(u->stop,u->online);gtk_widget_set_sensitive(GTK_WIDGET(u->adapters),!u->online);
+    if(u->closing){request(u,"stop");}else if(u->pending){char *pending=g_steal_pointer(&u->pending);request(u,pending);g_free(pending);}
+    ui_unref(u);
+}
+static void request(Ui *u,const char *method) {
+    if(u->closed)return;
+    if(u->busy){if(strcmp(method,"status") && strcmp(method,"input")){g_free(u->pending);u->pending=g_strdup(method);}return;}
+    u->busy=TRUE;Request *r=g_new0(Request,1);r->path=g_strdup(u->socket);r->request=json_object_new();
+    json_object_set_int_member(r->request,"version",1);json_object_set_string_member(r->request,"method",method);
+    if(!strcmp(method,"input")){
+        JsonArray *a=json_array_new();for(int i=0;i<3;i++)json_array_add_int_element(a,u->frame.buttons[i]);json_object_set_array_member(r->request,"buttons",a);
+        a=json_array_new();for(int i=0;i<4;i++)json_array_add_int_element(a,u->frame.sticks[i]);json_object_set_array_member(r->request,"sticks",a);
+    }
+    u->refs++;GTask *task=g_task_new(NULL,NULL,complete,u);g_task_set_task_data(task,r,request_free);g_task_run_in_thread(task,worker);g_object_unref(task);
+}
+static gboolean tick(gpointer data) {
+    Ui *u=data;if(u->closed || u->closing)return G_SOURCE_REMOVE;
+    SDL_Event event;gboolean rescan=FALSE;while(SDL_PollEvent(&event))if(event.type==SDL_CONTROLLERDEVICEADDED || event.type==SDL_CONTROLLERDEVICEREMOVED)rescan=TRUE;
+    if(rescan || SDL_NumJoysticks()!=u->joystick_count)devices_scan(u);
+    gboolean pressed[INPUT_ACTIONS]={0};double axes[4]={0};
+    if(gtk_drop_down_get_selected(u->source)==0){for(int i=0;i<INPUT_ACTIONS;i++)pressed[i]=g_hash_table_contains(u->keys,GUINT_TO_POINTER(u->profile.keys[i]));}
+    else input_gamepad(&u->profile,u->pad,pressed,axes);
+    if(u->pad)for(int b=0;b<SDL_CONTROLLER_BUTTON_MAX+2;b++) {
+        gboolean down=b<SDL_CONTROLLER_BUTTON_MAX?SDL_GameControllerGetButton(u->pad,(SDL_GameControllerButton)b):SDL_GameControllerGetAxis(u->pad,b==SDL_CONTROLLER_BUTTON_MAX?SDL_CONTROLLER_AXIS_TRIGGERLEFT:SDL_CONTROLLER_AXIS_TRIGGERRIGHT)>16000;
+        if(u->learn_pad>=0 && down && !u->previous_pad[b]){u->profile.buttons[u->learn_pad]=b;u->learn_pad=-1;refresh_bindings(u);toast(u,"Controller binding updated");}
+        u->previous_pad[b]=down;
+    }
+    input_compose(&u->profile,pressed,axes,&u->frame);gtk_widget_queue_draw(u->drawing);
+    gboolean allowed=gtk_window_is_active(u->window) || (u->profile.background && gtk_drop_down_get_selected(u->source)==1);
+    if(u->online && gtk_switch_get_active(GTK_SWITCH(u->arm)) && allowed)request(u,"input");
+    else if(++u->ticks%20==0)request(u,"status");
+    return G_SOURCE_CONTINUE;
+}
+static void launcher_done(GObject *source,GAsyncResult *result,gpointer data) {
+    Ui *u=data;g_autoptr(GError)e=NULL;gboolean ok=g_subprocess_wait_check_finish(G_SUBPROCESS(source),result,&e);
+    g_clear_object(&u->launcher);
+    if(u->closing){finish_close(u);ui_unref(u);return;}
+    if(!u->closed){if(!ok)gtk_label_set_text(u->error,e->message);gtk_widget_set_sensitive(u->start,!u->online);request(u,"status");}
+    ui_unref(u);
+}
+static void start(GtkButton *b,Ui *u) {
+    (void)b;if(u->launcher || u->online)return;
+    guint i=gtk_drop_down_get_selected(u->adapters);if(i>=u->adapter_ids->len){toast(u,"Select a Bluetooth adapter first");return;}
+    const char *override=g_getenv("PCBLE2GAMEPAD_RUNNER");g_autofree char *exe=g_file_read_link("/proc/self/exe",NULL),*build=exe?g_path_get_dirname(exe):NULL,*root=build?g_path_get_dirname(build):NULL;
+    g_autofree char *checkout=root?g_build_filename(root,"poc","run-classic.sh",NULL):NULL;
+    g_autofree char *runner=override?g_strdup(override):checkout&&g_file_test(checkout,G_FILE_TEST_IS_EXECUTABLE)?g_strdup(checkout):g_strdup(PCBLE2GAMEPAD_PRO_RUNNER);
+    if(!g_file_test(runner,G_FILE_TEST_IS_EXECUTABLE)){toast(u,"Bluetooth backend launcher is not installed");return;}
+    g_autoptr(GError)e=NULL;u->launcher=g_subprocess_new(G_SUBPROCESS_FLAGS_NONE,&e,"pkexec",runner,g_ptr_array_index(u->adapter_ids,i),"--desktop",NULL);
+    if(!u->launcher){toast(u,e->message);return;}
+    u->refs++;g_subprocess_wait_check_async(u->launcher,NULL,launcher_done,u);gtk_widget_set_sensitive(u->start,FALSE);gtk_label_set_text(u->status,"STARTING SESSION");
+}
+static void stop_clicked(GtkButton *b,Ui *u){(void)b;neutral(u);request(u,"stop");}
+static gboolean close_window(GtkWindow *w,Ui *u) {
+    if(u->closing)return TRUE;
+    u->closing=TRUE;g_source_remove(u->timer);gtk_widget_set_visible(GTK_WIDGET(w),FALSE);
+    if(u->launcher && !u->online)g_subprocess_send_signal(u->launcher,SIGTERM);
+    request(u,"stop");return TRUE;
+}
+static void copy_logs(GtkButton *b,Ui *u){(void)b;GtkTextIter a,z;gtk_text_buffer_get_bounds(u->logs,&a,&z);char *text=gtk_text_buffer_get_text(u->logs,&a,&z,FALSE);gdk_clipboard_set_text(gtk_widget_get_clipboard(GTK_WIDGET(u->window)),text);g_free(text);toast(u,"Diagnostics copied");}
+static void defaults(GtkButton *b,Ui *u){neutral(u);input_profile_defaults(&u->profile,GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b),"azerty")));refresh_bindings(u);toast(u,"Defaults restored; save to keep them");}
+static GtkWidget *button(const char *text,GCallback callback,Ui *u){GtkWidget *b=gtk_button_new_with_label(text);g_signal_connect(b,"clicked",callback,u);return b;}
+static void activate(GtkApplication *app,gpointer unused) {
+    (void)unused;GtkWindow *existing=gtk_application_get_active_window(app);if(existing){gtk_window_present(existing);return;}
+    Ui *u=g_new0(Ui,1);u->refs=1;u->app=app;u->learn_key=u->learn_pad=-1;u->joystick_count=-1;
+    u->keys=g_hash_table_new(g_direct_hash,g_direct_equal);u->adapter_ids=g_ptr_array_new_with_free_func(g_free);u->device_ids=g_ptr_array_new();
+    u->config_dir=g_build_filename(g_get_user_config_dir(),"pcble2gamepad","profiles",NULL);g_mkdir_with_parents(u->config_dir,0700);u->profile_name=g_strdup("Default");
+    input_profile_defaults(&u->profile,FALSE);g_autofree char *path=profile_path(u,u->profile_name);
+    if(g_file_test(path,G_FILE_TEST_EXISTS))input_profile_load(&u->profile,path,NULL);else input_profile_save(&u->profile,path,NULL);
+    const char *override=g_getenv("PCBLE2GAMEPAD_PRO_SOCKET");u->socket=override?g_strdup(override):g_strdup_printf("/run/pcble2gamepad/%u/pro.sock",(unsigned)getuid());
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,"1");SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER);
+    u->window=GTK_WINDOW(adw_application_window_new(app));gtk_window_set_title(u->window,"pcble2gamepad — Controller Studio");gtk_window_set_default_size(u->window,1120,840);
+    adw_style_manager_set_color_scheme(adw_style_manager_get_default(),ADW_COLOR_SCHEME_PREFER_DARK);
+    GtkCssProvider *css=gtk_css_provider_new();
+    gtk_css_provider_load_from_string(css,".studio-nav { background: alpha(@window_fg_color,.035); padding: 12px; } .studio-nav row { border-radius: 10px; margin: 3px 0; padding: 8px; } .connection-badge { color: #54d6ac; font-size: 12px; font-weight: 800; letter-spacing: 1px; } .hero { background: alpha(@window_fg_color,.025); border: 1px solid alpha(@window_fg_color,.07); border-radius: 22px; padding: 18px; } .title-1 { font-size: 30px; } .binding { min-width: 105px; }");
+    gtk_style_context_add_provider_for_display(gtk_widget_get_display(GTK_WIDGET(u->window)),GTK_STYLE_PROVIDER(css),GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);g_object_unref(css);
+    GtkWidget *outer=gtk_box_new(GTK_ORIENTATION_VERTICAL,0),*header=adw_header_bar_new();
+    adw_header_bar_set_title_widget(ADW_HEADER_BAR(header),adw_window_title_new("pcble2gamepad","Controller Studio"));gtk_box_append(GTK_BOX(outer),header);
+    GtkWidget *profile_bar=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);u->profile_names=gtk_string_list_new(NULL);u->profiles=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->profile_names),NULL));
+    gtk_widget_set_tooltip_text(GTK_WIDGET(u->profiles),"Saved input profile");gtk_box_append(GTK_BOX(profile_bar),GTK_WIDGET(u->profiles));
+    gtk_box_append(GTK_BOX(profile_bar),button("Save",G_CALLBACK(profile_saved),u));gtk_box_append(GTK_BOX(profile_bar),button("Save as…",G_CALLBACK(new_profile),u));adw_header_bar_pack_end(ADW_HEADER_BAR(header),profile_bar);
+    GtkWidget *content=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,0);gtk_widget_set_vexpand(content,TRUE);gtk_box_append(GTK_BOX(outer),content);
+    u->stack=GTK_STACK(gtk_stack_new());gtk_stack_set_transition_type(u->stack,GTK_STACK_TRANSITION_TYPE_CROSSFADE);gtk_widget_set_hexpand(GTK_WIDGET(u->stack),TRUE);
+    GtkWidget *sidebar=gtk_stack_sidebar_new();gtk_stack_sidebar_set_stack(GTK_STACK_SIDEBAR(sidebar),u->stack);gtk_widget_set_size_request(sidebar,190,-1);gtk_widget_add_css_class(sidebar,"studio-nav");gtk_box_append(GTK_BOX(content),sidebar);gtk_box_append(GTK_BOX(content),GTK_WIDGET(u->stack));
+    u->toast=ADW_TOAST_OVERLAY(adw_toast_overlay_new());adw_toast_overlay_set_child(u->toast,outer);adw_application_window_set_content(ADW_APPLICATION_WINDOW(u->window),GTK_WIDGET(u->toast));
+    GtkWidget *box=page(u,"overview","Connection","Your PC, a Pro Controller. Connect to Switch 2, choose an input source, then enable input.");
+    GtkWidget *hero=gtk_box_new(GTK_ORIENTATION_VERTICAL,6);gtk_widget_add_css_class(hero,"hero");
+    u->status=GTK_LABEL(label("OFFLINE","connection-badge"));gtk_box_append(GTK_BOX(hero),GTK_WIDGET(u->status));gtk_box_append(GTK_BOX(hero),label("Switch Pro Controller","title-2"));
+    u->peer=GTK_LABEL(label("Start a Bluetooth session to connect your console.","dim-label"));gtk_box_append(GTK_BOX(hero),GTK_WIDGET(u->peer));
+    u->drawing=gtk_drawing_area_new();gtk_widget_set_size_request(u->drawing,-1,260);gtk_widget_set_focusable(u->drawing,TRUE);gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(u->drawing),draw,u,NULL);gtk_box_append(GTK_BOX(hero),u->drawing);
+    u->metrics=GTK_LABEL(label("Live input preview · no physical controller required","dim-label"));gtk_box_append(GTK_BOX(hero),GTK_WIDGET(u->metrics));gtk_box_append(GTK_BOX(box),hero);
+    AdwPreferencesGroup *g=group(box,"Bluetooth session","Starting a session requests administrator authentication and temporarily pauses other Bluetooth services.");
+    u->adapter_names=gtk_string_list_new(NULL);u->adapters=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->adapter_names),NULL));gtk_widget_set_size_request(GTK_WIDGET(u->adapters),280,-1);
+    row(g,"Adapter","Choose by address; hci numbers can change after reboot.",GTK_WIDGET(u->adapters));
+    GtkWidget *actions=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);u->start=button("Connect to Switch",G_CALLBACK(start),u);gtk_widget_add_css_class(u->start,"suggested-action");u->stop=button("Stop session",G_CALLBACK(stop_clicked),u);gtk_widget_set_sensitive(u->stop,FALSE);
+    gtk_box_append(GTK_BOX(actions),u->start);gtk_box_append(GTK_BOX(actions),u->stop);gtk_box_append(GTK_BOX(actions),button("Refresh adapters",G_CALLBACK(adapters_scan),u));gtk_box_append(GTK_BOX(box),actions);
+    u->error=GTK_LABEL(label("","error"));gtk_box_append(GTK_BOX(box),GTK_WIDGET(u->error));
+    g=group(box,"Input routing","The console must be on Controllers → Change Grip/Order for first pairing.");
+    const char *sources[]={"Keyboard","PC controller",NULL};u->source=GTK_DROP_DOWN(gtk_drop_down_new_from_strings(sources));row(g,"Input source",NULL,GTK_WIDGET(u->source));
+    u->arm=gtk_switch_new();row(g,"Enable input","Escape pauses. Input releases after a lost connection.",u->arm);u->source_hint=GTK_LABEL(label("Keyboard input works while this window is focused. Escape pauses input.","dim-label"));gtk_box_append(GTK_BOX(box),GTK_WIDGET(u->source_hint));
+    box=page(u,"keyboard","Keyboard bindings","Map keys to controller buttons and both sticks. Duplicate bindings are moved to the new action.");
+    u->capture_hint=label("Click a binding to change it. Escape cancels; Backspace clears it.","dim-label");gtk_box_append(GTK_BOX(box),u->capture_hint);
+    GtkWidget *presets=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);GtkWidget *wasd=button("WASD defaults",G_CALLBACK(defaults),u),*azerty=button("ZQSD defaults",G_CALLBACK(defaults),u);g_object_set_data(G_OBJECT(azerty),"azerty",GINT_TO_POINTER(1));gtk_box_append(GTK_BOX(presets),wasd);gtk_box_append(GTK_BOX(presets),azerty);gtk_box_append(GTK_BOX(box),presets);
+    g=group(box,"Buttons",NULL);
+    for(int i=0;i<INPUT_ACTIONS;i++){if(i==18)g=group(box,"Stick directions",NULL);GtkWidget *b=button("",G_CALLBACK(bind_key),u);u->key_buttons[i]=GTK_BUTTON(b);g_object_set_data(G_OBJECT(b),"index",GINT_TO_POINTER(i));gtk_widget_add_css_class(b,"binding");row(g,input_action_names[i],NULL,b);}
+    box=page(u,"controller","PC controller","Forward a USB or Bluetooth gamepad through the Pro Controller profile. No physical Nintendo controller is needed.");
+    g=group(box,"Source device","SDL standard gamepad mapping supports Xbox, PlayStation and many compatible controllers.");
+    u->device_names=gtk_string_list_new(NULL);u->devices=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->device_names),NULL));row(g,"Connected controller","Devices update automatically when plugged in or removed.",GTK_WIDGET(u->devices));
+    g=group(box,"Button mapping","Default mapping follows button labels. Click a binding and press the source button or trigger to change it.");
+    for(int i=0;i<INPUT_BUTTONS;i++){GtkWidget *b=button("",G_CALLBACK(bind_pad),u);u->pad_buttons[i]=GTK_BUTTON(b);g_object_set_data(G_OBJECT(b),"index",GINT_TO_POINTER(i));gtk_widget_add_css_class(b,"binding");row(g,input_action_names[i],NULL,b);}
+    box=page(u,"settings","Input settings","Fine-tune stick response and choose how controller input behaves when the window loses focus.");
+    g=group(box,"Stick response","A radial dead zone avoids drift while preserving direction.");
+    u->deadzone=GTK_SCALE(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,0,50,1));gtk_widget_set_size_request(GTK_WIDGET(u->deadzone),230,-1);gtk_scale_set_digits(u->deadzone,0);row(g,"Dead zone (%)",NULL,GTK_WIDGET(u->deadzone));
+    u->sensitivity=GTK_SCALE(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,25,200,5));gtk_widget_set_size_request(GTK_WIDGET(u->sensitivity),230,-1);gtk_scale_set_digits(u->sensitivity,0);row(g,"Sensitivity (%)",NULL,GTK_WIDGET(u->sensitivity));
+    const char *axes[]={"Invert left X","Invert left Y","Invert right X","Invert right Y"};
+    for(int i=0;i<4;i++){u->invert[i]=GTK_SWITCH(gtk_switch_new());row(g,axes[i],NULL,GTK_WIDGET(u->invert[i]));g_signal_connect(u->invert[i],"notify::active",G_CALLBACK(settings_changed),u);}
+    u->swap=GTK_SWITCH(gtk_switch_new());row(g,"Swap sticks","Swap the two physical gamepad sticks.",GTK_WIDGET(u->swap));
+    g=group(box,"Focus and recovery",NULL);u->background=GTK_SWITCH(gtk_switch_new());row(g,"Gamepad input in background","Keyboard input always requires window focus.",GTK_WIDGET(u->background));
+    row(g,"Automatic release","Buttons and sticks return to neutral within 500 ms if input updates stop.",NULL);
+    row(g,"Session lifetime","Stopping or closing this window stops the backend and restores normal Bluetooth.",NULL);
+    box=page(u,"diagnostics","Diagnostics","Live session events, association requests and HID initialization. Simulation is always labeled.");
+    gtk_box_append(GTK_BOX(box),button("Copy diagnostics",G_CALLBACK(copy_logs),u));GtkWidget *view=gtk_text_view_new();gtk_text_view_set_editable(GTK_TEXT_VIEW(view),FALSE);gtk_text_view_set_monospace(GTK_TEXT_VIEW(view),TRUE);gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(view),GTK_WRAP_WORD_CHAR);u->logs=gtk_text_view_get_buffer(GTK_TEXT_VIEW(view));gtk_widget_set_size_request(view,-1,430);margin(view,10);gtk_box_append(GTK_BOX(box),view);
+    row(group(box,"Current scope",NULL),"Switch 1 Pro Controller","Buttons and left stick verified on Switch 2. Right stick implemented; no separate visual test. BLE research remains in pcble2gamepad-ble-lab.",NULL);
+    refresh_bindings(u);profile_scan(u);devices_scan(u);adapters_scan(NULL,u);
+    g_signal_connect(u->profiles,"notify::selected",G_CALLBACK(profile_selected),u);g_signal_connect(u->devices,"notify::selected",G_CALLBACK(device_selected),u);g_signal_connect(u->source,"notify::selected",G_CALLBACK(source_changed),u);
+    g_signal_connect(u->arm,"notify::active",G_CALLBACK(armed_changed),u);g_signal_connect(u->window,"notify::is-active",G_CALLBACK(focus_changed),u);g_signal_connect(u->window,"close-request",G_CALLBACK(close_window),u);
+    g_signal_connect(u->deadzone,"value-changed",G_CALLBACK(scale_changed),u);g_signal_connect(u->sensitivity,"value-changed",G_CALLBACK(scale_changed),u);g_signal_connect(u->swap,"notify::active",G_CALLBACK(settings_changed),u);g_signal_connect(u->background,"notify::active",G_CALLBACK(settings_changed),u);
+    GtkEventController *keys=gtk_event_controller_key_new();gtk_event_controller_set_propagation_phase(keys,GTK_PHASE_CAPTURE);g_signal_connect(keys,"key-pressed",G_CALLBACK(key_pressed),u);g_signal_connect(keys,"key-released",G_CALLBACK(key_released),u);gtk_widget_add_controller(GTK_WIDGET(u->window),keys);
+    u->timer=g_timeout_add(16,tick,u);request(u,"status");gtk_window_present(u->window);
+}
+int main(int argc,char **argv){AdwApplication *app=adw_application_new("io.github.wozt.pcble2gamepad",G_APPLICATION_DEFAULT_FLAGS);g_signal_connect(app,"activate",G_CALLBACK(activate),NULL);int result=g_application_run(G_APPLICATION(app),argc,argv);g_object_unref(app);SDL_Quit();return result;}

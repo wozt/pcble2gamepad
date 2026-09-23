@@ -102,3 +102,38 @@ persistent controller state from accumulated mouse deltas and allow atomic updat
 of both in one report. Sustained low-latency input transport requires measurements,
 persistent connections/batches and explicit ownership rules; v1 is administration
 and diagnostics only. capture2cloud must use the API, never simulated GTK clicks.
+
+## Pro Controller session API
+
+Controller Studio uses a separate local API owned by the Classic HID backend. Its
+normal path is `/run/pcble2gamepad/UID/pro.sock`; the socket and parent directory
+are mode `0600` and `0700`, and peer credentials must match that desktop UID. The
+root backend creates the socket for the authenticated `PKEXEC_UID`. Mock mode uses
+`$XDG_RUNTIME_DIR/pcble2gamepad/pro.sock`. `PCBLE2GAMEPAD_PRO_SOCKET` can override
+the mock/client path for tests.
+
+The same one-line JSON framing and version `1` apply:
+
+```json
+{"version":1,"method":"status"}
+{"version":1,"method":"input","buttons":[8,0,0],"sticks":[2159,1916,2070,2013]}
+{"version":1,"method":"release"}
+{"version":1,"method":"stop"}
+```
+
+`buttons` contains the three Switch report bytes. Each `sticks` member is a 12-bit
+value from 0 through 4095. The arrays must have exactly three and four integer
+members. A valid input frame replaces the complete controller state atomically.
+If another valid frame does not arrive within 500 ms, the backend returns every
+button and stick to neutral. `release` does so immediately. `stop` exits the
+backend, after which the launcher restores normal BlueZ. In desktop mode, every
+request also renews a five-second presence lease. If the UI crashes or disappears,
+the backend exits when that lease expires and the launcher performs the same
+restoration.
+
+Successful responses contain `simulated`, `initialized`, `state`, `peer`, report
+counters, player lights, current buttons/sticks and a bounded diagnostics list.
+`state:connected` means the HID peer is present; `initialized:true` means the
+console configured vibration and player lights. The UI labels mock results as
+simulation. High-volume raw HID receive events are kept in the private capture
+rather than the bounded UI log.
