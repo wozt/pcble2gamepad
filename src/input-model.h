@@ -6,6 +6,7 @@
 typedef struct {
     guint keys[INPUT_ACTIONS];
     int buttons[INPUT_BUTTONS];
+    int emulated_controller;
     double deadzone, sensitivity;
     gboolean invert[4], swap_sticks, background;
 } InputProfile;

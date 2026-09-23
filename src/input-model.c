@@ -19,6 +19,7 @@ gboolean input_profile_save(const InputProfile *p,const char *path,GError **erro
     memcpy(invert,p->invert,sizeof(invert));
     g_key_file_set_integer_list(k,"Bindings","keys",keys,INPUT_ACTIONS);
     g_key_file_set_integer_list(k,"Bindings","buttons",buttons,INPUT_BUTTONS);
+    g_key_file_set_integer(k,"Controller","profile",p->emulated_controller);
     g_key_file_set_double(k,"Sticks","deadzone",p->deadzone);g_key_file_set_double(k,"Sticks","sensitivity",p->sensitivity);
     g_key_file_set_boolean_list(k,"Sticks","invert",invert,4);
     g_key_file_set_boolean(k,"Sticks","swap",p->swap_sticks);g_key_file_set_boolean(k,"Input","background",p->background);
@@ -34,6 +35,9 @@ gboolean input_profile_load(InputProfile *p,const char *path,GError **error) {
     buttons=g_key_file_get_integer_list(k,"Bindings","buttons",&n,NULL);
     if(!buttons || n!=INPUT_BUTTONS)goto invalid;
     for(int i=0;i<INPUT_BUTTONS;i++){if(buttons[i]<-1 || buttons[i]>SDL_CONTROLLER_BUTTON_MAX+1)goto invalid;next.buttons[i]=buttons[i];}
+    if(g_key_file_has_key(k,"Controller","profile",NULL))
+        next.emulated_controller=g_key_file_get_integer(k,"Controller","profile",NULL);
+    if(next.emulated_controller<0 || next.emulated_controller>1)goto invalid;
     next.deadzone=g_key_file_get_double(k,"Sticks","deadzone",NULL);next.sensitivity=g_key_file_get_double(k,"Sticks","sensitivity",NULL);
     if(!isfinite(next.deadzone) || next.deadzone<0 || next.deadzone>.5 || !isfinite(next.sensitivity) || next.sensitivity<.25 || next.sensitivity>2)goto invalid;
     invert=g_key_file_get_boolean_list(k,"Sticks","invert",&n,NULL);

@@ -105,9 +105,10 @@ and diagnostics only. capture2cloud must use the API, never simulated GTK clicks
 
 ## Pro Controller session API
 
-Controller Studio uses a separate local API owned by the Classic HID backend. Its
-normal path is `/run/pcble2gamepad/UID/pro.sock`; the socket and parent directory
-are mode `0600` and `0700`, and peer credentials must match that desktop UID. The
+Controller Studio uses a separate local API owned by the Classic HID backend. The
+Pro Controller path is `/run/pcble2gamepad/UID/pro.sock`. Joy-Con pair sessions use
+`joycon-left.sock` and `joycon-right.sock` in the same directory. Each socket and
+parent directory are mode `0600` and `0700`, and peer credentials must match that desktop UID. The
 root backend creates the socket for the authenticated `PKEXEC_UID`. Mock mode uses
 `$XDG_RUNTIME_DIR/pcble2gamepad/pro.sock`. `PCBLE2GAMEPAD_PRO_SOCKET` can override
 the mock/client path for tests.
@@ -137,3 +138,8 @@ counters, player lights, current buttons/sticks and a bounded diagnostics list.
 console configured vibration and player lights. The UI labels mock results as
 simulation. High-volume raw HID receive events are kept in the private capture
 rather than the bounded UI log.
+
+For a Joy-Con pair, Controller Studio sends the same atomic input frame to both
+sockets. The left backend masks right-side buttons and the right stick; the right
+backend masks left-side buttons and the left stick. Status is merged only when both
+requests succeed. Closing the UI sends `stop` to both processes.

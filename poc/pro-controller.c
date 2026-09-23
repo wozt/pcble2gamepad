@@ -20,7 +20,16 @@ static GDBusConnection *bus;
 static ProControl *desktop;
 static gboolean mock_mode;
 static GMainLoop *loop;
-static char adapter[64], peer[18];
+static char adapter[64], allowed_adapter[64], peer[18];
+static ControllerType controller_type=CONTROLLER_PRO;
+static const char *controller_alias="Pro Controller",*control_socket="pro.sock";
+static gboolean shared_profile;
+static gboolean select_controller(const char *type) {
+    if(!strcmp(type,"pro")){controller_type=CONTROLLER_PRO;controller_alias="Pro Controller";control_socket="pro.sock";return TRUE;}
+    if(!strcmp(type,"joycon-l")){controller_type=CONTROLLER_JOYCON_L;controller_alias="Joy-Con (L)";control_socket="joycon-left.sock";return TRUE;}
+    if(!strcmp(type,"joycon-r")){controller_type=CONTROLLER_JOYCON_R;controller_alias="Joy-Con (R)";control_socket="joycon-right.sock";return TRUE;}
+    return FALSE;
+}
 static int channels[2]={-1,-1}, listeners[2]={-1,-1};
 static guint watches[2];
 static ProState state;
@@ -75,7 +84,7 @@ static void agent(GDBusConnection *c,const char *sender,const char *path,const c
     char *detail=g_strdup_printf("method=%s device=%s",method,device?device:"none");
     log_event("pairing_agent",detail); g_free(detail);
     char *prefix=g_strconcat(adapter,"/dev_",NULL);
-    gboolean allowed=!device || g_str_has_prefix(device,prefix); g_free(prefix);
+    gboolean allowed=!device || g_str_has_prefix(device,prefix) || (allowed_adapter[0] && g_str_has_prefix(device,allowed_adapter)); g_free(prefix);
     if (!allowed) {
         g_dbus_method_invocation_return_dbus_error(inv,"org.bluez.Error.Rejected","Outside selected adapter");return;
     }
@@ -105,7 +114,7 @@ static void reset_link(void) {
         channels[i]=-1;
     }
     peer[0]=0; initialized=FALSE;
-    uint8_t addr[6];memcpy(addr,state.address,6);pro_init(&state,addr);
+    uint8_t addr[6];memcpy(addr,state.address,6);controller_init(&state,controller_type,addr);
     log_event("link_closed","Waiting for a new control/interrupt connection; see btmon for HCI reason");
 }
 static uint8_t timer_byte(void) {return (uint8_t)(g_get_monotonic_time()/5000);}
@@ -214,23 +223,36 @@ static const char xml[]=
 "<method name='NewConnection'><arg type='o' direction='in'/><arg type='h' direction='in'/><arg type='a{sv}' direction='in'/></method>"
 "<method name='RequestDisconnection'><arg type='o' direction='in'/></method></interface></node>";
 int main(int argc,char **argv) {
-    mock_mode=argc==2 && !strcmp(argv[1],"--mock");
+    mock_mode=argc>=2 && !strcmp(argv[1],"--mock");
     if(mock_mode) {
-        uint8_t addr[6]={0};pro_init(&state,addr);
+        if(argc>3 || (argc==3 && !select_controller(argv[2]))) {fprintf(stderr,"Usage: %s --mock [pro|joycon-l|joycon-r]\n",argv[0]);return 2;}
+        uint8_t addr[6]={0};controller_init(&state,controller_type,addr);
         loop=g_main_loop_new(NULL,FALSE);GError *error=NULL;
-        desktop=pro_control_new(&state,&release_at,getuid(),TRUE,loop,&error);
+        desktop=pro_control_new(&state,&release_at,getuid(),TRUE,control_socket,loop,&error);
         if(!desktop) {g_printerr("%s\n",error->message);g_error_free(error);return 1;}
         g_unix_signal_add(SIGINT,quit,NULL);g_unix_signal_add(SIGTERM,quit,NULL);
         g_timeout_add(15,tick,NULL);log_event("mock_ready","No Bluetooth activity");
         g_main_loop_run(loop);pro_control_free(desktop);g_main_loop_unref(loop);return 0;
     }
-    gboolean desktop_mode=argc==5 && !strcmp(argv[3],"--desktop");
+    gboolean desktop_mode=FALSE;uid_t desktop_owner=0;
+    for(int i=3;i<argc;i++) {
+        if(!strcmp(argv[i],"--desktop") && i+1<argc) {
+            char *end=NULL;guint64 owner=g_ascii_strtoull(argv[++i],&end,10);
+            if(!end || *end || owner>G_MAXUINT32) {fprintf(stderr,"Invalid desktop owner\n");return 2;}
+            desktop_mode=TRUE;desktop_owner=(uid_t)owner;
+        } else if(!strcmp(argv[i],"--type") && i+1<argc) {
+            if(!select_controller(argv[++i])) {fprintf(stderr,"Unknown controller type\n");return 2;}
+        } else if(!strcmp(argv[i],"--allow-adapter") && i+1<argc && g_regex_match_simple("^hci[0-9]+$",argv[i+1],0,0)) {
+            snprintf(allowed_adapter,sizeof(allowed_adapter),"/org/bluez/%s/dev_",argv[++i]);
+        } else if(!strcmp(argv[i],"--shared-profile"))shared_profile=TRUE;
+        else {fprintf(stderr,"Unknown or incomplete option: %s\n",argv[i]);return 2;}
+    }
     desktop_requested=desktop_mode;
-    if((argc!=3 && !desktop_mode) || !g_regex_match_simple("^hci[0-9]+$",argv[1],0,0)) {
-        fprintf(stderr,"Usage: %s hciN SDP_XML\n",argv[0]);return 2;
+    if(argc<3 || !g_regex_match_simple("^hci[0-9]+$",argv[1],0,0) || (desktop_mode && getuid()!=0)) {
+        fprintf(stderr,"Usage: %s hciN SDP_XML [--desktop UID] [--type pro|joycon-l|joycon-r] [--allow-adapter hciN] [--shared-profile]\n",argv[0]);return 2;
     }
     int result=1,dd=-1;uint8_t old_class[3]={0};gboolean have_class=FALSE;
-    GVariant *saved[5]={0};const char *keys[]={"Alias","Pairable","Discoverable","PairableTimeout","DiscoverableTimeout"};
+    GVariant *saved[6]={0};const char *keys[]={"Powered","Alias","Pairable","Discoverable","PairableTimeout","DiscoverableTimeout"};
     guint agent_id=0,profile_id=0;gboolean registered_agent=FALSE,registered_profile=FALSE;
     snprintf(adapter,sizeof(adapter),"/org/bluez/%s",argv[1]);
     GError *err=NULL;bus=g_bus_get_sync(G_BUS_TYPE_SYSTEM,NULL,&err);
@@ -239,11 +261,12 @@ int main(int argc,char **argv) {
     GVariant *v=property("Address");if(!v) goto cleanup;
     const char *address=g_variant_get_string(v,NULL);bdaddr_t local;
     str2ba(address,&local);uint8_t mac[6];for(int i=0;i<6;i++) mac[i]=local.b[5-i];
-    pro_init(&state,mac);log_event("adapter_selected",address);g_variant_unref(v);
-    v=property("Powered");if(!v) goto cleanup;
-    gboolean powered=g_variant_get_boolean(v);g_variant_unref(v);
-    if(!powered) {log_event("error","Adapter must already be powered");goto cleanup;}
-    for(int i=0;i<5;i++) {saved[i]=property(keys[i]);if(!saved[i]) goto cleanup;}
+    controller_init(&state,controller_type,mac);log_event("adapter_selected",address);g_variant_unref(v);
+    for(int i=0;i<6;i++) {saved[i]=property(keys[i]);if(!saved[i]) goto cleanup;}
+    if(!g_variant_get_boolean(saved[0])) {
+        if(!set_property("Powered",g_variant_new_boolean(TRUE)))goto cleanup;
+        log_event("adapter_powered","Powered on temporarily for the Classic HID session");
+    }
     dd=hci_open_dev(hci_devid(argv[1]));
     if(dd<0 || hci_read_class_of_dev(dd,old_class,2000)<0) {log_event("hci_error",strerror(errno));goto cleanup;}
     have_class=TRUE;
@@ -261,8 +284,10 @@ int main(int argc,char **argv) {
     g_variant_builder_add(&opts,"{sv}","Role",g_variant_new_string("server"));
     g_variant_builder_add(&opts,"{sv}","RequireAuthentication",g_variant_new_boolean(FALSE));
     g_variant_builder_add(&opts,"{sv}","RequireAuthorization",g_variant_new_boolean(FALSE));
-    if(!invoke("/org/bluez","org.bluez.ProfileManager1","RegisterProfile",g_variant_new("(osa{sv})",ROOT "/profile","00001000-0000-1000-8000-00805f9b34fb",&opts))) goto cleanup;
-    registered_profile=TRUE;log_event("sdp_registered","Switch 1 Pro Controller HID record");
+    if(!shared_profile) {
+        if(!invoke("/org/bluez","org.bluez.ProfileManager1","RegisterProfile",g_variant_new("(osa{sv})",ROOT "/profile","00001000-0000-1000-8000-00805f9b34fb",&opts))) goto cleanup;
+        registered_profile=TRUE;log_event("sdp_registered","Nintendo Switch controller HID record");
+    } else log_event("sdp_shared","Using the companion controller's HID profile");
     for(int i=0;i<2;i++) {
         listeners[i]=socket(AF_BLUETOOTH,SOCK_SEQPACKET|SOCK_NONBLOCK|SOCK_CLOEXEC,BTPROTO_L2CAP);
         struct sockaddr_l2 bind_addr={.l2_family=AF_BLUETOOTH,.l2_psm=htobs(i?19:17)};
@@ -272,19 +297,17 @@ int main(int argc,char **argv) {
         }
         g_unix_fd_add(listeners[i],G_IO_IN,accept_peer,GINT_TO_POINTER(i));
     }
-    if(!set_property("Alias",g_variant_new_string("Pro Controller")) ||
+    if(!set_property("Alias",g_variant_new_string(controller_alias)) ||
        !set_property("PairableTimeout",g_variant_new_uint32(180)) ||
        !set_property("DiscoverableTimeout",g_variant_new_uint32(180)) ||
        !set_property("Pairable",g_variant_new_boolean(TRUE)) ||
        !set_property("Discoverable",g_variant_new_boolean(TRUE))) goto cleanup;
     if(hci_write_class_of_dev(dd,0x002508,2000)<0) {log_event("class_error",strerror(errno));goto cleanup;}
-    log_event("ready","Name=Pro Controller class=0x002508 discoverable=true pairable=true PSM=17/19; open Change Grip/Order");
+    char ready[180];snprintf(ready,sizeof(ready),"Name=%s class=0x002508 discoverable=true pairable=true PSM=17/19; open Change Grip/Order",controller_alias);log_event("ready",ready);
     g_dbus_connection_signal_subscribe(bus,"org.bluez","org.freedesktop.DBus.Properties","PropertiesChanged",NULL,NULL,0,changed,NULL,NULL);
     loop=g_main_loop_new(NULL,FALSE);g_unix_signal_add(SIGINT,quit,NULL);g_unix_signal_add(SIGTERM,quit,NULL);
     if(desktop_mode) {
-        char *end=NULL;guint64 owner=g_ascii_strtoull(argv[4],&end,10);
-        if(!end || *end || owner>G_MAXUINT32 || getuid()!=0) {log_event("error","Invalid desktop owner");goto cleanup;}
-        desktop=pro_control_new(&state,&release_at,(uid_t)owner,FALSE,loop,&err);
+        desktop=pro_control_new(&state,&release_at,desktop_owner,FALSE,control_socket,loop,&err);
         if(!desktop)goto cleanup;
         while(!g_queue_is_empty(&pending_logs)) {
             PendingLog *item=g_queue_pop_head(&pending_logs);
@@ -304,11 +327,15 @@ cleanup:
     if(registered_profile) invoke("/org/bluez","org.bluez.ProfileManager1","UnregisterProfile",g_variant_new("(o)",ROOT "/profile"));
     if(registered_agent) invoke("/org/bluez","org.bluez.AgentManager1","UnregisterAgent",g_variant_new("(o)",ROOT "/agent"));
     gboolean restored=TRUE;
-    for(int i=4;i>=0;i--) if(saved[i]) {
+    for(int i=5;i>=1;i--) if(saved[i]) {
         if(!set_property(keys[i],saved[i])) restored=FALSE;
         g_variant_unref(saved[i]);
     }
     if(have_class && hci_write_class_of_dev(dd,old_class[0]|((uint32_t)old_class[1]<<8)|((uint32_t)old_class[2]<<16),2000)<0) restored=FALSE;
+    if(saved[0]) {
+        if(!set_property(keys[0],saved[0]))restored=FALSE;
+        g_variant_unref(saved[0]);
+    }
     if(dd>=0) close(dd);
     if(profile_id) g_dbus_connection_unregister_object(bus,profile_id);
     if(agent_id) g_dbus_connection_unregister_object(bus,agent_id);

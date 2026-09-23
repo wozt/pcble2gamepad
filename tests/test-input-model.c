@@ -54,6 +54,7 @@ static void test_profile_roundtrip(void)
     original.invert[3] = TRUE;
     original.swap_sticks = TRUE;
     original.background = TRUE;
+    original.emulated_controller = 1;
     original.keys[0] = 'p';
     g_autofree char *path = g_strdup_printf("%s/input-profile-%u.ini", g_get_tmp_dir(), g_random_int());
     g_autoptr(GError) error = NULL;
@@ -67,6 +68,30 @@ static void test_profile_roundtrip(void)
     g_assert_true(loaded.invert[3]);
     g_assert_true(loaded.swap_sticks);
     g_assert_true(loaded.background);
+    g_assert_cmpint(loaded.emulated_controller, ==, 1);
+    g_unlink(path);
+}
+
+static void test_legacy_profile_defaults_to_pro(void)
+{
+    InputProfile original, loaded;
+    input_profile_defaults(&original, FALSE);
+    original.emulated_controller = 1;
+    g_autofree char *path = g_strdup_printf("%s/input-profile-legacy-%u.ini",
+                                            g_get_tmp_dir(), g_random_int());
+    g_autoptr(GError) error = NULL;
+    g_assert_true(input_profile_save(&original, path, &error));
+    g_assert_no_error(error);
+    g_autoptr(GKeyFile) key_file = g_key_file_new();
+    g_assert_true(g_key_file_load_from_file(key_file, path, G_KEY_FILE_NONE, &error));
+    g_assert_no_error(error);
+    g_assert_true(g_key_file_remove_group(key_file, "Controller", &error));
+    g_assert_no_error(error);
+    g_assert_true(g_key_file_save_to_file(key_file, path, &error));
+    g_assert_no_error(error);
+    g_assert_true(input_profile_load(&loaded, path, &error));
+    g_assert_no_error(error);
+    g_assert_cmpint(loaded.emulated_controller, ==, 0);
     g_unlink(path);
 }
 
@@ -102,6 +127,7 @@ int main(int argc, char **argv)
     g_test_add_func("/input/neutral-buttons", test_neutral_and_buttons);
     g_test_add_func("/input/sticks", test_sticks);
     g_test_add_func("/input/profile-roundtrip", test_profile_roundtrip);
+    g_test_add_func("/input/profile-legacy", test_legacy_profile_defaults_to_pro);
     g_test_add_func("/input/virtual-gamepad", test_virtual_gamepad);
     return g_test_run();
 }

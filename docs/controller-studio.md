@@ -1,10 +1,11 @@
 # Controller Studio
 
-`pcble2gamepad` is the GTK4/libadwaita front end for the validated Switch 1 Pro
-Controller backend. The interface has five pages:
+`pcble2gamepad` is the GTK4/libadwaita front end for the Nintendo Classic HID
+controller backend. The interface has five pages:
 
-- **Connection** selects a Bluetooth adapter by stable address, starts or stops the
-  console session, chooses the input source and arms input.
+- **Connection** selects Switch Pro Controller or a Joy-Con pair, assigns Bluetooth
+  adapters by stable address, starts or stops the console session, chooses the input
+  source and arms input.
 - **Keyboard bindings** remaps all buttons, D-pad directions, stick clicks and both
   stick directions. WASD and ZQSD presets are included. Escape cancels learning or
   pauses keyboard input; Backspace clears a binding.
@@ -24,8 +25,17 @@ The live controller drawing previews the composed input frame before it is sent.
 The GTK process never opens Bluetooth sockets and does not run as root. Starting a
 session authenticates the installed `run-classic.sh` through `pkexec`. The runner
 starts a C backend that owns the temporary Agent1, SDP record and L2CAP PSM 17/19
-listeners. It also records a private `btmon` capture. The backend accepts commands
+listeners. The backend temporarily powers the selected adapter if BlueZ's restart
+left it off, then restores the previous power state. It also records a private
+`btmon` capture. The backend accepts commands
 only from the desktop UID over the local socket documented in [the API](api.md).
+
+The Pro Controller profile uses one adapter and one backend. A Joy-Con pair uses
+two adapters and two backend instances, because left and right Joy-Con must have
+independent Classic Bluetooth identities. Controller Studio sends each complete
+input state to both; the left and right protocol profiles expose only their own
+buttons and stick on the wire. The shared SDP profile and pairing agent cover both
+selected adapters for the lifetime of the pair session.
 
 ```text
 keyboard / SDL gamepad
@@ -34,7 +44,7 @@ keyboard / SDL gamepad
           |
  private Unix socket, complete input frames
           |
- privileged C Classic HID backend
+privileged C Classic HID backend(s)
           |
       Switch 2
 ```
@@ -54,4 +64,10 @@ centering were confirmed on the calibration screen. Right-stick reports have wir
 tests but were not separately observed in the console UI. GTK keyboard routing has
 been checked end to end with the backend simulation. SDL direct forwarding has a
 virtual-gamepad test; a physical PC gamepad test is deferred until hardware is
-available.
+available. Joy-Con L/R identities, report masking and two-socket GTK routing are
+covered by wire and simulated integration tests. A real paired Joy-Con session is
+still unverified because only one Bluetooth adapter is currently present.
+
+The controller catalog currently contains Nintendo Switch Pro Controller and
+Nintendo Joy-Con Pair. Sony and Microsoft Bluetooth controller profiles are planned
+for the same selection model once their individual HID transports are implemented.

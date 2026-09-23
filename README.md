@@ -2,16 +2,18 @@
 
 Experimental **C11** software for emulating console controllers from a Linux PC.
 
-The current application is a software-only **Switch 1 Pro Controller over Classic
-Bluetooth HID**, tested against a real Switch 2. Its GTK Controller Studio maps a
-keyboard or a PC gamepad to the emulated controller. No real Joy-Con or Pro
-Controller is required in the chain. Detailed console evidence and limitations are
-in [the experiment report](docs/classic-pro-poc.md).
+The current application emulates Nintendo controllers over Classic Bluetooth HID.
+Its GTK Controller Studio maps a keyboard or a PC gamepad to either a **Switch 1
+Pro Controller** or a **pair of Switch 1 Joy-Con**. No physical Nintendo controller
+is required in the chain. The Pro Controller is tested against a real Switch 2;
+detailed console evidence and limitations are in
+[the experiment report](docs/classic-pro-poc.md).
 
 Controller Studio includes remappable keyboard and SDL gamepad bindings, saved
 profiles, radial stick dead zones, sensitivity, axis inversion, stick swapping,
-live input preview and session diagnostics. The Bluetooth backend stays in C and
-is controlled through a private Unix socket. Keyboard input has been exercised
+live input preview, emulated-controller selection and session diagnostics. The
+Bluetooth backend stays in C and is controlled through a private Unix socket.
+Keyboard input has been exercised
 end to end against the backend simulation. A physical source gamepad remains to
 be tested when one is available.
 
@@ -75,11 +77,18 @@ meson install -C build
 ./build/pcble2gamepad
 ```
 
-Choose the Bluetooth adapter by address and click **Connect to Switch**. The
+Choose the emulated controller and Bluetooth adapter by address, then click
+**Connect to Switch**. The
 application invokes its narrow backend with `pkexec`, temporarily restarts BlueZ
 in Classic HID compatibility mode, and restores the normal service when the
 session stops. This pauses other Bluetooth services for the duration. On first
 pairing, open **Controllers -> Change Grip/Order** on the console.
+
+A Pro Controller needs one Bluetooth adapter. A Joy-Con pair exposes two Classic
+Bluetooth identities and therefore needs two distinct adapters, selected as left
+and right in the UI. The current machine exposes only one adapter, so the pair
+transport has wire and simulated routing coverage but cannot yet be tested against
+the console as a complete pair.
 
 Select **Keyboard** or **PC controller**, configure the corresponding bindings,
 then enable input. Escape immediately pauses keyboard input. The backend returns
@@ -210,13 +219,15 @@ back the probe GATT application and preserves the diagnostic. Detailed evidence:
 ## Architecture and API
 
 ```text
-keyboard / gamepad -> Controller Studio -> private input API -> Classic HID backend
+keyboard / gamepad -> Controller Studio -> private input API -> controller backend(s)
 
 BLE lab / C CLI -----------------------> discovery API -> Joy-Con 2 BLE daemon
 ```
 
-- `poc/protocol.*`: Switch 1 Pro Controller reports and subcommand responses.
-- `poc/pro-controller.c`: Agent1, SDP, L2CAP transport and input watchdog.
+- `poc/protocol.*`: Switch 1 Pro Controller and Joy-Con report identities,
+  input masking, calibration reads and subcommand responses.
+- `poc/pro-controller.c`: Agent1, SDP, L2CAP transport and input watchdog for
+  Pro Controller, Joy-Con (L) and Joy-Con (R).
 - `src/gui.c` and `src/input-model.*`: Controller Studio and input composition.
 - `src/protocol.*`: observed Joy-Con 2 bytes and vendor GATT schema.
 - `src/core.*`: lifecycle, status, bounded structured event history and API dispatch.

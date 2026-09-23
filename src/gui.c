@@ -10,30 +10,39 @@
 typedef struct {
     int refs;gboolean closed,closing,busy,online,loading;
     GtkApplication *app;GtkWindow *window;AdwToastOverlay *toast;
-    GtkStack *stack;GtkLabel *status,*peer,*error,*metrics,*source_hint;
-    GtkWidget *drawing,*start,*stop,*arm,*capture_hint;
-    GtkDropDown *adapters,*devices,*source,*profiles;
-    GtkStringList *adapter_names,*device_names,*profile_names;
-    GPtrArray *adapter_ids,*device_ids;
+    GtkStack *stack;GtkLabel *status,*peer,*error,*metrics,*source_hint,*controller_hint,*hero_title;
+    GtkWidget *drawing,*start,*stop,*arm,*capture_hint,*secondary_row;
+    GtkDropDown *controllers,*adapters,*secondary,*devices,*source,*profiles;
+    GtkStringList *adapter_names,*secondary_names,*device_names,*profile_names;
+    GPtrArray *adapter_ids,*secondary_ids,*device_ids;
     GtkButton *key_buttons[INPUT_ACTIONS],*pad_buttons[INPUT_BUTTONS];
     GtkScale *deadzone,*sensitivity;GtkSwitch *invert[4],*swap,*background;
     GtkTextBuffer *logs;GHashTable *keys;
     InputProfile profile;InputFrame frame;
     SDL_GameController *pad;int joystick_count,learn_key,learn_pad;
     gboolean previous_pad[SDL_CONTROLLER_BUTTON_MAX+2];
-    char *socket,*config_dir,*profile_name,*pending;
+    char *socket,*socket2,*config_dir,*profile_name,*pending;
     guint timer,ticks;GSubprocess *launcher;
 } Ui;
-typedef struct {char *path;JsonObject *request;} Request;
+typedef struct {char *path,*path2;JsonObject *request;} Request;
 static void refresh_bindings(Ui *u);
 static void request(Ui *u,const char *method);
+static gboolean pair_mode(Ui *u){return u->controllers && gtk_drop_down_get_selected(u->controllers)==1;}
+static void update_controls(Ui *u) {
+    gboolean adapters_ok=u->adapter_ids->len>0 && (!pair_mode(u) || u->secondary_ids->len>1);
+    gtk_widget_set_sensitive(u->start,!u->online && !u->launcher && adapters_ok);
+    gtk_widget_set_sensitive(u->stop,u->online);
+    gtk_widget_set_sensitive(GTK_WIDGET(u->controllers),!u->online && !u->launcher);
+    gtk_widget_set_sensitive(GTK_WIDGET(u->adapters),!u->online && !u->launcher);
+    gtk_widget_set_sensitive(GTK_WIDGET(u->secondary),!u->online && !u->launcher);
+}
 static void toast(Ui *u,const char *message) {adw_toast_overlay_add_toast(u->toast,adw_toast_new(message));}
 static void ui_unref(Ui *u) {
     if(--u->refs)return;
     if(u->pad)SDL_GameControllerClose(u->pad);
     g_clear_object(&u->launcher);g_hash_table_unref(u->keys);
-    g_ptr_array_unref(u->adapter_ids);g_ptr_array_unref(u->device_ids);
-    g_free(u->socket);g_free(u->config_dir);g_free(u->profile_name);g_free(u->pending);g_free(u);
+    g_ptr_array_unref(u->adapter_ids);g_ptr_array_unref(u->secondary_ids);g_ptr_array_unref(u->device_ids);
+    g_free(u->socket);g_free(u->socket2);g_free(u->config_dir);g_free(u->profile_name);g_free(u->pending);g_free(u);
 }
 static void margin(GtkWidget *w,int m) {gtk_widget_set_margin_start(w,m);gtk_widget_set_margin_end(w,m);gtk_widget_set_margin_top(w,m);gtk_widget_set_margin_bottom(w,m);}
 static GtkWidget *label(const char *s,const char *css) {GtkWidget *w=gtk_label_new(s);gtk_label_set_xalign(GTK_LABEL(w),0);gtk_label_set_wrap(GTK_LABEL(w),TRUE);if(css)gtk_widget_add_css_class(w,css);return w;}
@@ -111,6 +120,7 @@ static void refresh_bindings(Ui *u) {
     u->loading=TRUE;gtk_range_set_value(GTK_RANGE(u->deadzone),u->profile.deadzone*100);gtk_range_set_value(GTK_RANGE(u->sensitivity),u->profile.sensitivity*100);
     for(int i=0;i<4;i++)gtk_switch_set_active(u->invert[i],u->profile.invert[i]);
     gtk_switch_set_active(u->swap,u->profile.swap_sticks);gtk_switch_set_active(u->background,u->profile.background);u->loading=FALSE;
+    if(u->controllers)gtk_drop_down_set_selected(u->controllers,(guint)u->profile.emulated_controller);
 }
 static void bind_key(GtkButton *b,Ui *u) {
     neutral(u);u->learn_pad=-1;u->learn_key=GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b),"index"));
@@ -156,6 +166,14 @@ static void devices_scan(Ui *u) {
 }
 static void draw(GtkDrawingArea *area,cairo_t *cr,int width,int height,gpointer data) {
     (void)area;Ui *u=data;double scale=MIN(width/640.,height/270.);cairo_translate(cr,(width-640*scale)/2,(height-270*scale)/2);cairo_scale(cr,scale,scale);
+    if(pair_mode(u)) {
+        const double body_x[]={150,390};
+        for(int i=0;i<2;i++) {
+            cairo_set_source_rgb(cr,i?1.0:.04,i?.24:.73,i?.16:.90);cairo_new_sub_path(cr);cairo_arc(cr,body_x[i]+50,60,50,G_PI,2*G_PI);cairo_line_to(cr,body_x[i]+100,205);cairo_arc(cr,body_x[i]+50,205,50,0,G_PI);cairo_close_path(cr);cairo_fill(cr);
+            double sx=body_x[i]+50,sy=i?155:105;cairo_set_source_rgb(cr,.08,.10,.12);cairo_arc(cr,sx,sy,28,0,2*G_PI);cairo_fill(cr);cairo_set_source_rgb(cr,.35,.40,.43);cairo_arc(cr,sx+u->frame.axes[i*2]*15,sy-u->frame.axes[i*2+1]*15,15,0,2*G_PI);cairo_fill(cr);
+        }
+        return;
+    }
     cairo_set_source_rgb(cr,.12,.15,.18);cairo_move_to(cr,155,45);cairo_curve_to(cr,70,40,48,205,100,234);cairo_curve_to(cr,140,260,178,180,210,178);cairo_line_to(cr,430,178);cairo_curve_to(cr,465,180,505,260,545,234);cairo_curve_to(cr,595,205,570,40,485,45);cairo_close_path(cr);cairo_fill_preserve(cr);cairo_set_source_rgb(cr,.24,.29,.32);cairo_set_line_width(cr,2);cairo_stroke(cr);
     for(int i=0;i<2;i++){double x=i?396:183,y=i?170:103;cairo_set_source_rgb(cr,.07,.09,.11);cairo_arc(cr,x,y,39,0,2*G_PI);cairo_fill(cr);cairo_set_source_rgb(cr,.25,.32,.36);cairo_arc(cr,x+u->frame.axes[2*i]*22,y-u->frame.axes[2*i+1]*22,22,0,2*G_PI);cairo_fill(cr);cairo_set_source_rgb(cr,.32,.88,.68);cairo_arc(cr,x+u->frame.axes[2*i]*22,y-u->frame.axes[2*i+1]*22,3,0,2*G_PI);cairo_fill(cr);}
     const double x[]={518,490,490,462},y[]={106,134,78,106};const char *names[]={"A","B","X","Y"};
@@ -169,21 +187,43 @@ static void adapters_scan(GtkButton *b,Ui *u) {
     g_autoptr(GVariant)reply=g_dbus_connection_call_sync(bus,"org.bluez","/","org.freedesktop.DBus.ObjectManager","GetManagedObjects",NULL,G_VARIANT_TYPE("(a{oa{sa{sv}}})"),0,1500,NULL,&e);
     if(!reply){toast(u,e->message);return;}
     gtk_string_list_splice(u->adapter_names,0,g_list_model_get_n_items(G_LIST_MODEL(u->adapter_names)),NULL);g_ptr_array_set_size(u->adapter_ids,0);
+    gtk_string_list_splice(u->secondary_names,0,g_list_model_get_n_items(G_LIST_MODEL(u->secondary_names)),NULL);g_ptr_array_set_size(u->secondary_ids,0);
     GVariantIter *objects;g_variant_get(reply,"(a{oa{sa{sv}}})",&objects);char *path;GVariant *interfaces;
     guint selected=0;
     while(g_variant_iter_next(objects,"{o@a{sa{sv}}}",&path,&interfaces)) {
         GVariant *props=g_variant_lookup_value(interfaces,"org.bluez.Adapter1",G_VARIANT_TYPE_VARDICT);
         if(props){const char *address="",*alias="Bluetooth adapter";g_variant_lookup(props,"Address","&s",&address);g_variant_lookup(props,"Alias","&s",&alias);
-            char *id=g_path_get_basename(path),*name=g_strdup_printf("%s · %s · %s",id,address,alias);gtk_string_list_append(u->adapter_names,name);g_ptr_array_add(u->adapter_ids,id);g_free(name);
+            char *id=g_path_get_basename(path),*name=g_strdup_printf("%s · %s · %s",id,address,alias);gtk_string_list_append(u->adapter_names,name);gtk_string_list_append(u->secondary_names,name);g_ptr_array_add(u->adapter_ids,id);g_ptr_array_add(u->secondary_ids,g_strdup(id));g_free(name);
             if(!strcmp(address,"E0:AD:47:40:70:D9"))selected=u->adapter_ids->len-1;
             g_variant_unref(props);
         }g_free(path);g_variant_unref(interfaces);
-    }g_variant_iter_free(objects);gtk_drop_down_set_selected(u->adapters,selected);
+    }g_variant_iter_free(objects);gtk_drop_down_set_selected(u->adapters,selected);gtk_drop_down_set_selected(u->secondary,selected?0:1);update_controls(u);
 }
-static void request_free(gpointer data){Request *r=data;g_free(r->path);json_object_unref(r->request);g_free(r);}
+static void request_free(gpointer data){Request *r=data;g_free(r->path);g_free(r->path2);json_object_unref(r->request);g_free(r);}
+static JsonObject *merge_pair(JsonObject *left,JsonObject *right) {
+    if(!json_object_get_boolean_member_with_default(left,"ok",FALSE))return json_object_ref(left);
+    if(!json_object_get_boolean_member_with_default(right,"ok",FALSE))return json_object_ref(right);
+    JsonObject *a=json_object_get_object_member(left,"result"),*b=json_object_get_object_member(right,"result");
+    JsonObject *root=json_object_new(),*result=json_object_new();json_object_set_int_member(root,"version",1);json_object_set_boolean_member(root,"ok",TRUE);json_object_set_object_member(root,"result",result);
+    const char *as=json_object_get_string_member_with_default(a,"state","waiting"),*bs=json_object_get_string_member_with_default(b,"state","waiting");
+    json_object_set_string_member(result,"state",!strcmp(as,"connected")&&!strcmp(bs,"connected")?"connected":"waiting");
+    json_object_set_boolean_member(result,"initialized",json_object_get_boolean_member_with_default(a,"initialized",FALSE)&&json_object_get_boolean_member_with_default(b,"initialized",FALSE));
+    json_object_set_boolean_member(result,"simulated",json_object_get_boolean_member_with_default(a,"simulated",FALSE)||json_object_get_boolean_member_with_default(b,"simulated",FALSE));
+    g_autofree char *peers=g_strdup_printf("L: %s  ·  R: %s",json_object_get_string_member_with_default(a,"peer","waiting"),json_object_get_string_member_with_default(b,"peer","waiting"));json_object_set_string_member(result,"peer",peers);
+    json_object_set_string_member(result,"profile","Nintendo Joy-Con Pair");
+    json_object_set_int_member(result,"tx",json_object_get_int_member_with_default(a,"tx",0)+json_object_get_int_member_with_default(b,"tx",0));
+    json_object_set_int_member(result,"rx",json_object_get_int_member_with_default(a,"rx",0)+json_object_get_int_member_with_default(b,"rx",0));
+    json_object_set_int_member(result,"player_lights",json_object_get_int_member_with_default(a,"player_lights",0)|json_object_get_int_member_with_default(b,"player_lights",0));
+    for(int field=0;field<2;field++) {const char *name=field?"sticks":"buttons";JsonArray *source=json_object_get_array_member(a,name),*copy=json_array_new();if(source)for(guint i=0;i<json_array_get_length(source);i++)json_array_add_int_element(copy,json_array_get_int_element(source,i));json_object_set_array_member(result,name,copy);}
+    JsonArray *logs=json_array_new();JsonObject *sides[]={a,b};const char *prefix[]={"L","R"};
+    for(int side=0;side<2;side++){JsonArray *source=json_object_get_array_member(sides[side],"logs");if(source)for(guint i=0;i<json_array_get_length(source);i++){g_autofree char *line=g_strdup_printf("[%s] %s",prefix[side],json_array_get_string_element(source,i));json_array_add_string_element(logs,line);}}
+    json_object_set_array_member(result,"logs",logs);return root;
+}
 static void worker(GTask *task,gpointer source,gpointer data,GCancellable *cancel) {
     (void)source;(void)cancel;Request *r=data;GError *e=NULL;JsonObject *o=jc_client_request_object(r->path,r->request,&e);
-    if(!o)g_task_return_error(task,e);else g_task_return_pointer(task,o,(GDestroyNotify)json_object_unref);
+    if(!o){g_task_return_error(task,e);return;}
+    if(r->path2){GError *second_error=NULL;JsonObject *second=jc_client_request_object(r->path2,r->request,&second_error);if(!second){json_object_unref(o);g_task_return_error(task,second_error);return;}JsonObject *merged=merge_pair(o,second);json_object_unref(o);json_object_unref(second);o=merged;}
+    g_task_return_pointer(task,o,(GDestroyNotify)json_object_unref);
 }
 static void finish_close(Ui *u){u->closed=TRUE;gtk_window_destroy(u->window);g_application_quit(G_APPLICATION(u->app));ui_unref(u);}
 static void complete(GObject *source,GAsyncResult *result,gpointer data) {
@@ -207,14 +247,14 @@ static void complete(GObject *source,GAsyncResult *result,gpointer data) {
         if(o)gtk_label_set_text(u->error,json_object_get_string_member_with_default(o,"error","Request failed"));
         else if(strcmp(method,"status"))gtk_label_set_text(u->error,e?e->message:"Backend unavailable");
     }
-    gtk_widget_set_sensitive(u->start,!u->online && !u->launcher);gtk_widget_set_sensitive(u->stop,u->online);gtk_widget_set_sensitive(GTK_WIDGET(u->adapters),!u->online);
+    update_controls(u);
     if(u->closing){request(u,"stop");}else if(u->pending){char *pending=g_steal_pointer(&u->pending);request(u,pending);g_free(pending);}
     ui_unref(u);
 }
 static void request(Ui *u,const char *method) {
     if(u->closed)return;
     if(u->busy){if(strcmp(method,"status") && strcmp(method,"input")){g_free(u->pending);u->pending=g_strdup(method);}return;}
-    u->busy=TRUE;Request *r=g_new0(Request,1);r->path=g_strdup(u->socket);r->request=json_object_new();
+    u->busy=TRUE;Request *r=g_new0(Request,1);r->path=g_strdup(u->socket);r->path2=g_strdup(u->socket2);r->request=json_object_new();
     json_object_set_int_member(r->request,"version",1);json_object_set_string_member(r->request,"method",method);
     if(!strcmp(method,"input")){
         JsonArray *a=json_array_new();for(int i=0;i<3;i++)json_array_add_int_element(a,u->frame.buttons[i]);json_object_set_array_member(r->request,"buttons",a);
@@ -244,19 +284,37 @@ static void launcher_done(GObject *source,GAsyncResult *result,gpointer data) {
     Ui *u=data;g_autoptr(GError)e=NULL;gboolean ok=g_subprocess_wait_check_finish(G_SUBPROCESS(source),result,&e);
     g_clear_object(&u->launcher);
     if(u->closing){finish_close(u);ui_unref(u);return;}
-    if(!u->closed){if(!ok)gtk_label_set_text(u->error,e->message);gtk_widget_set_sensitive(u->start,!u->online);request(u,"status");}
+    if(!u->closed){if(!ok)gtk_label_set_text(u->error,e->message);update_controls(u);request(u,"status");}
     ui_unref(u);
+}
+static void controller_selected(GObject *o,GParamSpec *p,Ui *u) {
+    (void)o;(void)p;if(u->loading || u->online || u->launcher)return;neutral(u);
+    u->profile.emulated_controller=pair_mode(u)?1:0;
+    g_free(u->socket);g_free(u->socket2);u->socket2=NULL;
+    if(pair_mode(u)) {
+        const char *mock_dir=g_getenv("PCBLE2GAMEPAD_JOYCON_SOCKET_DIR");g_autofree char *runtime=mock_dir?g_strdup(mock_dir):g_strdup_printf("/run/pcble2gamepad/%u",(unsigned)getuid());
+        u->socket=g_build_filename(runtime,"joycon-left.sock",NULL);u->socket2=g_build_filename(runtime,"joycon-right.sock",NULL);
+        gtk_widget_set_visible(u->secondary_row,TRUE);gtk_label_set_text(u->hero_title,"Nintendo Joy-Con Pair");
+        gtk_label_set_text(u->controller_hint,u->adapter_ids->len<2?"A Joy-Con pair needs two Bluetooth identities. Connect a second adapter to enable this profile.":"Left and right Joy-Con use separate Bluetooth adapters and one combined input profile.");
+    } else {
+        const char *override=g_getenv("PCBLE2GAMEPAD_PRO_SOCKET");u->socket=override?g_strdup(override):g_strdup_printf("/run/pcble2gamepad/%u/pro.sock",(unsigned)getuid());
+        gtk_widget_set_visible(u->secondary_row,FALSE);gtk_label_set_text(u->hero_title,"Nintendo Switch Pro Controller");gtk_label_set_text(u->controller_hint,"One Bluetooth adapter exposes one Classic HID controller.");
+    }
+    gtk_label_set_text(u->status,"OFFLINE");gtk_label_set_text(u->peer,"Start a Bluetooth session to connect your console.");gtk_label_set_text(u->error,"");gtk_widget_queue_draw(u->drawing);update_controls(u);request(u,"status");
 }
 static void start(GtkButton *b,Ui *u) {
     (void)b;if(u->launcher || u->online)return;
     guint i=gtk_drop_down_get_selected(u->adapters);if(i>=u->adapter_ids->len){toast(u,"Select a Bluetooth adapter first");return;}
+    guint j=gtk_drop_down_get_selected(u->secondary);if(pair_mode(u) && (j>=u->secondary_ids->len || !strcmp(g_ptr_array_index(u->adapter_ids,i),g_ptr_array_index(u->secondary_ids,j)))){toast(u,"Choose two distinct Bluetooth adapters for the Joy-Con pair");return;}
     const char *override=g_getenv("PCBLE2GAMEPAD_RUNNER");g_autofree char *exe=g_file_read_link("/proc/self/exe",NULL),*build=exe?g_path_get_dirname(exe):NULL,*root=build?g_path_get_dirname(build):NULL;
     g_autofree char *checkout=root?g_build_filename(root,"poc","run-classic.sh",NULL):NULL;
     g_autofree char *runner=override?g_strdup(override):checkout&&g_file_test(checkout,G_FILE_TEST_IS_EXECUTABLE)?g_strdup(checkout):g_strdup(PCBLE2GAMEPAD_PRO_RUNNER);
     if(!g_file_test(runner,G_FILE_TEST_IS_EXECUTABLE)){toast(u,"Bluetooth backend launcher is not installed");return;}
-    g_autoptr(GError)e=NULL;u->launcher=g_subprocess_new(G_SUBPROCESS_FLAGS_NONE,&e,"pkexec",runner,g_ptr_array_index(u->adapter_ids,i),"--desktop",NULL);
+    g_autoptr(GError)e=NULL;
+    if(pair_mode(u))u->launcher=g_subprocess_new(G_SUBPROCESS_FLAGS_NONE,&e,"pkexec",runner,g_ptr_array_index(u->adapter_ids,i),"--desktop","--profile","joycon-pair","--secondary",g_ptr_array_index(u->secondary_ids,j),NULL);
+    else u->launcher=g_subprocess_new(G_SUBPROCESS_FLAGS_NONE,&e,"pkexec",runner,g_ptr_array_index(u->adapter_ids,i),"--desktop","--profile","pro",NULL);
     if(!u->launcher){toast(u,e->message);return;}
-    u->refs++;g_subprocess_wait_check_async(u->launcher,NULL,launcher_done,u);gtk_widget_set_sensitive(u->start,FALSE);gtk_label_set_text(u->status,"STARTING SESSION");
+    u->refs++;g_subprocess_wait_check_async(u->launcher,NULL,launcher_done,u);update_controls(u);gtk_label_set_text(u->status,"STARTING SESSION");
 }
 static void stop_clicked(GtkButton *b,Ui *u){(void)b;neutral(u);request(u,"stop");}
 static gboolean close_window(GtkWindow *w,Ui *u) {
@@ -266,12 +324,12 @@ static gboolean close_window(GtkWindow *w,Ui *u) {
     request(u,"stop");return TRUE;
 }
 static void copy_logs(GtkButton *b,Ui *u){(void)b;GtkTextIter a,z;gtk_text_buffer_get_bounds(u->logs,&a,&z);char *text=gtk_text_buffer_get_text(u->logs,&a,&z,FALSE);gdk_clipboard_set_text(gtk_widget_get_clipboard(GTK_WIDGET(u->window)),text);g_free(text);toast(u,"Diagnostics copied");}
-static void defaults(GtkButton *b,Ui *u){neutral(u);input_profile_defaults(&u->profile,GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b),"azerty")));refresh_bindings(u);toast(u,"Defaults restored; save to keep them");}
+static void defaults(GtkButton *b,Ui *u){neutral(u);int controller=u->profile.emulated_controller;input_profile_defaults(&u->profile,GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b),"azerty")));u->profile.emulated_controller=controller;refresh_bindings(u);toast(u,"Defaults restored; save to keep them");}
 static GtkWidget *button(const char *text,GCallback callback,Ui *u){GtkWidget *b=gtk_button_new_with_label(text);g_signal_connect(b,"clicked",callback,u);return b;}
 static void activate(GtkApplication *app,gpointer unused) {
     (void)unused;GtkWindow *existing=gtk_application_get_active_window(app);if(existing){gtk_window_present(existing);return;}
     Ui *u=g_new0(Ui,1);u->refs=1;u->app=app;u->learn_key=u->learn_pad=-1;u->joystick_count=-1;
-    u->keys=g_hash_table_new(g_direct_hash,g_direct_equal);u->adapter_ids=g_ptr_array_new_with_free_func(g_free);u->device_ids=g_ptr_array_new();
+    u->keys=g_hash_table_new(g_direct_hash,g_direct_equal);u->adapter_ids=g_ptr_array_new_with_free_func(g_free);u->secondary_ids=g_ptr_array_new_with_free_func(g_free);u->device_ids=g_ptr_array_new();
     u->config_dir=g_build_filename(g_get_user_config_dir(),"pcble2gamepad","profiles",NULL);g_mkdir_with_parents(u->config_dir,0700);u->profile_name=g_strdup("Default");
     input_profile_defaults(&u->profile,FALSE);g_autofree char *path=profile_path(u,u->profile_name);
     if(g_file_test(path,G_FILE_TEST_EXISTS))input_profile_load(&u->profile,path,NULL);else input_profile_save(&u->profile,path,NULL);
@@ -291,15 +349,19 @@ static void activate(GtkApplication *app,gpointer unused) {
     u->stack=GTK_STACK(gtk_stack_new());gtk_stack_set_transition_type(u->stack,GTK_STACK_TRANSITION_TYPE_CROSSFADE);gtk_widget_set_hexpand(GTK_WIDGET(u->stack),TRUE);
     GtkWidget *sidebar=gtk_stack_sidebar_new();gtk_stack_sidebar_set_stack(GTK_STACK_SIDEBAR(sidebar),u->stack);gtk_widget_set_size_request(sidebar,190,-1);gtk_widget_add_css_class(sidebar,"studio-nav");gtk_box_append(GTK_BOX(content),sidebar);gtk_box_append(GTK_BOX(content),GTK_WIDGET(u->stack));
     u->toast=ADW_TOAST_OVERLAY(adw_toast_overlay_new());adw_toast_overlay_set_child(u->toast,outer);adw_application_window_set_content(ADW_APPLICATION_WINDOW(u->window),GTK_WIDGET(u->toast));
-    GtkWidget *box=page(u,"overview","Connection","Your PC, a Pro Controller. Connect to Switch 2, choose an input source, then enable input.");
+    GtkWidget *box=page(u,"overview","Connection","Choose the controller presented by your PC, connect it to Switch 2, then route keyboard or gamepad input.");
     GtkWidget *hero=gtk_box_new(GTK_ORIENTATION_VERTICAL,6);gtk_widget_add_css_class(hero,"hero");
-    u->status=GTK_LABEL(label("OFFLINE","connection-badge"));gtk_box_append(GTK_BOX(hero),GTK_WIDGET(u->status));gtk_box_append(GTK_BOX(hero),label("Switch Pro Controller","title-2"));
+    u->status=GTK_LABEL(label("OFFLINE","connection-badge"));gtk_box_append(GTK_BOX(hero),GTK_WIDGET(u->status));u->hero_title=GTK_LABEL(label("Nintendo Switch Pro Controller","title-2"));gtk_box_append(GTK_BOX(hero),GTK_WIDGET(u->hero_title));
     u->peer=GTK_LABEL(label("Start a Bluetooth session to connect your console.","dim-label"));gtk_box_append(GTK_BOX(hero),GTK_WIDGET(u->peer));
     u->drawing=gtk_drawing_area_new();gtk_widget_set_size_request(u->drawing,-1,260);gtk_widget_set_focusable(u->drawing,TRUE);gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(u->drawing),draw,u,NULL);gtk_box_append(GTK_BOX(hero),u->drawing);
     u->metrics=GTK_LABEL(label("Live input preview · no physical controller required","dim-label"));gtk_box_append(GTK_BOX(hero),GTK_WIDGET(u->metrics));gtk_box_append(GTK_BOX(box),hero);
     AdwPreferencesGroup *g=group(box,"Bluetooth session","Starting a session requests administrator authentication and temporarily pauses other Bluetooth services.");
+    const char *controllers[]={"Nintendo Switch Pro Controller","Nintendo Joy-Con Pair",NULL};u->controllers=GTK_DROP_DOWN(gtk_drop_down_new_from_strings(controllers));row(g,"Emulated controller","Sony and Microsoft profiles can be added to the same controller catalog later.",GTK_WIDGET(u->controllers));
     u->adapter_names=gtk_string_list_new(NULL);u->adapters=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->adapter_names),NULL));gtk_widget_set_size_request(GTK_WIDGET(u->adapters),280,-1);
-    row(g,"Adapter","Choose by address; hci numbers can change after reboot.",GTK_WIDGET(u->adapters));
+    row(g,"Primary adapter","Pro Controller, or left Joy-Con. Choose by address; hci numbers can change after reboot.",GTK_WIDGET(u->adapters));
+    u->secondary_names=gtk_string_list_new(NULL);u->secondary=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->secondary_names),NULL));gtk_widget_set_size_request(GTK_WIDGET(u->secondary),280,-1);
+    u->secondary_row=row(g,"Right Joy-Con adapter","A pair requires a second, distinct Classic Bluetooth identity.",GTK_WIDGET(u->secondary));gtk_widget_set_visible(u->secondary_row,FALSE);
+    u->controller_hint=GTK_LABEL(label("One Bluetooth adapter exposes one Classic HID controller.","dim-label"));gtk_box_append(GTK_BOX(box),GTK_WIDGET(u->controller_hint));
     GtkWidget *actions=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);u->start=button("Connect to Switch",G_CALLBACK(start),u);gtk_widget_add_css_class(u->start,"suggested-action");u->stop=button("Stop session",G_CALLBACK(stop_clicked),u);gtk_widget_set_sensitive(u->stop,FALSE);
     gtk_box_append(GTK_BOX(actions),u->start);gtk_box_append(GTK_BOX(actions),u->stop);gtk_box_append(GTK_BOX(actions),button("Refresh adapters",G_CALLBACK(adapters_scan),u));gtk_box_append(GTK_BOX(box),actions);
     u->error=GTK_LABEL(label("","error"));gtk_box_append(GTK_BOX(box),GTK_WIDGET(u->error));
@@ -311,7 +373,7 @@ static void activate(GtkApplication *app,gpointer unused) {
     GtkWidget *presets=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);GtkWidget *wasd=button("WASD defaults",G_CALLBACK(defaults),u),*azerty=button("ZQSD defaults",G_CALLBACK(defaults),u);g_object_set_data(G_OBJECT(azerty),"azerty",GINT_TO_POINTER(1));gtk_box_append(GTK_BOX(presets),wasd);gtk_box_append(GTK_BOX(presets),azerty);gtk_box_append(GTK_BOX(box),presets);
     g=group(box,"Buttons",NULL);
     for(int i=0;i<INPUT_ACTIONS;i++){if(i==18)g=group(box,"Stick directions",NULL);GtkWidget *b=button("",G_CALLBACK(bind_key),u);u->key_buttons[i]=GTK_BUTTON(b);g_object_set_data(G_OBJECT(b),"index",GINT_TO_POINTER(i));gtk_widget_add_css_class(b,"binding");row(g,input_action_names[i],NULL,b);}
-    box=page(u,"controller","PC controller","Forward a USB or Bluetooth gamepad through the Pro Controller profile. No physical Nintendo controller is needed.");
+    box=page(u,"controller","PC controller","Forward a USB or Bluetooth gamepad through the selected emulated controller. No physical Nintendo controller is needed.");
     g=group(box,"Source device","SDL standard gamepad mapping supports Xbox, PlayStation and many compatible controllers.");
     u->device_names=gtk_string_list_new(NULL);u->devices=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->device_names),NULL));row(g,"Connected controller","Devices update automatically when plugged in or removed.",GTK_WIDGET(u->devices));
     g=group(box,"Button mapping","Default mapping follows button labels. Click a binding and press the source button or trigger to change it.");
@@ -328,12 +390,12 @@ static void activate(GtkApplication *app,gpointer unused) {
     row(g,"Session lifetime","Stopping or closing this window stops the backend and restores normal Bluetooth.",NULL);
     box=page(u,"diagnostics","Diagnostics","Live session events, association requests and HID initialization. Simulation is always labeled.");
     gtk_box_append(GTK_BOX(box),button("Copy diagnostics",G_CALLBACK(copy_logs),u));GtkWidget *view=gtk_text_view_new();gtk_text_view_set_editable(GTK_TEXT_VIEW(view),FALSE);gtk_text_view_set_monospace(GTK_TEXT_VIEW(view),TRUE);gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(view),GTK_WRAP_WORD_CHAR);u->logs=gtk_text_view_get_buffer(GTK_TEXT_VIEW(view));gtk_widget_set_size_request(view,-1,430);margin(view,10);gtk_box_append(GTK_BOX(box),view);
-    row(group(box,"Current scope",NULL),"Switch 1 Pro Controller","Buttons and left stick verified on Switch 2. Right stick implemented; no separate visual test. BLE research remains in pcble2gamepad-ble-lab.",NULL);
+    row(group(box,"Current scope",NULL),"Nintendo controller profiles","Switch Pro Controller is verified on Switch 2. Joy-Con (L/R) wire formats and dual-adapter routing are implemented but cannot be hardware-tested until a second adapter is connected. Sony and Microsoft profiles remain future additions.",NULL);
     refresh_bindings(u);profile_scan(u);devices_scan(u);adapters_scan(NULL,u);
-    g_signal_connect(u->profiles,"notify::selected",G_CALLBACK(profile_selected),u);g_signal_connect(u->devices,"notify::selected",G_CALLBACK(device_selected),u);g_signal_connect(u->source,"notify::selected",G_CALLBACK(source_changed),u);
+    g_signal_connect(u->profiles,"notify::selected",G_CALLBACK(profile_selected),u);g_signal_connect(u->devices,"notify::selected",G_CALLBACK(device_selected),u);g_signal_connect(u->source,"notify::selected",G_CALLBACK(source_changed),u);g_signal_connect(u->controllers,"notify::selected",G_CALLBACK(controller_selected),u);
     g_signal_connect(u->arm,"notify::active",G_CALLBACK(armed_changed),u);g_signal_connect(u->window,"notify::is-active",G_CALLBACK(focus_changed),u);g_signal_connect(u->window,"close-request",G_CALLBACK(close_window),u);
     g_signal_connect(u->deadzone,"value-changed",G_CALLBACK(scale_changed),u);g_signal_connect(u->sensitivity,"value-changed",G_CALLBACK(scale_changed),u);g_signal_connect(u->swap,"notify::active",G_CALLBACK(settings_changed),u);g_signal_connect(u->background,"notify::active",G_CALLBACK(settings_changed),u);
     GtkEventController *keys=gtk_event_controller_key_new();gtk_event_controller_set_propagation_phase(keys,GTK_PHASE_CAPTURE);g_signal_connect(keys,"key-pressed",G_CALLBACK(key_pressed),u);g_signal_connect(keys,"key-released",G_CALLBACK(key_released),u);gtk_widget_add_controller(GTK_WIDGET(u->window),keys);
-    u->timer=g_timeout_add(16,tick,u);request(u,"status");gtk_window_present(u->window);
+    controller_selected(NULL,NULL,u);u->timer=g_timeout_add(16,tick,u);request(u,"status");gtk_window_present(u->window);
 }
 int main(int argc,char **argv){AdwApplication *app=adw_application_new("io.github.wozt.pcble2gamepad",G_APPLICATION_DEFAULT_FLAGS);g_signal_connect(app,"activate",G_CALLBACK(activate),NULL);int result=g_application_run(G_APPLICATION(app),argc,argv);g_object_unref(app);SDL_Quit();return result;}

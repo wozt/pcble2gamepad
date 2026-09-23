@@ -4,7 +4,8 @@
 - Keep all repository content, UI, comments, diagnostics and commit messages in English.
 - Keep Joy-Con protocol code independent of Bluetooth transport and GUI code.
 - GTK and external integrations control the daemon through the documented Unix socket API.
-- Immediate objective: validate a standalone C Switch 1 Pro Controller POC over Classic HID on a real Switch 2, without any real controller in the emulation chain. Do not introduce generic backend abstractions or capture2cloud integration before this POC is validated.
+- Current controller catalog: Switch 1 Pro Controller and a paired Switch 1 Joy-Con (L/R) profile over Classic HID. The Pro profile is validated on a real Switch 2. A Joy-Con pair requires two distinct Bluetooth adapters and must not be claimed as console-validated until that hardware test is completed.
+- Keep the catalog extensible for later Sony and Microsoft Bluetooth controller profiles. Do not present those profiles as implemented yet.
 - Joy-Con 2 BLE work is paused. Mouse support alongside buttons/stick remains a future goal.
 - Prefer BlueZ D-Bus, then management APIs, raw ATT/L2CAP and finally raw HCI only after documenting a demonstrated limitation.
 - Never perform persistent Bluetooth adapter firmware/NVM modifications.

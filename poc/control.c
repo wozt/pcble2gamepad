@@ -72,7 +72,8 @@ static char *request(gpointer data,const char *text) {
     json_object_set_string_member(result,"peer",c->peer?c->peer:"");
     json_object_set_int_member(result,"tx",c->tx);json_object_set_int_member(result,"rx",c->rx);
     json_object_set_int_member(result,"player_lights",c->state->lights);
-    json_object_set_string_member(result,"profile","Switch 1 Pro Controller");
+    const char *profile=c->state->type==CONTROLLER_JOYCON_L?"Nintendo Joy-Con (L)":c->state->type==CONTROLLER_JOYCON_R?"Nintendo Joy-Con (R)":"Nintendo Switch Pro Controller";
+    json_object_set_string_member(result,"profile",profile);
     JsonArray *a=json_array_new();for(int i=0;i<3;i++)json_array_add_int_element(a,c->state->buttons[i]);
     json_object_set_array_member(result,"buttons",a);
     a=json_array_new();for(int i=0;i<4;i++)json_array_add_int_element(a,c->state->sticks[i]);
@@ -81,16 +82,16 @@ static char *request(gpointer data,const char *text) {
     json_object_set_array_member(result,"logs",a);
     return serialize(r);
 }
-ProControl *pro_control_new(ProState *state,gint64 *release_at,uid_t owner,gboolean mock,GMainLoop *loop,GError **error) {
+ProControl *pro_control_new(ProState *state,gint64 *release_at,uid_t owner,gboolean mock,const char *socket_name,GMainLoop *loop,GError **error) {
     g_autofree char *directory=NULL,*path=NULL;
     if(mock) {
         const char *override=g_getenv("PCBLE2GAMEPAD_PRO_SOCKET");
-        path=override?g_strdup(override):g_build_filename(g_get_user_runtime_dir(),"pcble2gamepad","pro.sock",NULL);
+        path=override?g_strdup(override):g_build_filename(g_get_user_runtime_dir(),"pcble2gamepad",socket_name,NULL);
     } else {
         directory=g_strdup_printf("/run/pcble2gamepad/%u",(unsigned)owner);
         if(g_mkdir_with_parents(directory,0755)<0) {g_set_error_literal(error,G_IO_ERROR,G_IO_ERROR_FAILED,"Cannot create runtime directory");return NULL;}
         if(chown(directory,owner,(gid_t)-1)<0 || g_chmod(directory,0700)<0) {g_set_error_literal(error,G_IO_ERROR,G_IO_ERROR_FAILED,"Cannot secure runtime directory");return NULL;}
-        path=g_build_filename(directory,"pro.sock",NULL);
+        path=g_build_filename(directory,socket_name,NULL);
     }
     ProControl *c=g_new0(ProControl,1);c->state=state;c->release_at=release_at;c->mock=mock;c->loop=loop;c->last_request=g_get_monotonic_time();
     c->ipc=ipc_server_new_full(request,c,path,owner,error);

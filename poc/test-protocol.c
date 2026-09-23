@@ -24,4 +24,18 @@ static void reports(void) {
     s.buttons[0]=8;s.sticks[0]=4095;pro_input(&s,9,out);
     g_assert_cmpint(out[4],==,8);g_assert_cmpint(out[7],==,255);g_assert_cmpint(out[8]&15,==,15);
 }
-int main(int argc,char **argv) {g_test_init(&argc,&argv,NULL);g_test_add_func("/pro/wire",reports);return g_test_run();}
+static void joycon_reports(void) {
+    const uint8_t mac[]={1,2,3,4,5,6};uint8_t out[50],in[50]={0xa2,1};ProState s;
+    controller_init(&s,CONTROLLER_JOYCON_L,mac);s.buttons[0]=0xff;s.buttons[1]=0xff;s.buttons[2]=0xff;
+    pro_input(&s,1,out);g_assert_cmpint(out[3],==,0x9e);g_assert_cmpint(out[4],==,0);
+    g_assert_cmpint(out[5],==,0x29);g_assert_cmpint(out[6],==,0xff);
+    for(int i=10;i<13;i++)g_assert_cmpint(out[i],==,0);
+    in[11]=2;g_assert_true(pro_reply(&s,in,12,2,out));g_assert_cmpint(out[18],==,CONTROLLER_JOYCON_L);
+    in[11]=0x10;in[12]=0x3d;in[13]=0x60;in[16]=18;
+    g_assert_true(pro_reply(&s,in,17,3,out));for(int i=30;i<39;i++)g_assert_cmpint(out[i],==,0xff);
+    controller_init(&s,CONTROLLER_JOYCON_R,mac);s.buttons[0]=0xff;s.buttons[1]=0xff;s.buttons[2]=0xff;
+    pro_input(&s,1,out);g_assert_cmpint(out[4],==,0xff);g_assert_cmpint(out[5],==,0x16);
+    g_assert_cmpint(out[6],==,0);for(int i=7;i<10;i++)g_assert_cmpint(out[i],==,0);
+    in[11]=2;g_assert_true(pro_reply(&s,in,12,2,out));g_assert_cmpint(out[18],==,CONTROLLER_JOYCON_R);
+}
+int main(int argc,char **argv) {g_test_init(&argc,&argv,NULL);g_test_add_func("/pro/wire",reports);g_test_add_func("/joycon/wire",joycon_reports);return g_test_run();}

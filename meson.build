@@ -13,7 +13,7 @@ client = static_library('joycon2-client', 'src/client.c', dependencies: [gio, js
 daemon = executable('pcble2gamepadd', ['src/daemon.c', 'src/core.c', 'src/bluez.c', 'src/ipc.c', 'src/ipc-engine.c'],
   link_with: [protocol, client], dependencies: [gio, json], install: true)
 ctl = executable('pcble2gamepadctl', 'src/cli.c', link_with: client, dependencies: [gio, json], install: true)
-executable('pcble2gamepad-pro-backend',
+executable('pcble2gamepad-controller-backend',
   ['poc/pro-controller.c', 'poc/protocol.c', 'poc/control.c', 'src/ipc.c'],
   dependencies: [gio, json, bluetooth], install: true, install_dir: libexec_dir)
 install_data('poc/pro-controller.xml', install_dir: libexec_dir)
