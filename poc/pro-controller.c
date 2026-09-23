@@ -874,35 +874,226 @@ static gboolean receive_packet(gint fd,GIOCondition cond,gpointer user) {
     } else if(n>=2 && in[0]==0xa2 && in[1]==0x01) log_event("unsupported_subcommand","No invented ACK sent");
     return G_SOURCE_CONTINUE;
 }
+/*
+ * Switch 2 reconnect timing is stricter than the normal Linux L2CAP
+ * security path.
+ *
+ * A non-blocking L2CAP connect first creates the underlying ACL. As soon as
+ * that ACL has a handle, explicitly authenticate and encrypt it with the
+ * persisted BR/EDR Link Key before allowing the HID PSM negotiation to
+ * finish.
+ *
+ * This uses the same public BlueZ HCI helpers as hcitool auth/enc.
+ */
+static gboolean secure_reconnect_acl(const bdaddr_t *remote,
+                                     const char *address) {
+    int hci_fd=hci_open_dev(pairing_mgmt_index);
+    if(hci_fd<0) {
+        log_event("reconnect_hci_error",strerror(errno));
+        return FALSE;
+    }
+
+    struct hci_conn_info_req *request=
+        g_malloc0(sizeof(*request)+sizeof(struct hci_conn_info));
+
+    bacpy(&request->bdaddr,remote);
+    request->type=ACL_LINK;
+
+    gint64 deadline=g_get_monotonic_time()+2000000;
+    gboolean found=FALSE;
+
+    while(g_get_monotonic_time()<deadline) {
+        if(ioctl(
+                hci_fd,
+                HCIGETCONNINFO,
+                (unsigned long)request)==0) {
+            found=TRUE;
+            break;
+        }
+
+        /*
+         * The L2CAP connect has already started paging the Switch. There is
+         * a short interval between connect() returning EINPROGRESS and the
+         * ACL handle becoming visible through HCIGETCONNINFO.
+         */
+        if(errno!=ENOENT &&
+           errno!=ENOTCONN &&
+           errno!=EAGAIN &&
+           errno!=EINVAL) {
+            char detail[192];
+            snprintf(
+                detail,sizeof(detail),
+                "peer=%s HCIGETCONNINFO failed: %s",
+                address,strerror(errno));
+            log_event("reconnect_acl_error",detail);
+
+            g_free(request);
+            hci_close_dev(hci_fd);
+            return FALSE;
+        }
+
+        g_usleep(1000);
+    }
+
+    if(!found) {
+        char detail[160];
+        snprintf(
+            detail,sizeof(detail),
+            "peer=%s ACL handle did not appear before authentication deadline",
+            address);
+        log_event("reconnect_acl_timeout",detail);
+
+        g_free(request);
+        hci_close_dev(hci_fd);
+        return FALSE;
+    }
+
+    /*
+     * HCIGETCONNINFO exposes the handle in host order while the BlueZ
+     * hci_* helpers expect Bluetooth byte order, matching hcitool's auth
+     * and enc implementation.
+     */
+    uint16_t handle=htobs(request->conn_info->handle);
+
+    {
+        char detail[160];
+        snprintf(
+            detail,sizeof(detail),
+            "peer=%s handle=0x%04x; authenticating saved Link Key",
+            address,
+            request->conn_info->handle);
+        log_event("reconnect_acl_found",detail);
+    }
+
+    if(hci_authenticate_link(hci_fd,handle,1500)<0) {
+        char detail[192];
+        snprintf(
+            detail,sizeof(detail),
+            "peer=%s authentication failed: %s",
+            address,strerror(errno));
+        log_event("reconnect_auth_failed",detail);
+
+        g_free(request);
+        hci_close_dev(hci_fd);
+        return FALSE;
+    }
+
+    log_event(
+        "reconnect_authenticated",
+        "BR/EDR Link Key authentication completed successfully");
+
+    if(hci_encrypt_link(hci_fd,handle,1,1500)<0) {
+        char detail[192];
+        snprintf(
+            detail,sizeof(detail),
+            "peer=%s encryption failed: %s",
+            address,strerror(errno));
+        log_event("reconnect_encrypt_failed",detail);
+
+        g_free(request);
+        hci_close_dev(hci_fd);
+        return FALSE;
+    }
+
+    log_event(
+        "reconnect_encrypted",
+        "BR/EDR ACL encrypted before HID PSM negotiation");
+
+    g_free(request);
+    hci_close_dev(hci_fd);
+    return TRUE;
+}
+
+static gboolean finish_nonblocking_connect(int fd,
+                                           const char *address,
+                                           int psm) {
+    struct pollfd pfd={
+        .fd=fd,
+        .events=POLLOUT|POLLERR|POLLHUP
+    };
+
+    int rc;
+    do {
+        rc=poll(&pfd,1,3000);
+    } while(rc<0 && errno==EINTR);
+
+    if(rc<=0) {
+        char failure[192];
+        snprintf(
+            failure,sizeof(failure),
+            "peer=%s psm=%d connect completion %s",
+            address,
+            psm,
+            rc==0?"timed out":strerror(errno));
+        log_event("reconnect_failed",failure);
+        return FALSE;
+    }
+
+    int error=0;
+    socklen_t error_len=sizeof(error);
+
+    if(getsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_ERROR,
+            &error,
+            &error_len)<0) {
+        log_event("reconnect_failed",strerror(errno));
+        return FALSE;
+    }
+
+    if(error) {
+        char failure[192];
+        snprintf(
+            failure,sizeof(failure),
+            "peer=%s psm=%d error=%s",
+            address,
+            psm,
+            strerror(error));
+        log_event("reconnect_failed",failure);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
 static gboolean connect_outbound(const bdaddr_t *local,const char *address) {
     bdaddr_t remote;
+
     if(str2ba(address,&remote)<0) {
         log_event("reconnect_error","Invalid Switch Bluetooth address");
         return FALSE;
     }
 
     for(int i=0;i<2;i++) {
-        int fd=socket(AF_BLUETOOTH,SOCK_SEQPACKET|SOCK_CLOEXEC,BTPROTO_L2CAP);
+        const int psm=i?19:17;
+
+        int fd=socket(
+            AF_BLUETOOTH,
+            SOCK_SEQPACKET|SOCK_CLOEXEC,
+            BTPROTO_L2CAP);
+
         if(fd<0) {
             log_event("reconnect_socket_error",strerror(errno));
             goto failed;
         }
 
-        /*
-         * The one-time Pair / Sync operation persisted the BR/EDR Link Key.
-         * Require authenticated/encrypted Classic Bluetooth before HID PSM
-         * negotiation so the kernel actively uses that saved key.
-         */
         struct bt_security security={0};
         security.level=BT_SECURITY_MEDIUM;
 
-        if(setsockopt(fd,SOL_BLUETOOTH,BT_SECURITY,
-                      &security,sizeof(security))<0) {
+        if(setsockopt(
+                fd,
+                SOL_BLUETOOTH,
+                BT_SECURITY,
+                &security,
+                sizeof(security))<0) {
             char failure[160];
-            snprintf(failure,sizeof(failure),
+            snprintf(
+                failure,sizeof(failure),
                 "psm=%d security=medium error=%s",
-                i?19:17,strerror(errno));
+                psm,strerror(errno));
             log_event("reconnect_security_error",failure);
+
             close(fd);
             goto failed;
         }
@@ -911,40 +1102,84 @@ static gboolean connect_outbound(const bdaddr_t *local,const char *address) {
         source.l2_family=AF_BLUETOOTH;
         bacpy(&source.l2_bdaddr,local);
 
-        if(bind(fd,(struct sockaddr *)&source,sizeof(source))<0) {
+        if(bind(
+                fd,
+                (struct sockaddr *)&source,
+                sizeof(source))<0) {
             log_event("reconnect_bind_error",strerror(errno));
-            close(fd);goto failed;
+            close(fd);
+            goto failed;
+        }
+
+        /*
+         * PSM 17 is intentionally started asynchronously. That gives us the
+         * narrow window between ACL establishment and L2CAP setup in which
+         * the Switch 2 expects its remembered controller to authenticate.
+         */
+        int flags=fcntl(fd,F_GETFL,0);
+        if(flags<0 || fcntl(fd,F_SETFL,flags|O_NONBLOCK)<0) {
+            log_event("reconnect_socket_error",strerror(errno));
+            close(fd);
+            goto failed;
         }
 
         struct sockaddr_l2 destination={0};
         destination.l2_family=AF_BLUETOOTH;
-        destination.l2_psm=htobs(i?19:17);
+        destination.l2_psm=htobs(psm);
         bacpy(&destination.l2_bdaddr,&remote);
 
         char detail[128];
-        snprintf(detail,sizeof(detail),
-            "peer=%s psm=%d",address,i?19:17);
+        snprintf(
+            detail,sizeof(detail),
+            "peer=%s psm=%d",
+            address,psm);
         log_event("reconnect_attempt",detail);
 
-        if(connect(fd,(struct sockaddr *)&destination,sizeof(destination))<0) {
+        int connect_result=
+            connect(
+                fd,
+                (struct sockaddr *)&destination,
+                sizeof(destination));
+
+        if(connect_result<0 &&
+           errno!=EINPROGRESS &&
+           errno!=EAGAIN) {
             char failure[160];
-            snprintf(failure,sizeof(failure),
+            snprintf(
+                failure,sizeof(failure),
                 "peer=%s psm=%d error=%s",
-                address,i?19:17,strerror(errno));
+                address,psm,strerror(errno));
             log_event("reconnect_failed",failure);
-            close(fd);goto failed;
+
+            close(fd);
+            goto failed;
         }
 
-        int flags=fcntl(fd,F_GETFL,0);
-        if(flags>=0)fcntl(fd,F_SETFL,flags|O_NONBLOCK);
+        if(i==0 && connect_result<0) {
+            if(!secure_reconnect_acl(&remote,address)) {
+                close(fd);
+                goto failed;
+            }
+        }
+
+        if(connect_result<0 &&
+           !finish_nonblocking_connect(fd,address,psm)) {
+            close(fd);
+            goto failed;
+        }
 
         channels[i]=fd;
-        watches[i]=g_unix_fd_add(
-            fd,G_IO_IN|G_IO_HUP|G_IO_ERR,
-            receive_packet,GINT_TO_POINTER(i));
 
-        snprintf(detail,sizeof(detail),
-            "peer=%s psm=%d",address,i?19:17);
+        watches[i]=g_unix_fd_add(
+            fd,
+            G_IO_IN|G_IO_HUP|G_IO_ERR,
+            receive_packet,
+            GINT_TO_POINTER(i));
+
+        snprintf(
+            detail,sizeof(detail),
+            "peer=%s psm=%d",
+            address,psm);
         log_event("l2cap_connected",detail);
     }
 
@@ -955,16 +1190,16 @@ static gboolean connect_outbound(const bdaddr_t *local,const char *address) {
     next_report_at=0;
     slow_exit_until=0;
 
-    /*
-     * NUXBT sends a neutral report immediately after an outbound reconnect
-     * to prompt the Switch to resume its HID initialization sequence.
-     */
     uint8_t out[50];
     pro_input(&state,timer_byte(),out);
-    if(!send_report(out))goto failed;
 
-    log_event("reconnect_connected",
-        "Outbound PSM 17/19 channels established; waiting for Switch HID initialization");
+    if(!send_report(out))
+        goto failed;
+
+    log_event(
+        "reconnect_connected",
+        "Authenticated/encrypted ACL and PSM 17/19 established; waiting for Switch HID initialization");
+
     return TRUE;
 
 failed:
@@ -973,11 +1208,13 @@ failed:
             g_source_remove(watches[i]);
             watches[i]=0;
         }
+
         if(channels[i]>=0) {
             close(channels[i]);
             channels[i]=-1;
         }
     }
+
     peer[0]=0;
     return FALSE;
 }
