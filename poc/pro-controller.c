@@ -564,10 +564,49 @@ static gboolean pairing_load_into_kernel(const char *remote) {
     request.key_count=htobs(1);
     memcpy(&request.key,&key,sizeof(key));
 
-    if(send(fd,&request,sizeof(request),0)!=(ssize_t)sizeof(request)) {
-        log_event("pairing_key_error","Failed to send Load Link Keys command");
+    /*
+     * HCI_CHANNEL_CONTROL is not a connected socket. BlueZ's own MGMT
+     * implementation writes commands with writev()/write(), not send().
+     * send() can fail with ENOTCONN before the kernel ever sees the MGMT
+     * packet.
+     */
+    ssize_t written;
+
+    do {
+        written=write(fd,&request,sizeof(request));
+    } while(written<0 && errno==EINTR);
+
+    if(written!=(ssize_t)sizeof(request)) {
+        int error_code=written<0?errno:EIO;
+        char detail[256];
+
+        snprintf(
+            detail,
+            sizeof(detail),
+            "Load Link Keys write failed: %s "
+            "(errno=%d wrote=%zd expected=%zu)",
+            g_strerror(error_code),
+            error_code,
+            written,
+            sizeof(request));
+
+        log_event("pairing_key_error",detail);
         close(fd);
         return FALSE;
+    }
+
+    {
+        char detail[160];
+        snprintf(
+            detail,
+            sizeof(detail),
+            "peer=%s index=%d key_type=%u bytes=%zu",
+            remote,
+            pairing_mgmt_index,
+            key.type,
+            sizeof(request));
+
+        log_event("pairing_key_load_request",detail);
     }
 
     gint64 deadline=g_get_monotonic_time()+2000000;
@@ -591,8 +630,39 @@ static gboolean pairing_load_into_kernel(const char *remote) {
         if(poll_result==0)
             break;
 
+        if(pollfd.revents&(POLLERR|POLLHUP|POLLNVAL)) {
+            char detail[128];
+
+            snprintf(
+                detail,
+                sizeof(detail),
+                "MGMT socket poll error revents=0x%x",
+                pollfd.revents);
+
+            log_event("pairing_key_error",detail);
+            break;
+        }
+
         uint8_t buffer[1024];
-        ssize_t size=recv(fd,buffer,sizeof(buffer),0);
+        ssize_t size;
+
+        do {
+            size=read(fd,buffer,sizeof(buffer));
+        } while(size<0 && errno==EINTR);
+
+        if(size<0) {
+            char detail[192];
+
+            snprintf(
+                detail,
+                sizeof(detail),
+                "MGMT read failed: %s (errno=%d)",
+                g_strerror(errno),
+                errno);
+
+            log_event("pairing_key_error",detail);
+            break;
+        }
 
         if(size<(ssize_t)(sizeof(PcMgmtHdr)+sizeof(PcMgmtCommandResult)))
             continue;
@@ -614,8 +684,17 @@ static gboolean pairing_load_into_kernel(const char *remote) {
 
         if(result->status==0) {
             success=TRUE;
-            log_event("pairing_key_loaded",
-                "Persistent BR/EDR Link Key restored into kernel");
+
+            char detail[160];
+            snprintf(
+                detail,
+                sizeof(detail),
+                "peer=%s key_type=%u kernel_index=%d",
+                remote,
+                key.type,
+                pairing_mgmt_index);
+
+            log_event("pairing_key_loaded",detail);
         } else {
             char detail[96];
             snprintf(detail,sizeof(detail),
