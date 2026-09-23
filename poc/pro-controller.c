@@ -576,19 +576,25 @@ static gboolean pairing_load_into_kernel(const char *remote) {
         written=write(fd,&request,sizeof(request));
     } while(written<0 && errno==EINTR);
 
-    if(written!=(ssize_t)sizeof(request)) {
-        int error_code=written<0?errno:EIO;
+    /*
+     * HCI_CHANNEL_CONTROL does not have normal stream/datagram write
+     * semantics. The kernel dispatches the buffer directly to the MGMT
+     * command handler, whose successful return value may be zero.
+     *
+     * BlueZ itself considers only a negative writev() result an error.
+     * Do the same here and wait for MGMT_EV_CMD_COMPLETE/STATUS for the
+     * actual command result.
+     */
+    if(written<0) {
+        int error_code=errno;
         char detail[256];
 
         snprintf(
             detail,
             sizeof(detail),
-            "Load Link Keys write failed: %s "
-            "(errno=%d wrote=%zd expected=%zu)",
+            "Load Link Keys write failed: %s (errno=%d)",
             g_strerror(error_code),
-            error_code,
-            written,
-            sizeof(request));
+            error_code);
 
         log_event("pairing_key_error",detail);
         close(fd);
@@ -596,15 +602,16 @@ static gboolean pairing_load_into_kernel(const char *remote) {
     }
 
     {
-        char detail[160];
+        char detail[192];
         snprintf(
             detail,
             sizeof(detail),
-            "peer=%s index=%d key_type=%u bytes=%zu",
+            "peer=%s index=%d key_type=%u write_return=%zd; "
+            "waiting for MGMT completion",
             remote,
             pairing_mgmt_index,
             key.type,
-            sizeof(request));
+            written);
 
         log_event("pairing_key_load_request",detail);
     }
