@@ -52,11 +52,11 @@ profile has been validated on real hardware.
 The GTK process never opens Bluetooth sockets and does not run as root. Starting a
 session invokes the installed `run-classic.sh` through `pkexec`. Its Polkit action
 allows the exact root-owned launcher for an active local session without a password;
-it does not authorize arbitrary commands. For first pairing, the runner temporarily
-restarts BlueZ with only the `input` plugin disabled and starts a C backend that owns
-the temporary Agent1, SDP record and L2CAP PSM 17/19 listeners. Reconnect sessions do
-not restart BlueZ or register a new pairing agent/profile; they only open the outbound
-Classic HID channels. The backend temporarily powers the selected adapter if BlueZ's restart
+it does not authorize arbitrary commands. For first pairing, the runner temporarily restarts BlueZ in compatibility mode
+with plugins disabled, matching the configuration validated with the Switch, and
+starts a C backend that owns the temporary Agent1, SDP record and L2CAP PSM 17/19
+listeners. Reconnect sessions do not restart BlueZ or register a new pairing
+agent/profile; they only open the outbound Classic HID channels. The backend temporarily powers the selected adapter if BlueZ's restart
 left it off, then restores the previous power state. It also records a private
 `btmon` capture in a per-session `/tmp/pcble2gamepad-UID-XXXXXXXX` directory.
 The backend accepts commands
