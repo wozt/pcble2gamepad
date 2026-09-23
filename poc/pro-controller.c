@@ -110,8 +110,54 @@ static void changed(GDBusConnection *c,const char *sender,const char *path,const
     const char *signal,GVariant *args,gpointer data) {
     (void)c;(void)sender;(void)iface;(void)signal;(void)data;
     if (!g_str_has_prefix(path,adapter)) return;
+
     char *v=g_variant_print(args,TRUE), *msg=g_strdup_printf("path=%s %s",path,v);
-    log_event("bluez_properties",msg); g_free(msg);g_free(v);
+    log_event("bluez_properties",msg);g_free(msg);g_free(v);
+
+    const char *changed_iface=NULL;
+    GVariant *properties=NULL,*invalidated=NULL;
+    g_variant_get(args,"(&s@a{sv}@as)",&changed_iface,&properties,&invalidated);
+
+    if(!strcmp(changed_iface,"org.bluez.Device1")) {
+        gboolean paired=FALSE,bonded=FALSE;
+
+        GVariant *value=g_variant_lookup_value(properties,"Paired",G_VARIANT_TYPE_BOOLEAN);
+        if(value) {
+            paired=g_variant_get_boolean(value);
+            g_variant_unref(value);
+        }
+
+        value=g_variant_lookup_value(properties,"Bonded",G_VARIANT_TYPE_BOOLEAN);
+        if(value) {
+            bonded=g_variant_get_boolean(value);
+            g_variant_unref(value);
+        }
+
+        if(paired || bonded) {
+            GError *error=NULL;
+            GVariant *reply=g_dbus_connection_call_sync(
+                bus,"org.bluez",path,
+                "org.freedesktop.DBus.Properties","Set",
+                g_variant_new("(ssv)",
+                    "org.bluez.Device1","Trusted",
+                    g_variant_new_boolean(TRUE)),
+                NULL,G_DBUS_CALL_FLAGS_NONE,3000,NULL,&error);
+
+            if(reply) {
+                g_variant_unref(reply);
+                log_event("bond_state",
+                    bonded
+                        ?"Switch reports bonded; marked trusted"
+                        :"Switch reports paired; marked trusted");
+            } else {
+                log_event("trust_error",error->message);
+                g_error_free(error);
+            }
+        }
+    }
+
+    g_variant_unref(properties);
+    g_variant_unref(invalidated);
 }
 static void reset_link(void) {
     for(int i=0;i<2;i++) {
@@ -199,13 +245,18 @@ static gboolean connect_outbound(const bdaddr_t *local,const char *address) {
          * Switch to terminate it before PSM 17 is even negotiated.
          */
         struct bt_security security={0};
-        security.level=BT_SECURITY_HIGH;
+        /*
+         * Switch controller bonds may use an unauthenticated BR/EDR link key.
+         * MEDIUM requests authentication/encryption without requiring a
+         * MITM-authenticated key as HIGH does.
+         */
+        security.level=BT_SECURITY_MEDIUM;
 
         if(setsockopt(fd,SOL_BLUETOOTH,BT_SECURITY,
                       &security,sizeof(security))<0) {
             char failure[160];
             snprintf(failure,sizeof(failure),
-                "psm=%d level=high error=%s",
+                "psm=%d level=medium error=%s",
                 i?19:17,strerror(errno));
             log_event("reconnect_security_error",failure);
             close(fd);
@@ -214,7 +265,7 @@ static gboolean connect_outbound(const bdaddr_t *local,const char *address) {
 
         char security_detail[96];
         snprintf(security_detail,sizeof(security_detail),
-            "psm=%d level=BT_SECURITY_HIGH",
+            "psm=%d level=BT_SECURITY_MEDIUM",
             i?19:17);
         log_event("reconnect_security",security_detail);
 
@@ -497,7 +548,12 @@ int main(int argc,char **argv) {
     GVariantBuilder opts;g_variant_builder_init(&opts,G_VARIANT_TYPE_VARDICT);
     g_variant_builder_add(&opts,"{sv}","ServiceRecord",g_variant_new_string(record));g_free(record);
     g_variant_builder_add(&opts,"{sv}","Role",g_variant_new_string("server"));
-    g_variant_builder_add(&opts,"{sv}","RequireAuthentication",g_variant_new_boolean(FALSE));
+    /*
+     * Require a genuine BR/EDR pairing before HID becomes usable.
+     * Without this BlueZ can complete a non-bonding association that appears
+     * Paired during the session but produces no persistent LinkKey.
+     */
+    g_variant_builder_add(&opts,"{sv}","RequireAuthentication",g_variant_new_boolean(TRUE));
     g_variant_builder_add(&opts,"{sv}","RequireAuthorization",g_variant_new_boolean(FALSE));
     g_variant_builder_add(&opts,"{sv}","AutoConnect",g_variant_new_boolean(TRUE));
     if(!shared_profile) {
@@ -532,6 +588,27 @@ int main(int argc,char **argv) {
          */
         for(int i=0;i<2;i++) {
             listeners[i]=socket(AF_BLUETOOTH,SOCK_SEQPACKET|SOCK_NONBLOCK|SOCK_CLOEXEC,BTPROTO_L2CAP);
+
+            if(listeners[i]>=0) {
+                struct bt_security security={0};
+                security.level=BT_SECURITY_MEDIUM;
+
+                if(setsockopt(listeners[i],SOL_BLUETOOTH,BT_SECURITY,
+                              &security,sizeof(security))<0) {
+                    char detail[160];
+                    snprintf(detail,sizeof(detail),
+                        "psm=%d level=medium error=%s",
+                        i?19:17,strerror(errno));
+                    log_event("pairing_security_error",detail);
+                    goto cleanup;
+                }
+
+                char detail[96];
+                snprintf(detail,sizeof(detail),
+                    "psm=%d level=BT_SECURITY_MEDIUM",i?19:17);
+                log_event("pairing_security",detail);
+            }
+
             struct sockaddr_l2 bind_addr={.l2_family=AF_BLUETOOTH,.l2_psm=htobs(i?19:17)};
             bacpy(&bind_addr.l2_bdaddr,&local);
             if(listeners[i]<0 ||
