@@ -47,7 +47,10 @@ static guint pairing_mgmt_watch;
 
 static int pairing_hci_fd=-1;
 static guint pairing_hci_watch;
-static gboolean pairing_auth_started;
+
+static guint pairing_reconnect_source;
+static unsigned pairing_handoff_attempts;
+static gboolean shutting_down;
 
 static char pairing_local_address[18];
 
@@ -56,9 +59,15 @@ static char pairing_local_address[18];
 #define PC_MGMT_EV_NEW_LINK_KEY   0x0009
 #define PC_MGMT_OP_LOAD_LINK_KEYS 0x0012
 
+#ifndef HCI_CHANNEL_MONITOR
+#define HCI_CHANNEL_MONITOR 2
+#endif
+
 #ifndef HCI_CHANNEL_CONTROL
 #define HCI_CHANNEL_CONTROL 3
 #endif
+
+#define PC_MONITOR_EVENT_PKT 3
 
 typedef struct __attribute__((packed)) {
     uint16_t opcode;
@@ -94,6 +103,12 @@ typedef struct __attribute__((packed)) {
     uint16_t key_count;
     PcMgmtLinkKey key;
 } PcMgmtLoadOneKey;
+
+typedef struct __attribute__((packed)) {
+    uint16_t opcode;
+    uint16_t index;
+    uint16_t len;
+} PcMonitorHdr;
 static gboolean select_controller(const char *type) {
     if(!strcmp(type,"pro")){controller_type=CONTROLLER_PRO;controller_alias="Pro Controller";control_socket="pro.sock";return TRUE;}
     if(!strcmp(type,"joycon-l")){controller_type=CONTROLLER_JOYCON_L;controller_alias="Joy-Con (L)";control_socket="joycon-left.sock";return TRUE;}
@@ -255,7 +270,9 @@ static gboolean pairing_save_key(const PcMgmtNewLinkKey *event) {
 }
 
 
-static gboolean pairing_hci_event(gint fd,GIOCondition condition,gpointer unused) {
+static gboolean pairing_hci_event(gint fd,
+                                    GIOCondition condition,
+                                    gpointer unused) {
     (void)unused;
 
     if(condition&(G_IO_HUP|G_IO_ERR|G_IO_NVAL)) {
@@ -263,102 +280,119 @@ static gboolean pairing_hci_event(gint fd,GIOCondition condition,gpointer unused
         return G_SOURCE_REMOVE;
     }
 
-    uint8_t buffer[HCI_MAX_EVENT_SIZE+1];
+    uint8_t buffer[4096];
     ssize_t size=recv(fd,buffer,sizeof(buffer),MSG_DONTWAIT);
 
     if(size<0 && (errno==EAGAIN || errno==EWOULDBLOCK))
         return G_SOURCE_CONTINUE;
 
-    if(size<(ssize_t)(1+HCI_EVENT_HDR_SIZE))
+    if(size<(ssize_t)sizeof(PcMonitorHdr))
         return G_SOURCE_CONTINUE;
 
-    if(buffer[0]!=HCI_EVENT_PKT)
+    const PcMonitorHdr *monitor=
+        (const PcMonitorHdr *)buffer;
+
+    uint16_t opcode=btohs(monitor->opcode);
+    uint16_t index=btohs(monitor->index);
+    uint16_t packet_size=btohs(monitor->len);
+
+    if(index!=(uint16_t)pairing_mgmt_index ||
+       opcode!=PC_MONITOR_EVENT_PKT)
         return G_SOURCE_CONTINUE;
+
+    size_t available=
+        (size_t)size-sizeof(PcMonitorHdr);
+
+    if(packet_size>available)
+        packet_size=(uint16_t)available;
+
+    if(packet_size<HCI_EVENT_HDR_SIZE)
+        return G_SOURCE_CONTINUE;
+
+    const uint8_t *packet=
+        buffer+sizeof(PcMonitorHdr);
 
     const hci_event_hdr *header=
-        (const hci_event_hdr *)(buffer+1);
+        (const hci_event_hdr *)packet;
 
     if(header->evt!=EVT_LINK_KEY_NOTIFY)
         return G_SOURCE_CONTINUE;
 
-    if(size<(ssize_t)(
-            1+HCI_EVENT_HDR_SIZE+EVT_LINK_KEY_NOTIFY_SIZE))
+    if(packet_size<
+       HCI_EVENT_HDR_SIZE+EVT_LINK_KEY_NOTIFY_SIZE)
         return G_SOURCE_CONTINUE;
 
     const evt_link_key_notify *notification=
         (const evt_link_key_notify *)(
-            buffer+1+HCI_EVENT_HDR_SIZE);
+            packet+HCI_EVENT_HDR_SIZE);
 
     PcMgmtNewLinkKey event={0};
 
-    /*
-     * HCI Link Key Notification is the source event used by the Linux
-     * Bluetooth core to create its MGMT New Link Key event. Capture it
-     * directly as a fallback so persistence does not depend on BlueZ's
-     * bonding/store-hint policy.
-     */
     event.store_hint=0;
-    bacpy(&event.key.addr.bdaddr,&notification->bdaddr);
+    bacpy(
+        &event.key.addr.bdaddr,
+        &notification->bdaddr);
+
     event.key.addr.type=0;
     event.key.type=notification->key_type;
-    memcpy(event.key.val,notification->link_key,16);
+    memcpy(
+        event.key.val,
+        notification->link_key,
+        sizeof(event.key.val));
     event.key.pin_len=0;
 
     char remote[18];
     ba2str(&notification->bdaddr,remote);
 
-    char detail[128];
-    snprintf(detail,sizeof(detail),
-        "peer=%s key_type=%u source=HCI_LINK_KEY_NOTIFICATION",
-        remote,notification->key_type);
+    char detail[160];
+    snprintf(
+        detail,
+        sizeof(detail),
+        "peer=%s key_type=%u source=HCI_MONITOR",
+        remote,
+        notification->key_type);
 
     log_event("pairing_key_hci",detail);
-    pairing_save_key(&event);
+
+    if(!pairing_save_key(&event))
+        log_event(
+            "pairing_key_error",
+            "HCI monitor saw Link Key but persistence failed");
 
     return G_SOURCE_CONTINUE;
 }
 
 static gboolean pairing_hci_capture_start(void) {
     pairing_hci_fd=socket(
-        AF_BLUETOOTH,
+        PF_BLUETOOTH,
         SOCK_RAW|SOCK_CLOEXEC|SOCK_NONBLOCK,
         BTPROTO_HCI);
 
     if(pairing_hci_fd<0) {
-        log_event("pairing_key_error",
-            "Cannot open raw HCI socket for Link Key capture");
+        log_event(
+            "pairing_key_error",
+            "Cannot open HCI monitor socket");
         return FALSE;
     }
 
     struct sockaddr_hci address={0};
     address.hci_family=AF_BLUETOOTH;
-    address.hci_dev=(uint16_t)pairing_mgmt_index;
-    address.hci_channel=HCI_CHANNEL_RAW;
+
+    /*
+     * Monitor mode observes all adapters, just like btmon.
+     * pairing_hci_event() filters packets by the selected HCI index.
+     */
+    address.hci_dev=HCI_DEV_NONE;
+    address.hci_channel=HCI_CHANNEL_MONITOR;
 
     if(bind(
             pairing_hci_fd,
             (struct sockaddr *)&address,
             sizeof(address))<0) {
-        log_event("pairing_key_error",
-            "Cannot bind raw HCI Link Key capture socket");
-        close(pairing_hci_fd);
-        pairing_hci_fd=-1;
-        return FALSE;
-    }
+        log_event(
+            "pairing_key_error",
+            "Cannot bind HCI monitor socket");
 
-    struct hci_filter filter;
-    hci_filter_clear(&filter);
-    hci_filter_set_ptype(HCI_EVENT_PKT,&filter);
-    hci_filter_set_event(EVT_LINK_KEY_NOTIFY,&filter);
-
-    if(setsockopt(
-            pairing_hci_fd,
-            SOL_HCI,
-            HCI_FILTER,
-            &filter,
-            sizeof(filter))<0) {
-        log_event("pairing_key_error",
-            "Cannot configure raw HCI Link Key event filter");
         close(pairing_hci_fd);
         pairing_hci_fd=-1;
         return FALSE;
@@ -370,156 +404,11 @@ static gboolean pairing_hci_capture_start(void) {
         pairing_hci_event,
         NULL);
 
-    log_event("pairing_hci_capture",
-        "Direct HCI Link Key Notification capture armed");
+    log_event(
+        "pairing_hci_capture",
+        "HCI monitor Link Key capture armed");
 
     return TRUE;
-}
-
-typedef struct {
-    bdaddr_t remote;
-    char address[18];
-} PairingAuthJob;
-
-typedef struct {
-    char address[18];
-    gboolean authenticated;
-    gboolean key_changed;
-    int auth_error;
-    int change_error;
-} PairingAuthResult;
-
-static gboolean pairing_auth_result(gpointer data) {
-    PairingAuthResult *result=data;
-
-    if(result->authenticated) {
-        char detail[128];
-        snprintf(detail,sizeof(detail),
-            "peer=%s BR/EDR authentication completed",
-            result->address);
-        log_event("pairing_auth_complete",detail);
-    } else {
-        char detail[192];
-        snprintf(detail,sizeof(detail),
-            "peer=%s authentication failed: %s",
-            result->address,
-            g_strerror(result->auth_error));
-        log_event("pairing_auth_error",detail);
-    }
-
-    if(result->key_changed) {
-        char detail[160];
-        snprintf(detail,sizeof(detail),
-            "peer=%s requested a fresh standard BR/EDR Link Key",
-            result->address);
-        log_event("pairing_link_key_changed",detail);
-    } else if(result->authenticated && result->change_error) {
-        char detail[192];
-        snprintf(detail,sizeof(detail),
-            "peer=%s Change Connection Link Key failed: %s",
-            result->address,
-            g_strerror(result->change_error));
-        log_event("pairing_link_key_change_error",detail);
-    }
-
-    g_free(result);
-    return G_SOURCE_REMOVE;
-}
-
-static gpointer pairing_auth_worker(gpointer data) {
-    PairingAuthJob *job=data;
-    PairingAuthResult *result=g_new0(PairingAuthResult,1);
-
-    g_strlcpy(
-        result->address,
-        job->address,
-        sizeof(result->address));
-
-    int hci=hci_open_dev(pairing_mgmt_index);
-
-    if(hci<0) {
-        result->auth_error=errno;
-        g_main_context_invoke(NULL,pairing_auth_result,result);
-        g_free(job);
-        return NULL;
-    }
-
-    struct hci_conn_info_req *request=
-        g_malloc0(
-            sizeof(*request)+
-            sizeof(struct hci_conn_info));
-
-    bacpy(&request->bdaddr,&job->remote);
-    request->type=ACL_LINK;
-
-    if(ioctl(
-            hci,
-            HCIGETCONNINFO,
-            (unsigned long)request)<0) {
-        result->auth_error=errno;
-
-        g_free(request);
-        hci_close_dev(hci);
-        g_main_context_invoke(NULL,pairing_auth_result,result);
-        g_free(job);
-        return NULL;
-    }
-
-    uint16_t handle=
-        htobs(request->conn_info->handle);
-
-    /*
-     * Force a real BR/EDR authentication exchange. The UI/main loop stays
-     * alive in this worker thread so BlueZ can service any SSP Agent calls.
-     */
-    if(hci_authenticate_link(hci,handle,10000)<0) {
-        result->auth_error=errno;
-    } else {
-        result->authenticated=TRUE;
-
-        /*
-         * Explicitly request a fresh standard Link Key after authentication.
-         * The controller will emit EVT_LINK_KEY_NOTIFY if successful. Both
-         * peers then know the same replacement key, which is the material
-         * required for durable reconnects.
-         */
-        if(hci_change_link_key(hci,handle,10000)<0)
-            result->change_error=errno;
-        else
-            result->key_changed=TRUE;
-    }
-
-    g_free(request);
-    hci_close_dev(hci);
-
-    g_main_context_invoke(NULL,pairing_auth_result,result);
-    g_free(job);
-    return NULL;
-}
-
-static void pairing_start_authentication(const bdaddr_t *remote) {
-    if(pairing_auth_started)
-        return;
-
-    pairing_auth_started=TRUE;
-
-    PairingAuthJob *job=g_new0(PairingAuthJob,1);
-    bacpy(&job->remote,remote);
-    ba2str(remote,job->address);
-
-    char detail[128];
-    snprintf(detail,sizeof(detail),
-        "peer=%s requesting explicit BR/EDR authentication",
-        job->address);
-    log_event("pairing_auth",detail);
-
-    GThread *thread=
-        g_thread_new(
-            "pcble2gamepad-pair-auth",
-            pairing_auth_worker,
-            job);
-
-    g_thread_unref(thread);
 }
 
 static gboolean pairing_mgmt_event(gint fd,GIOCondition condition,gpointer unused) {
@@ -584,7 +473,7 @@ static gboolean pairing_capture_start(void) {
     }
 
     log_event("pairing_key_capture",
-        "MGMT and direct HCI BR/EDR Link Key capture armed");
+        "MGMT and HCI monitor BR/EDR Link Key capture armed");
 
     return TRUE;
 }
@@ -801,19 +690,52 @@ static void changed(GDBusConnection *c,const char *sender,const char *path,const
     log_event("bluez_properties",msg);g_free(msg);g_free(v);
 }
 
+static gboolean pairing_handoff_reconnect(gpointer unused);
+
 static void reset_link(void) {
     for(int i=0;i<2;i++) {
         if(watches[i]) {g_source_remove(watches[i]);watches[i]=0;}
         if(channels[i]>=0) close(channels[i]);
         channels[i]=-1;
     }
-    peer[0]=0;initialized=FALSE;next_report_at=0;slow_exit_until=0;
-    slow_input_frequency=FALSE;saw_interrupt_output=FALSE;
-    pairing_auth_started=FALSE;
-    uint8_t addr[6];memcpy(addr,state.address,6);controller_init(&state,controller_type,addr);
+    gboolean should_handoff=
+        !shutting_down &&
+        !reconnect_mode &&
+        last_peer[0];
+
+    peer[0]=0;
+    initialized=FALSE;
+    next_report_at=0;
+    slow_exit_until=0;
+    slow_input_frequency=FALSE;
+    saw_interrupt_output=FALSE;
+
+    uint8_t addr[6];
+    memcpy(addr,state.address,6);
+    controller_init(&state,controller_type,addr);
+
     log_event("link_closed",reconnect_mode
         ?"Paired Switch disconnected; start Reconnect again to initiate a new connection"
-        :"Waiting for a new control/interrupt connection; see btmon for HCI reason");
+        :"Initial pairing link closed");
+
+    /*
+     * Nintendo completes the temporary Change Grip/Order link and can then
+     * drop it. A real controller immediately reconnects using the Link Key it
+     * just stored. Do the same transparently.
+     */
+    if(should_handoff && !pairing_reconnect_source) {
+        pairing_handoff_attempts=0;
+
+        log_event(
+            "pairing_handoff",
+            "Pairing completed; scheduling persistent reconnect");
+
+        pairing_reconnect_source=
+            g_timeout_add(
+                500,
+                pairing_handoff_reconnect,
+                NULL);
+    }
 }
 static uint8_t timer_byte(void) {return (uint8_t)(g_get_monotonic_time()/5000);}
 static gboolean send_report(const uint8_t out[50]) {
@@ -974,6 +896,92 @@ failed:
     return FALSE;
 }
 
+static gboolean pairing_handoff_reconnect(gpointer unused) {
+    (void)unused;
+
+    pairing_reconnect_source=0;
+
+    if(shutting_down ||
+       channels[0]>=0 ||
+       channels[1]>=0 ||
+       !last_peer[0])
+        return G_SOURCE_REMOVE;
+
+    /*
+     * The key must already have been persisted by HCI monitor several
+     * seconds before the Switch closes the temporary pairing ACL.
+     */
+    if(!pairing_load_into_kernel(last_peer)) {
+        log_event(
+            "pairing_handoff_error",
+            "Persistent Link Key was not available after pairing");
+        return G_SOURCE_REMOVE;
+    }
+
+    set_property(
+        "Pairable",
+        g_variant_new_boolean(FALSE));
+
+    set_property(
+        "Discoverable",
+        g_variant_new_boolean(FALSE));
+
+    reconnect_mode=TRUE;
+    g_strlcpy(
+        reconnect_peer,
+        last_peer,
+        sizeof(reconnect_peer));
+
+    pairing_handoff_attempts++;
+
+    char detail[128];
+    snprintf(
+        detail,
+        sizeof(detail),
+        "peer=%s attempt=%u",
+        last_peer,
+        pairing_handoff_attempts);
+
+    log_event("pairing_handoff_reconnect",detail);
+
+    if(connect_outbound(
+            &selected_local_address,
+            last_peer)) {
+        pairing_handoff_attempts=0;
+
+        log_event(
+            "pairing_handoff_connected",
+            "One-time pairing transitioned to persistent controller connection");
+
+        return G_SOURCE_REMOVE;
+    }
+
+    reconnect_mode=FALSE;
+
+    /*
+     * Give the Switch a little time to finish leaving Change Grip/Order.
+     * Retry a few times automatically instead of exposing this transition
+     * to the user.
+     */
+    if(pairing_handoff_attempts<5 && !shutting_down) {
+        pairing_reconnect_source=
+            g_timeout_add(
+                1000,
+                pairing_handoff_reconnect,
+                NULL);
+
+        log_event(
+            "pairing_handoff_retry",
+            "Switch not ready yet; retrying persistent reconnect");
+    } else {
+        log_event(
+            "pairing_handoff_error",
+            "Automatic persistent reconnect failed");
+    }
+
+    return G_SOURCE_REMOVE;
+}
+
 static gboolean reconnect_from_control(const char *address,
                                        gpointer user_data,
                                        GError **error) {
@@ -1037,11 +1045,10 @@ static gboolean accept_peer(gint fd,GIOCondition cond,gpointer user) {
             "Using reduced report cadence during Change Grip/Order");
 
         /*
-         * L2CAP security alone does not guarantee that the Nintendo host
-         * creates a durable Link Key. Explicitly authenticate the ACL and
-         * request a fresh key while the original pairing session is alive.
+         * BT_SECURITY_MEDIUM already caused the kernel/console SSP exchange.
+         * The resulting HCI Link Key Notification is captured independently
+         * through HCI_CHANNEL_MONITOR.
          */
-        pairing_start_authentication(&addr.l2_bdaddr);
     }
     return G_SOURCE_CONTINUE;
 }
@@ -1433,6 +1440,13 @@ int main(int argc,char **argv) {
     g_io_add_watch(io,G_IO_IN|G_IO_HUP,input,NULL);
     g_main_loop_run(loop);g_io_channel_unref(io);g_main_loop_unref(loop);result=0;
 cleanup:
+    shutting_down=TRUE;
+
+    if(pairing_reconnect_source) {
+        g_source_remove(pairing_reconnect_source);
+        pairing_reconnect_source=0;
+    }
+
     pro_control_free(desktop);desktop=NULL;
     if(err) {log_event("error",err->message);g_error_free(err);}
     reset_link();for(int i=0;i<2;i++) if(listeners[i]>=0) close(listeners[i]);
