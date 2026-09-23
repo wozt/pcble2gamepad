@@ -9,6 +9,7 @@
 #include <bluetooth/l2cap.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 #include <poll.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -43,6 +44,11 @@ static uid_t pairing_owner;
 static int pairing_mgmt_index=-1;
 static int pairing_mgmt_fd=-1;
 static guint pairing_mgmt_watch;
+
+static int pairing_hci_fd=-1;
+static guint pairing_hci_watch;
+static gboolean pairing_auth_started;
+
 static char pairing_local_address[18];
 
 #define PC_MGMT_EV_CMD_COMPLETE   0x0001
@@ -248,6 +254,274 @@ static gboolean pairing_save_key(const PcMgmtNewLinkKey *event) {
     return TRUE;
 }
 
+
+static gboolean pairing_hci_event(gint fd,GIOCondition condition,gpointer unused) {
+    (void)unused;
+
+    if(condition&(G_IO_HUP|G_IO_ERR|G_IO_NVAL)) {
+        pairing_hci_watch=0;
+        return G_SOURCE_REMOVE;
+    }
+
+    uint8_t buffer[HCI_MAX_EVENT_SIZE+1];
+    ssize_t size=recv(fd,buffer,sizeof(buffer),MSG_DONTWAIT);
+
+    if(size<0 && (errno==EAGAIN || errno==EWOULDBLOCK))
+        return G_SOURCE_CONTINUE;
+
+    if(size<(ssize_t)(1+HCI_EVENT_HDR_SIZE))
+        return G_SOURCE_CONTINUE;
+
+    if(buffer[0]!=HCI_EVENT_PKT)
+        return G_SOURCE_CONTINUE;
+
+    const hci_event_hdr *header=
+        (const hci_event_hdr *)(buffer+1);
+
+    if(header->evt!=EVT_LINK_KEY_NOTIFY)
+        return G_SOURCE_CONTINUE;
+
+    if(size<(ssize_t)(
+            1+HCI_EVENT_HDR_SIZE+EVT_LINK_KEY_NOTIFY_SIZE))
+        return G_SOURCE_CONTINUE;
+
+    const evt_link_key_notify *notification=
+        (const evt_link_key_notify *)(
+            buffer+1+HCI_EVENT_HDR_SIZE);
+
+    PcMgmtNewLinkKey event={0};
+
+    /*
+     * HCI Link Key Notification is the source event used by the Linux
+     * Bluetooth core to create its MGMT New Link Key event. Capture it
+     * directly as a fallback so persistence does not depend on BlueZ's
+     * bonding/store-hint policy.
+     */
+    event.store_hint=0;
+    bacpy(&event.key.addr.bdaddr,&notification->bdaddr);
+    event.key.addr.type=0;
+    event.key.type=notification->key_type;
+    memcpy(event.key.val,notification->link_key,16);
+    event.key.pin_len=0;
+
+    char remote[18];
+    ba2str(&notification->bdaddr,remote);
+
+    char detail[128];
+    snprintf(detail,sizeof(detail),
+        "peer=%s key_type=%u source=HCI_LINK_KEY_NOTIFICATION",
+        remote,notification->key_type);
+
+    log_event("pairing_key_hci",detail);
+    pairing_save_key(&event);
+
+    return G_SOURCE_CONTINUE;
+}
+
+static gboolean pairing_hci_capture_start(void) {
+    pairing_hci_fd=socket(
+        AF_BLUETOOTH,
+        SOCK_RAW|SOCK_CLOEXEC|SOCK_NONBLOCK,
+        BTPROTO_HCI);
+
+    if(pairing_hci_fd<0) {
+        log_event("pairing_key_error",
+            "Cannot open raw HCI socket for Link Key capture");
+        return FALSE;
+    }
+
+    struct sockaddr_hci address={0};
+    address.hci_family=AF_BLUETOOTH;
+    address.hci_dev=(uint16_t)pairing_mgmt_index;
+    address.hci_channel=HCI_CHANNEL_RAW;
+
+    if(bind(
+            pairing_hci_fd,
+            (struct sockaddr *)&address,
+            sizeof(address))<0) {
+        log_event("pairing_key_error",
+            "Cannot bind raw HCI Link Key capture socket");
+        close(pairing_hci_fd);
+        pairing_hci_fd=-1;
+        return FALSE;
+    }
+
+    struct hci_filter filter;
+    hci_filter_clear(&filter);
+    hci_filter_set_ptype(HCI_EVENT_PKT,&filter);
+    hci_filter_set_event(EVT_LINK_KEY_NOTIFY,&filter);
+
+    if(setsockopt(
+            pairing_hci_fd,
+            SOL_HCI,
+            HCI_FILTER,
+            &filter,
+            sizeof(filter))<0) {
+        log_event("pairing_key_error",
+            "Cannot configure raw HCI Link Key event filter");
+        close(pairing_hci_fd);
+        pairing_hci_fd=-1;
+        return FALSE;
+    }
+
+    pairing_hci_watch=g_unix_fd_add(
+        pairing_hci_fd,
+        G_IO_IN|G_IO_HUP|G_IO_ERR,
+        pairing_hci_event,
+        NULL);
+
+    log_event("pairing_hci_capture",
+        "Direct HCI Link Key Notification capture armed");
+
+    return TRUE;
+}
+
+typedef struct {
+    bdaddr_t remote;
+    char address[18];
+} PairingAuthJob;
+
+typedef struct {
+    char address[18];
+    gboolean authenticated;
+    gboolean key_changed;
+    int auth_error;
+    int change_error;
+} PairingAuthResult;
+
+static gboolean pairing_auth_result(gpointer data) {
+    PairingAuthResult *result=data;
+
+    if(result->authenticated) {
+        char detail[128];
+        snprintf(detail,sizeof(detail),
+            "peer=%s BR/EDR authentication completed",
+            result->address);
+        log_event("pairing_auth_complete",detail);
+    } else {
+        char detail[192];
+        snprintf(detail,sizeof(detail),
+            "peer=%s authentication failed: %s",
+            result->address,
+            g_strerror(result->auth_error));
+        log_event("pairing_auth_error",detail);
+    }
+
+    if(result->key_changed) {
+        char detail[160];
+        snprintf(detail,sizeof(detail),
+            "peer=%s requested a fresh standard BR/EDR Link Key",
+            result->address);
+        log_event("pairing_link_key_changed",detail);
+    } else if(result->authenticated && result->change_error) {
+        char detail[192];
+        snprintf(detail,sizeof(detail),
+            "peer=%s Change Connection Link Key failed: %s",
+            result->address,
+            g_strerror(result->change_error));
+        log_event("pairing_link_key_change_error",detail);
+    }
+
+    g_free(result);
+    return G_SOURCE_REMOVE;
+}
+
+static gpointer pairing_auth_worker(gpointer data) {
+    PairingAuthJob *job=data;
+    PairingAuthResult *result=g_new0(PairingAuthResult,1);
+
+    g_strlcpy(
+        result->address,
+        job->address,
+        sizeof(result->address));
+
+    int hci=hci_open_dev(pairing_mgmt_index);
+
+    if(hci<0) {
+        result->auth_error=errno;
+        g_main_context_invoke(NULL,pairing_auth_result,result);
+        g_free(job);
+        return NULL;
+    }
+
+    struct hci_conn_info_req *request=
+        g_malloc0(
+            sizeof(*request)+
+            sizeof(struct hci_conn_info));
+
+    bacpy(&request->bdaddr,&job->remote);
+    request->type=ACL_LINK;
+
+    if(ioctl(
+            hci,
+            HCIGETCONNINFO,
+            (unsigned long)request)<0) {
+        result->auth_error=errno;
+
+        g_free(request);
+        hci_close_dev(hci);
+        g_main_context_invoke(NULL,pairing_auth_result,result);
+        g_free(job);
+        return NULL;
+    }
+
+    uint16_t handle=
+        htobs(request->conn_info->handle);
+
+    /*
+     * Force a real BR/EDR authentication exchange. The UI/main loop stays
+     * alive in this worker thread so BlueZ can service any SSP Agent calls.
+     */
+    if(hci_authenticate_link(hci,handle,10000)<0) {
+        result->auth_error=errno;
+    } else {
+        result->authenticated=TRUE;
+
+        /*
+         * Explicitly request a fresh standard Link Key after authentication.
+         * The controller will emit EVT_LINK_KEY_NOTIFY if successful. Both
+         * peers then know the same replacement key, which is the material
+         * required for durable reconnects.
+         */
+        if(hci_change_link_key(hci,handle,10000)<0)
+            result->change_error=errno;
+        else
+            result->key_changed=TRUE;
+    }
+
+    g_free(request);
+    hci_close_dev(hci);
+
+    g_main_context_invoke(NULL,pairing_auth_result,result);
+    g_free(job);
+    return NULL;
+}
+
+static void pairing_start_authentication(const bdaddr_t *remote) {
+    if(pairing_auth_started)
+        return;
+
+    pairing_auth_started=TRUE;
+
+    PairingAuthJob *job=g_new0(PairingAuthJob,1);
+    bacpy(&job->remote,remote);
+    ba2str(remote,job->address);
+
+    char detail[128];
+    snprintf(detail,sizeof(detail),
+        "peer=%s requesting explicit BR/EDR authentication",
+        job->address);
+    log_event("pairing_auth",detail);
+
+    GThread *thread=
+        g_thread_new(
+            "pcble2gamepad-pair-auth",
+            pairing_auth_worker,
+            job);
+
+    g_thread_unref(thread);
+}
+
 static gboolean pairing_mgmt_event(gint fd,GIOCondition condition,gpointer unused) {
     (void)unused;
 
@@ -298,8 +572,19 @@ static gboolean pairing_capture_start(void) {
         pairing_mgmt_event,
         NULL);
 
+    if(!pairing_hci_capture_start()) {
+        if(pairing_mgmt_watch) {
+            g_source_remove(pairing_mgmt_watch);
+            pairing_mgmt_watch=0;
+        }
+
+        close(pairing_mgmt_fd);
+        pairing_mgmt_fd=-1;
+        return FALSE;
+    }
+
     log_event("pairing_key_capture",
-        "Persistent BR/EDR Link Key capture armed");
+        "MGMT and direct HCI BR/EDR Link Key capture armed");
 
     return TRUE;
 }
@@ -524,6 +809,7 @@ static void reset_link(void) {
     }
     peer[0]=0;initialized=FALSE;next_report_at=0;slow_exit_until=0;
     slow_input_frequency=FALSE;saw_interrupt_output=FALSE;
+    pairing_auth_started=FALSE;
     uint8_t addr[6];memcpy(addr,state.address,6);controller_init(&state,controller_type,addr);
     log_event("link_closed",reconnect_mode
         ?"Paired Switch disconnected; start Reconnect again to initiate a new connection"
@@ -745,7 +1031,17 @@ static gboolean accept_peer(gint fd,GIOCondition cond,gpointer user) {
         saw_interrupt_output=FALSE;
         next_report_at=0;
         slow_exit_until=0;
-        log_event("pairing_rate","Using reduced report cadence during Change Grip/Order");
+
+        log_event(
+            "pairing_rate",
+            "Using reduced report cadence during Change Grip/Order");
+
+        /*
+         * L2CAP security alone does not guarantee that the Nintendo host
+         * creates a durable Link Key. Explicitly authenticate the ACL and
+         * request a fresh key while the original pairing session is alive.
+         */
+        pairing_start_authentication(&addr.l2_bdaddr);
     }
     return G_SOURCE_CONTINUE;
 }
@@ -1152,6 +1448,15 @@ cleanup:
         if(!set_property(keys[0],saved[0]))restored=FALSE;
         g_variant_unref(saved[0]);
     }
+    if(pairing_hci_watch) {
+        g_source_remove(pairing_hci_watch);
+        pairing_hci_watch=0;
+    }
+    if(pairing_hci_fd>=0) {
+        close(pairing_hci_fd);
+        pairing_hci_fd=-1;
+    }
+
     if(pairing_mgmt_watch) {
         g_source_remove(pairing_mgmt_watch);
         pairing_mgmt_watch=0;
