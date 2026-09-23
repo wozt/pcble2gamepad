@@ -41,7 +41,9 @@ power state and device class. It powers the selected adapter temporarily when th
 compatibility-mode BlueZ restart leaves it off. It publishes the HID SDP record and
 binds PSM 17 and 19 specifically to the selected adapter. Its default pairing agent accepts requests only on that
 adapter, for the duration of the experiment. Visibility/pairability expire after
-180 seconds and the POC stops after 10 minutes. Its input never starts automatically.
+180 seconds and the POC stops after 10 minutes. After Pro Controller initialization,
+it sends L+R for 500 ms to complete the Change Grip/Order selection; all other input
+remains neutral until provided by the UI or stdin.
 
 Open the console's **Controllers -> Change Grip/Order** screen. Initialization
 logs alone do not prove buttons/sticks work: confirm those on the console.

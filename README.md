@@ -89,6 +89,8 @@ in Classic HID compatibility mode, and restores the normal service when the
 session stops. The installed Polkit policy permits this launcher without another
 password prompt for the active local session. This pauses other Bluetooth services for the duration. On first
 pairing, open **Controllers -> Change Grip/Order** on the console.
+After Pro Controller initialization, the backend sends L+R for 500 ms so the
+console validates the controller before leaving that screen.
 
 A Pro Controller needs one Bluetooth adapter. A Joy-Con pair exposes two Classic
 Bluetooth identities and therefore needs two distinct adapters, selected as left

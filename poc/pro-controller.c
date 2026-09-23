@@ -36,7 +36,7 @@ static guint watches[2];
 static ProState state;
 static unsigned sent, received;
 static gboolean initialized;
-static gint64 release_at;
+static gint64 release_at,join_until;
 typedef struct { char *event, *detail; } PendingLog;
 static GQueue pending_logs = G_QUEUE_INIT;
 static gboolean desktop_requested;
@@ -115,7 +115,7 @@ static void reset_link(void) {
         if(channels[i]>=0) close(channels[i]);
         channels[i]=-1;
     }
-    peer[0]=0; initialized=FALSE;
+    peer[0]=0;initialized=FALSE;join_until=0;
     uint8_t addr[6];memcpy(addr,state.address,6);controller_init(&state,controller_type,addr);
     log_event("link_closed","Waiting for a new control/interrupt connection; see btmon for HCI reason");
 }
@@ -149,7 +149,12 @@ static gboolean receive_packet(gint fd,GIOCondition cond,gpointer user) {
         char detail[96];snprintf(detail,sizeof(detail),"subcommand=0x%02x mode=0x%02x lights=0x%02x",in[11],state.mode,state.lights);
         log_event("hid_reply",detail);
         if(state.lights && state.vibration && !initialized) {
-            initialized=TRUE;log_event("initialization_observed","Player lights and vibration configured; console visibility/input still require user verification");
+            initialized=TRUE;
+            if(controller_type==CONTROLLER_PRO) {
+                join_until=g_get_monotonic_time()+500000;
+                log_event("controller_join","Sending L+R for 500 ms to validate Change Grip/Order");
+            }
+            log_event("initialization_observed","Player lights and vibration configured; console visibility/input still require user verification");
         }
     } else if(n>=2 && in[0]==0xa2 && in[1]==0x01) log_event("unsupported_subcommand","No invented ACK sent");
     return G_SOURCE_CONTINUE;
@@ -179,7 +184,12 @@ static gboolean tick(gpointer unused) {
         release_at=0;log_event("input_released","neutral");
     }
     if(channels[1]>=0 && channels[0]>=0) {
-        uint8_t out[50];pro_input(&state,timer_byte(),out);
+        ProState report=state;
+        if(join_until) {
+            if(g_get_monotonic_time()<join_until){report.buttons[0]|=0x40;report.buttons[2]|=0x40;}
+            else join_until=0;
+        }
+        uint8_t out[50];pro_input(&report,timer_byte(),out);
         if(!send_report(out)) reset_link();
     }
     pro_control_update(desktop,mock_mode?"Simulation":peer,mock_mode || initialized,sent,received);
