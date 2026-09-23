@@ -2,19 +2,25 @@
 # Run the reversible Classic HID backend.
 set -euo pipefail
 [[ $EUID == 0 ]] || { echo 'Run through pkexec or sudo.' >&2; exit 1; }
-[[ $# -ge 1 && $1 =~ ^hci[0-9]+$ ]] || { echo "Usage: $0 hciN [--desktop] [--profile pro|joycon-pair] [--secondary hciN] [--verbose]" >&2; exit 2; }
+[[ $# -ge 1 && $1 =~ ^hci[0-9]+$ ]] || { echo "Usage: $0 hciN [--desktop] [--profile pro|joycon-pair] [--secondary hciN] [--verbose] [--reconnect MAC]" >&2; exit 2; }
 script_dir=$(cd -- "$(dirname -- "$0")" && pwd)
 adapter=$1
 shift
 desktop=false
 profile=pro
 secondary=
+reconnect=
 verbose=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         --desktop) desktop=true; shift ;;
         --profile) [[ $# -ge 2 ]] || { echo 'Missing profile value' >&2; exit 2; }; profile=$2; shift 2 ;;
         --secondary) [[ $# -ge 2 && $2 =~ ^hci[0-9]+$ ]] || { echo 'Invalid secondary adapter' >&2; exit 2; }; secondary=$2; shift 2 ;;
+        --reconnect)
+            [[ $# -ge 2 && $2 =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]] || { echo 'Invalid reconnect MAC' >&2; exit 2; }
+            reconnect=$2
+            shift 2
+            ;;
         --verbose) verbose=true; shift ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
@@ -24,8 +30,10 @@ if [[ $profile == joycon-pair ]]; then
     $desktop || { echo 'Joy-Con pair currently requires desktop mode' >&2; exit 2; }
     [[ -n $secondary && $secondary != "$adapter" ]] || { echo 'Joy-Con pair requires two distinct adapters' >&2; exit 2; }
 fi
+[[ -z $reconnect || $profile == pro ]] || { echo 'Reconnect is currently implemented for the Pro Controller profile only.' >&2; exit 2; }
 backend_options=()
 $verbose && backend_options+=(--verbose)
+[[ -n $reconnect ]] && backend_options+=(--reconnect "$reconnect")
 installed=false
 if [[ -x "$script_dir/pcble2gamepad-controller-backend" && -f "$script_dir/pro-controller.xml" ]]; then
     app="$script_dir/pcble2gamepad-controller-backend"

@@ -82,8 +82,17 @@ commands. A user-local installation cannot provide this privileged integration.
 ./build/pcble2gamepad
 ```
 
-Choose the emulated controller and Bluetooth adapter by address, then click
-**Connect to Switch**. The
+Choose the emulated controller and Bluetooth adapter by address. Controller
+Studio deliberately separates **Pair / Sync new Switch** from **Reconnect paired
+Switch**.
+
+The first pairing requires **Controllers -> Change Grip/Order**. After a successful
+pairing, Controller Studio stores the Switch address and the Bluetooth adapter
+identity. Normal sessions use **Reconnect paired Switch**: the PC initiates the HID
+control and interrupt L2CAP channels toward the stored Switch and does not require
+the Change Grip/Order screen.
+
+The
 application invokes its narrow backend with `pkexec`, temporarily restarts BlueZ
 in Classic HID compatibility mode, and restores the normal service when the
 session stops. The installed Polkit policy permits this launcher without another

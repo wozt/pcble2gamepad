@@ -8,6 +8,7 @@
 #include <bluetooth/hci_lib.h>
 #include <bluetooth/l2cap.h>
 #include <sys/socket.h>
+#include <fcntl.h>
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
@@ -25,6 +26,8 @@ static ControllerType controller_type=CONTROLLER_PRO;
 static const char *controller_alias="Pro Controller",*control_socket="pro.sock";
 static gboolean shared_profile;
 static gboolean verbose_traffic;
+static gboolean reconnect_mode;
+static char reconnect_peer[18];
 static gboolean select_controller(const char *type) {
     if(!strcmp(type,"pro")){controller_type=CONTROLLER_PRO;controller_alias="Pro Controller";control_socket="pro.sock";return TRUE;}
     if(!strcmp(type,"joycon-l")){controller_type=CONTROLLER_JOYCON_L;controller_alias="Joy-Con (L)";control_socket="joycon-left.sock";return TRUE;}
@@ -119,7 +122,9 @@ static void reset_link(void) {
     peer[0]=0;initialized=FALSE;next_report_at=0;slow_exit_until=0;
     slow_input_frequency=FALSE;saw_interrupt_output=FALSE;
     uint8_t addr[6];memcpy(addr,state.address,6);controller_init(&state,controller_type,addr);
-    log_event("link_closed","Waiting for a new control/interrupt connection; see btmon for HCI reason");
+    log_event("link_closed",reconnect_mode
+        ?"Paired Switch disconnected; start Reconnect again to initiate a new connection"
+        :"Waiting for a new control/interrupt connection; see btmon for HCI reason");
 }
 static uint8_t timer_byte(void) {return (uint8_t)(g_get_monotonic_time()/5000);}
 static gboolean send_report(const uint8_t out[50]) {
@@ -136,7 +141,10 @@ static gboolean receive_packet(gint fd,GIOCondition cond,gpointer user) {
     if(n<=0) {watches[index]=0;reset_link();return G_SOURCE_REMOVE;}
     if(index && !saw_interrupt_output) {
         saw_interrupt_output=TRUE;
-        log_event("pairing_rx","First Switch interrupt report received; pairing cadence is now 15 Hz");
+        log_event(reconnect_mode?"reconnect_rx":"pairing_rx",
+            reconnect_mode
+                ?"First Switch interrupt report received during reconnect"
+                :"First Switch interrupt report received; pairing cadence is now 15 Hz");
     }
     received++;
     char *hex=g_malloc((size_t)n*2+1);
@@ -156,11 +164,107 @@ static gboolean receive_packet(gint fd,GIOCondition cond,gpointer user) {
         log_event("hid_reply",detail);
         if(state.lights && state.vibration && !initialized) {
             initialized=TRUE;
-            log_event("initialization_observed","Player lights and vibration configured; keeping slow Change Grip/Order cadence until A, B or HOME exits the menu");
+            if(reconnect_mode) {
+                slow_input_frequency=FALSE;
+                next_report_at=0;
+                log_event("reconnect_initialized",
+                    "Player lights and vibration restored; switching to normal report cadence");
+            } else {
+                log_event("initialization_observed",
+                    "Player lights and vibration configured; keeping slow Change Grip/Order cadence until A, B or HOME exits the menu");
+            }
         }
     } else if(n>=2 && in[0]==0xa2 && in[1]==0x01) log_event("unsupported_subcommand","No invented ACK sent");
     return G_SOURCE_CONTINUE;
 }
+static gboolean connect_outbound(const bdaddr_t *local,const char *address) {
+    bdaddr_t remote;
+    if(str2ba(address,&remote)<0) {
+        log_event("reconnect_error","Invalid Switch Bluetooth address");
+        return FALSE;
+    }
+
+    for(int i=0;i<2;i++) {
+        int fd=socket(AF_BLUETOOTH,SOCK_SEQPACKET|SOCK_CLOEXEC,BTPROTO_L2CAP);
+        if(fd<0) {
+            log_event("reconnect_socket_error",strerror(errno));
+            goto failed;
+        }
+
+        struct sockaddr_l2 source={0};
+        source.l2_family=AF_BLUETOOTH;
+        bacpy(&source.l2_bdaddr,local);
+
+        if(bind(fd,(struct sockaddr *)&source,sizeof(source))<0) {
+            log_event("reconnect_bind_error",strerror(errno));
+            close(fd);goto failed;
+        }
+
+        struct sockaddr_l2 destination={0};
+        destination.l2_family=AF_BLUETOOTH;
+        destination.l2_psm=htobs(i?19:17);
+        bacpy(&destination.l2_bdaddr,&remote);
+
+        char detail[128];
+        snprintf(detail,sizeof(detail),
+            "peer=%s psm=%d",address,i?19:17);
+        log_event("reconnect_attempt",detail);
+
+        if(connect(fd,(struct sockaddr *)&destination,sizeof(destination))<0) {
+            char failure[160];
+            snprintf(failure,sizeof(failure),
+                "peer=%s psm=%d error=%s",
+                address,i?19:17,strerror(errno));
+            log_event("reconnect_failed",failure);
+            close(fd);goto failed;
+        }
+
+        int flags=fcntl(fd,F_GETFL,0);
+        if(flags>=0)fcntl(fd,F_SETFL,flags|O_NONBLOCK);
+
+        channels[i]=fd;
+        watches[i]=g_unix_fd_add(
+            fd,G_IO_IN|G_IO_HUP|G_IO_ERR,
+            receive_packet,GINT_TO_POINTER(i));
+
+        snprintf(detail,sizeof(detail),
+            "peer=%s psm=%d",address,i?19:17);
+        log_event("l2cap_connected",detail);
+    }
+
+    g_strlcpy(peer,address,sizeof(peer));
+    slow_input_frequency=TRUE;
+    saw_interrupt_output=FALSE;
+    next_report_at=0;
+    slow_exit_until=0;
+
+    /*
+     * NUXBT sends a neutral report immediately after an outbound reconnect
+     * to prompt the Switch to resume its HID initialization sequence.
+     */
+    uint8_t out[50];
+    pro_input(&state,timer_byte(),out);
+    if(!send_report(out))goto failed;
+
+    log_event("reconnect_connected",
+        "Outbound PSM 17/19 channels established; waiting for Switch HID initialization");
+    return TRUE;
+
+failed:
+    for(int i=0;i<2;i++) {
+        if(watches[i]) {
+            g_source_remove(watches[i]);
+            watches[i]=0;
+        }
+        if(channels[i]>=0) {
+            close(channels[i]);
+            channels[i]=-1;
+        }
+    }
+    peer[0]=0;
+    return FALSE;
+}
+
 static gboolean accept_peer(gint fd,GIOCondition cond,gpointer user) {
     (void)cond;int index=GPOINTER_TO_INT(user);
     struct sockaddr_l2 addr={0};socklen_t size=sizeof(addr);
@@ -252,9 +356,9 @@ static gboolean tick(gpointer unused) {
     return G_SOURCE_CONTINUE;
 }
 static void status_event(void) {
-    const char *phase=!peer[0]?"waiting":
-        !saw_interrupt_output?"pairing-1hz":
-        slow_input_frequency?"grip-order-15hz":"normal";
+    const char *phase=!peer[0]?(reconnect_mode?"reconnect":"waiting"):
+        !saw_interrupt_output?(reconnect_mode?"reconnect-handshake":"pairing-1hz"):
+        slow_input_frequency?(reconnect_mode?"reconnect-15hz":"grip-order-15hz"):"normal";
     char msg[180];
     snprintf(msg,sizeof(msg),
         "peer=%s tx=%u rx=%u initialized=%s phase=%s",
@@ -324,11 +428,16 @@ int main(int argc,char **argv) {
             snprintf(allowed_adapter,sizeof(allowed_adapter),"/org/bluez/%s/dev_",argv[++i]);
         } else if(!strcmp(argv[i],"--shared-profile"))shared_profile=TRUE;
         else if(!strcmp(argv[i],"--verbose"))verbose_traffic=TRUE;
+        else if(!strcmp(argv[i],"--reconnect") && i+1<argc &&
+                g_regex_match_simple("^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$",argv[i+1],0,0)) {
+            g_strlcpy(reconnect_peer,argv[++i],sizeof(reconnect_peer));
+            reconnect_mode=TRUE;
+        }
         else {fprintf(stderr,"Unknown or incomplete option: %s\n",argv[i]);return 2;}
     }
     desktop_requested=desktop_mode;
     if(argc<3 || !g_regex_match_simple("^hci[0-9]+$",argv[1],0,0) || (desktop_mode && getuid()!=0)) {
-        fprintf(stderr,"Usage: %s hciN SDP_XML [--desktop UID] [--type pro|joycon-l|joycon-r] [--allow-adapter hciN] [--shared-profile] [--verbose]\n",argv[0]);return 2;
+        fprintf(stderr,"Usage: %s hciN SDP_XML [--desktop UID] [--type pro|joycon-l|joycon-r] [--allow-adapter hciN] [--shared-profile] [--verbose] [--reconnect MAC]\n",argv[0]);return 2;
     }
     int result=1,dd=-1;uint8_t old_class[3]={0};gboolean have_class=FALSE;
     GVariant *saved[6]={0};const char *keys[]={"Powered","Alias","Pairable","Discoverable","PairableTimeout","DiscoverableTimeout"};
@@ -363,26 +472,65 @@ int main(int argc,char **argv) {
     g_variant_builder_add(&opts,"{sv}","Role",g_variant_new_string("server"));
     g_variant_builder_add(&opts,"{sv}","RequireAuthentication",g_variant_new_boolean(FALSE));
     g_variant_builder_add(&opts,"{sv}","RequireAuthorization",g_variant_new_boolean(FALSE));
+    g_variant_builder_add(&opts,"{sv}","AutoConnect",g_variant_new_boolean(TRUE));
     if(!shared_profile) {
         if(!invoke("/org/bluez","org.bluez.ProfileManager1","RegisterProfile",g_variant_new("(osa{sv})",ROOT "/profile","00001000-0000-1000-8000-00805f9b34fb",&opts))) goto cleanup;
         registered_profile=TRUE;log_event("sdp_registered","Nintendo Switch controller HID record");
     } else log_event("sdp_shared","Using the companion controller's HID profile");
-    for(int i=0;i<2;i++) {
-        listeners[i]=socket(AF_BLUETOOTH,SOCK_SEQPACKET|SOCK_NONBLOCK|SOCK_CLOEXEC,BTPROTO_L2CAP);
-        struct sockaddr_l2 bind_addr={.l2_family=AF_BLUETOOTH,.l2_psm=htobs(i?19:17)};
-        bacpy(&bind_addr.l2_bdaddr,&local);
-        if(listeners[i]<0 || bind(listeners[i],(struct sockaddr *)&bind_addr,sizeof(bind_addr))<0 || listen(listeners[i],1)<0) {
-            log_event("l2cap_listen_error",strerror(errno));goto cleanup;
+    if(reconnect_mode) {
+        /*
+         * Normal use after the first pairing: do not advertise a new
+         * controller. Reuse the stored BlueZ bond and initiate HID from
+         * this controller identity toward the known Switch.
+         */
+        if(!set_property("Alias",g_variant_new_string(controller_alias)) ||
+           !set_property("Pairable",g_variant_new_boolean(FALSE)) ||
+           !set_property("Discoverable",g_variant_new_boolean(FALSE))) goto cleanup;
+
+        if(hci_write_class_of_dev(dd,0x002508,2000)<0) {
+            log_event("class_error",strerror(errno));goto cleanup;
         }
-        g_unix_fd_add(listeners[i],G_IO_IN,accept_peer,GINT_TO_POINTER(i));
+
+        char ready[180];
+        snprintf(ready,sizeof(ready),
+            "Name=%s class=0x002508 reconnect=%s; initiating PSM 17/19",
+            controller_alias,reconnect_peer);
+        log_event("ready",ready);
+
+        if(!connect_outbound(&local,reconnect_peer))goto cleanup;
+    } else {
+        /*
+         * First pairing / new console: the Switch initiates the HID
+         * connection while Change Grip/Order is open.
+         */
+        for(int i=0;i<2;i++) {
+            listeners[i]=socket(AF_BLUETOOTH,SOCK_SEQPACKET|SOCK_NONBLOCK|SOCK_CLOEXEC,BTPROTO_L2CAP);
+            struct sockaddr_l2 bind_addr={.l2_family=AF_BLUETOOTH,.l2_psm=htobs(i?19:17)};
+            bacpy(&bind_addr.l2_bdaddr,&local);
+            if(listeners[i]<0 ||
+               bind(listeners[i],(struct sockaddr *)&bind_addr,sizeof(bind_addr))<0 ||
+               listen(listeners[i],1)<0) {
+                log_event("l2cap_listen_error",strerror(errno));goto cleanup;
+            }
+            g_unix_fd_add(listeners[i],G_IO_IN,accept_peer,GINT_TO_POINTER(i));
+        }
+
+        if(!set_property("Alias",g_variant_new_string(controller_alias)) ||
+           !set_property("PairableTimeout",g_variant_new_uint32(180)) ||
+           !set_property("DiscoverableTimeout",g_variant_new_uint32(180)) ||
+           !set_property("Pairable",g_variant_new_boolean(TRUE)) ||
+           !set_property("Discoverable",g_variant_new_boolean(TRUE))) goto cleanup;
+
+        if(hci_write_class_of_dev(dd,0x002508,2000)<0) {
+            log_event("class_error",strerror(errno));goto cleanup;
+        }
+
+        char ready[180];
+        snprintf(ready,sizeof(ready),
+            "Name=%s class=0x002508 discoverable=true pairable=true PSM=17/19; open Change Grip/Order",
+            controller_alias);
+        log_event("ready",ready);
     }
-    if(!set_property("Alias",g_variant_new_string(controller_alias)) ||
-       !set_property("PairableTimeout",g_variant_new_uint32(180)) ||
-       !set_property("DiscoverableTimeout",g_variant_new_uint32(180)) ||
-       !set_property("Pairable",g_variant_new_boolean(TRUE)) ||
-       !set_property("Discoverable",g_variant_new_boolean(TRUE))) goto cleanup;
-    if(hci_write_class_of_dev(dd,0x002508,2000)<0) {log_event("class_error",strerror(errno));goto cleanup;}
-    char ready[180];snprintf(ready,sizeof(ready),"Name=%s class=0x002508 discoverable=true pairable=true PSM=17/19; open Change Grip/Order",controller_alias);log_event("ready",ready);
     g_dbus_connection_signal_subscribe(bus,"org.bluez","org.freedesktop.DBus.Properties","PropertiesChanged",NULL,NULL,0,changed,NULL,NULL);
     loop=g_main_loop_new(NULL,FALSE);g_unix_signal_add(SIGINT,quit,NULL);g_unix_signal_add(SIGTERM,quit,NULL);
     if(desktop_mode) {

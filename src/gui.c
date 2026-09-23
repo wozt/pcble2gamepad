@@ -10,11 +10,11 @@
 typedef struct {
     int refs;gboolean closed,closing,busy,online,loading;
     GtkApplication *app;GtkWindow *window;AdwToastOverlay *toast;
-    GtkStack *stack;GtkLabel *status,*peer,*error,*metrics,*source_hint,*controller_hint,*hero_title;
-    GtkWidget *drawing,*start,*stop,*arm,*capture_hint,*secondary_row;
+    GtkStack *stack;GtkLabel *status,*peer,*error,*metrics,*source_hint,*controller_hint,*hero_title,*paired_console;
+    GtkWidget *drawing,*start,*sync,*stop,*arm,*capture_hint,*secondary_row;
     GtkDropDown *controllers,*adapters,*secondary,*devices,*source,*profiles;
     GtkStringList *adapter_names,*secondary_names,*device_names,*profile_names;
-    GPtrArray *adapter_ids,*secondary_ids,*device_ids;
+    GPtrArray *adapter_ids,*adapter_addresses,*secondary_ids,*device_ids;
     GtkButton *key_buttons[INPUT_ACTIONS],*pad_buttons[INPUT_BUTTONS];
     GtkScale *deadzone,*sensitivity;GtkSwitch *invert[4],*swap,*background,*traffic_logs,*swap_face,*auto_select;
     GtkTextBuffer *logs;GHashTable *keys;
@@ -22,6 +22,7 @@ typedef struct {
     SDL_GameController *pad;int joystick_count,learn_key,learn_pad;
     gboolean previous_pad[SDL_CONTROLLER_BUTTON_MAX+2];
     char *socket,*socket2,*config_dir,*profile_name,*pending,*settings_path,*preferred_gamepad_guid;
+    char *paired_switch_address,*paired_adapter_address;
     guint timer,ticks,saved_source;
     gboolean saved_arm,saved_auto_select,saved_traffic;
     GSubprocess *launcher;
@@ -31,9 +32,26 @@ static void refresh_bindings(Ui *u);
 static void request(Ui *u,const char *method);
 static void devices_scan(Ui *u);
 static gboolean pair_mode(Ui *u){return u->controllers && gtk_drop_down_get_selected(u->controllers)==1;}
+static gboolean paired_adapter_selected(Ui *u) {
+    if(!u->adapters || !u->paired_adapter_address || !*u->paired_adapter_address)return FALSE;
+    guint i=gtk_drop_down_get_selected(u->adapters);
+    return i<u->adapter_addresses->len &&
+        !g_ascii_strcasecmp(g_ptr_array_index(u->adapter_addresses,i),u->paired_adapter_address);
+}
+static void update_paired_console(Ui *u) {
+    if(!u->paired_console)return;
+    gtk_label_set_text(u->paired_console,
+        u->paired_switch_address && *u->paired_switch_address
+            ?u->paired_switch_address
+            :"Not paired yet");
+}
 static void update_controls(Ui *u) {
     gboolean adapters_ok=u->adapter_ids->len>0 && (!pair_mode(u) || u->secondary_ids->len>1);
-    gtk_widget_set_sensitive(u->start,!u->online && !u->launcher && adapters_ok);
+    gboolean can_reconnect=!pair_mode(u) &&
+        u->paired_switch_address && *u->paired_switch_address &&
+        paired_adapter_selected(u);
+    gtk_widget_set_sensitive(u->start,!u->online && !u->launcher && adapters_ok && can_reconnect);
+    gtk_widget_set_sensitive(u->sync,!u->online && !u->launcher && adapters_ok);
     gtk_widget_set_sensitive(u->stop,u->online);
     gtk_widget_set_sensitive(GTK_WIDGET(u->controllers),!u->online && !u->launcher);
     gtk_widget_set_sensitive(GTK_WIDGET(u->adapters),!u->online && !u->launcher);
@@ -44,9 +62,10 @@ static void ui_unref(Ui *u) {
     if(--u->refs)return;
     if(u->pad)SDL_GameControllerClose(u->pad);
     g_clear_object(&u->launcher);g_hash_table_unref(u->keys);
-    g_ptr_array_unref(u->adapter_ids);g_ptr_array_unref(u->secondary_ids);g_ptr_array_unref(u->device_ids);
+    g_ptr_array_unref(u->adapter_ids);g_ptr_array_unref(u->adapter_addresses);g_ptr_array_unref(u->secondary_ids);g_ptr_array_unref(u->device_ids);
     g_free(u->socket);g_free(u->socket2);g_free(u->config_dir);g_free(u->profile_name);g_free(u->pending);
-    g_free(u->settings_path);g_free(u->preferred_gamepad_guid);g_free(u);
+    g_free(u->settings_path);g_free(u->preferred_gamepad_guid);
+    g_free(u->paired_switch_address);g_free(u->paired_adapter_address);g_free(u);
 }
 static void margin(GtkWidget *w,int m) {gtk_widget_set_margin_start(w,m);gtk_widget_set_margin_end(w,m);gtk_widget_set_margin_top(w,m);gtk_widget_set_margin_bottom(w,m);}
 static GtkWidget *label(const char *s,const char *css) {GtkWidget *w=gtk_label_new(s);gtk_label_set_xalign(GTK_LABEL(w),0);gtk_label_set_wrap(GTK_LABEL(w),TRUE);if(css)gtk_widget_add_css_class(w,css);return w;}
@@ -119,6 +138,11 @@ static void app_state_load(Ui *u) {
     }
     if(g_key_file_has_key(k,"Diagnostics","detailed_hid",NULL))
         u->saved_traffic=g_key_file_get_boolean(k,"Diagnostics","detailed_hid",NULL);
+
+    if(g_key_file_has_key(k,"Console","switch_address",NULL))
+        u->paired_switch_address=g_key_file_get_string(k,"Console","switch_address",NULL);
+    if(g_key_file_has_key(k,"Console","adapter_address",NULL))
+        u->paired_adapter_address=g_key_file_get_string(k,"Console","adapter_address",NULL);
 }
 
 static void app_state_save(Ui *u) {
@@ -132,6 +156,10 @@ static void app_state_save(Ui *u) {
     if(u->preferred_gamepad_guid && *u->preferred_gamepad_guid)
         g_key_file_set_string(k,"Input","gamepad_guid",u->preferred_gamepad_guid);
     g_key_file_set_boolean(k,"Diagnostics","detailed_hid",u->saved_traffic);
+    if(u->paired_switch_address && *u->paired_switch_address)
+        g_key_file_set_string(k,"Console","switch_address",u->paired_switch_address);
+    if(u->paired_adapter_address && *u->paired_adapter_address)
+        g_key_file_set_string(k,"Console","adapter_address",u->paired_adapter_address);
 
     g_autoptr(GError) error=NULL;
     if(!g_key_file_save_to_file(k,u->settings_path,&error))
@@ -317,15 +345,18 @@ static void adapters_scan(GtkButton *b,Ui *u) {
     (void)b;g_autoptr(GError)e=NULL;g_autoptr(GDBusConnection)bus=g_bus_get_sync(G_BUS_TYPE_SYSTEM,NULL,&e);if(!bus){toast(u,e->message);return;}
     g_autoptr(GVariant)reply=g_dbus_connection_call_sync(bus,"org.bluez","/","org.freedesktop.DBus.ObjectManager","GetManagedObjects",NULL,G_VARIANT_TYPE("(a{oa{sa{sv}}})"),0,1500,NULL,&e);
     if(!reply){toast(u,e->message);return;}
-    gtk_string_list_splice(u->adapter_names,0,g_list_model_get_n_items(G_LIST_MODEL(u->adapter_names)),NULL);g_ptr_array_set_size(u->adapter_ids,0);
+    gtk_string_list_splice(u->adapter_names,0,g_list_model_get_n_items(G_LIST_MODEL(u->adapter_names)),NULL);g_ptr_array_set_size(u->adapter_ids,0);g_ptr_array_set_size(u->adapter_addresses,0);
     gtk_string_list_splice(u->secondary_names,0,g_list_model_get_n_items(G_LIST_MODEL(u->secondary_names)),NULL);g_ptr_array_set_size(u->secondary_ids,0);
     GVariantIter *objects;g_variant_get(reply,"(a{oa{sa{sv}}})",&objects);char *path;GVariant *interfaces;
-    guint selected=0;
+    guint selected=0;gboolean paired_selected=FALSE;
     while(g_variant_iter_next(objects,"{o@a{sa{sv}}}",&path,&interfaces)) {
         GVariant *props=g_variant_lookup_value(interfaces,"org.bluez.Adapter1",G_VARIANT_TYPE_VARDICT);
         if(props){const char *address="",*alias="Bluetooth adapter";g_variant_lookup(props,"Address","&s",&address);g_variant_lookup(props,"Alias","&s",&alias);
-            char *id=g_path_get_basename(path),*name=g_strdup_printf("%s · %s · %s",id,address,alias);gtk_string_list_append(u->adapter_names,name);gtk_string_list_append(u->secondary_names,name);g_ptr_array_add(u->adapter_ids,id);g_ptr_array_add(u->secondary_ids,g_strdup(id));g_free(name);
-            if(!strcmp(address,"E0:AD:47:40:70:D9"))selected=u->adapter_ids->len-1;
+            char *id=g_path_get_basename(path),*name=g_strdup_printf("%s · %s · %s",id,address,alias);gtk_string_list_append(u->adapter_names,name);gtk_string_list_append(u->secondary_names,name);g_ptr_array_add(u->adapter_ids,id);g_ptr_array_add(u->adapter_addresses,g_strdup(address));g_ptr_array_add(u->secondary_ids,g_strdup(id));g_free(name);
+            if(u->paired_adapter_address && !g_ascii_strcasecmp(address,u->paired_adapter_address)) {
+                selected=u->adapter_ids->len-1;paired_selected=TRUE;
+            } else if(!paired_selected && !strcmp(address,"E0:AD:47:40:70:D9"))
+                selected=u->adapter_ids->len-1;
             g_variant_unref(props);
         }g_free(path);g_variant_unref(interfaces);
     }g_variant_iter_free(objects);gtk_drop_down_set_selected(u->adapters,selected);gtk_drop_down_set_selected(u->secondary,selected?0:1);update_controls(u);
@@ -367,7 +398,28 @@ static void complete(GObject *source,GAsyncResult *result,gpointer data) {
         JsonObject *s=json_object_get_object_member(o,"result");const char *state=json_object_get_string_member_with_default(s,"state","waiting");
         gboolean simulated=json_object_get_boolean_member_with_default(s,"simulated",FALSE);
         gtk_label_set_text(u->status,simulated?"SIMULATION":!strcmp(state,"connected")?"CONNECTED":"WAITING FOR CONSOLE");
-        gtk_label_set_text(u->peer,json_object_get_string_member_with_default(s,"peer",""));
+        const char *peer_address=json_object_get_string_member_with_default(s,"peer","");
+        gtk_label_set_text(u->peer,peer_address);
+
+        if(!simulated && !pair_mode(u) && !strcmp(state,"connected") &&
+           g_regex_match_simple("^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$",peer_address,0,0)) {
+            guint adapter_index=gtk_drop_down_get_selected(u->adapters);
+            if(adapter_index<u->adapter_addresses->len) {
+                const char *adapter_address=g_ptr_array_index(u->adapter_addresses,adapter_index);
+                gboolean changed=
+                    !u->paired_switch_address || g_ascii_strcasecmp(u->paired_switch_address,peer_address) ||
+                    !u->paired_adapter_address || g_ascii_strcasecmp(u->paired_adapter_address,adapter_address);
+                if(changed) {
+                    g_free(u->paired_switch_address);
+                    g_free(u->paired_adapter_address);
+                    u->paired_switch_address=g_strdup(peer_address);
+                    u->paired_adapter_address=g_strdup(adapter_address);
+                    app_state_save(u);
+                    update_paired_console(u);
+                }
+            }
+        }
+
         char *metrics=g_strdup_printf("%"G_GINT64_FORMAT" reports sent  ·  %"G_GINT64_FORMAT" received",json_object_get_int_member_with_default(s,"tx",0),json_object_get_int_member_with_default(s,"rx",0));gtk_label_set_text(u->metrics,metrics);g_free(metrics);
         gtk_label_set_text(u->error,"");
         JsonArray *logs=json_object_get_array_member(s,"logs");GString *text=g_string_new(NULL);
@@ -441,22 +493,104 @@ static void traffic_logs_changed(GObject *o,GParamSpec *p,Ui *u) {
     app_state_save(u);
     if(u->online)request(u,"logging");
 }
-static void start(GtkButton *b,Ui *u) {
-    (void)b;if(u->launcher || u->online)return;
-    guint i=gtk_drop_down_get_selected(u->adapters);if(i>=u->adapter_ids->len){toast(u,"Select a Bluetooth adapter first");return;}
-    guint j=gtk_drop_down_get_selected(u->secondary);if(pair_mode(u) && (j>=u->secondary_ids->len || !strcmp(g_ptr_array_index(u->adapter_ids,i),g_ptr_array_index(u->secondary_ids,j)))){toast(u,"Choose two distinct Bluetooth adapters for the Joy-Con pair");return;}
-    const char *override=g_getenv("PCBLE2GAMEPAD_RUNNER");g_autofree char *exe=g_file_read_link("/proc/self/exe",NULL),*build=exe?g_path_get_dirname(exe):NULL,*root=build?g_path_get_dirname(build):NULL;
+static void launch_switch_session(Ui *u,gboolean reconnect) {
+    if(u->launcher || u->online)return;
+
+    guint i=gtk_drop_down_get_selected(u->adapters);
+    if(i>=u->adapter_ids->len){toast(u,"Select a Bluetooth adapter first");return;}
+
+    if(reconnect) {
+        if(pair_mode(u)) {
+            toast(u,"Automatic reconnect is currently implemented for Pro Controller first");
+            return;
+        }
+        if(!u->paired_switch_address || !*u->paired_switch_address) {
+            toast(u,"No paired Switch saved yet. Use Pair / Sync new Switch first.");
+            return;
+        }
+        if(!paired_adapter_selected(u)) {
+            toast(u,"Reconnect requires the Bluetooth adapter used for the original pairing.");
+            return;
+        }
+    }
+
+    guint j=gtk_drop_down_get_selected(u->secondary);
+    if(pair_mode(u) &&
+       (j>=u->secondary_ids->len ||
+        !strcmp(g_ptr_array_index(u->adapter_ids,i),
+                g_ptr_array_index(u->secondary_ids,j)))) {
+        toast(u,"Choose two distinct Bluetooth adapters for the Joy-Con pair");
+        return;
+    }
+
+    const char *override=g_getenv("PCBLE2GAMEPAD_RUNNER");
+    g_autofree char *exe=g_file_read_link("/proc/self/exe",NULL),
+        *build=exe?g_path_get_dirname(exe):NULL,
+        *root=build?g_path_get_dirname(build):NULL;
     g_autofree char *checkout=root?g_build_filename(root,"poc","run-classic.sh",NULL):NULL;
-    g_autofree char *runner=override?g_strdup(override):g_file_test(PCBLE2GAMEPAD_PRO_RUNNER,G_FILE_TEST_IS_EXECUTABLE)?g_strdup(PCBLE2GAMEPAD_PRO_RUNNER):checkout&&g_file_test(checkout,G_FILE_TEST_IS_EXECUTABLE)?g_strdup(checkout):g_strdup(PCBLE2GAMEPAD_PRO_RUNNER);
-    if(!g_file_test(runner,G_FILE_TEST_IS_EXECUTABLE)){toast(u,"Bluetooth backend launcher is not installed");return;}
+    g_autofree char *runner=override?g_strdup(override):
+        g_file_test(PCBLE2GAMEPAD_PRO_RUNNER,G_FILE_TEST_IS_EXECUTABLE)?
+            g_strdup(PCBLE2GAMEPAD_PRO_RUNNER):
+        checkout&&g_file_test(checkout,G_FILE_TEST_IS_EXECUTABLE)?
+            g_strdup(checkout):
+            g_strdup(PCBLE2GAMEPAD_PRO_RUNNER);
+
+    if(!g_file_test(runner,G_FILE_TEST_IS_EXECUTABLE)) {
+        toast(u,"Bluetooth backend launcher is not installed");
+        return;
+    }
+
     g_autoptr(GError)e=NULL;
-    const char *args[12];guint n=0;args[n++]="pkexec";args[n++]=runner;args[n++]=g_ptr_array_index(u->adapter_ids,i);args[n++]="--desktop";args[n++]="--profile";
-    if(pair_mode(u)){args[n++]="joycon-pair";args[n++]="--secondary";args[n++]=g_ptr_array_index(u->secondary_ids,j);}else args[n++]="pro";
-    if(gtk_switch_get_active(u->traffic_logs))args[n++]="--verbose";
+    const char *args[16];
+    guint n=0;
+    args[n++]="pkexec";
+    args[n++]=runner;
+    args[n++]=g_ptr_array_index(u->adapter_ids,i);
+    args[n++]="--desktop";
+    args[n++]="--profile";
+
+    if(pair_mode(u)) {
+        args[n++]="joycon-pair";
+        args[n++]="--secondary";
+        args[n++]=g_ptr_array_index(u->secondary_ids,j);
+    } else {
+        args[n++]="pro";
+    }
+
+    if(reconnect) {
+        args[n++]="--reconnect";
+        args[n++]=u->paired_switch_address;
+    }
+
+    if(gtk_switch_get_active(u->traffic_logs))
+        args[n++]="--verbose";
+
     args[n]=NULL;
+
     u->launcher=g_subprocess_newv(args,G_SUBPROCESS_FLAGS_NONE,&e);
-    if(!u->launcher){toast(u,e->message);return;}
-    u->refs++;g_subprocess_wait_check_async(u->launcher,NULL,launcher_done,u);update_controls(u);gtk_label_set_text(u->status,"STARTING SESSION");
+    if(!u->launcher) {
+        toast(u,e->message);
+        return;
+    }
+
+    u->refs++;
+    g_subprocess_wait_check_async(u->launcher,NULL,launcher_done,u);
+    update_controls(u);
+
+    gtk_label_set_text(u->status,reconnect?"RECONNECTING":"WAITING FOR PAIRING");
+    gtk_label_set_text(u->error,"");
+
+    if(!reconnect)
+        toast(u,"Open Controllers → Change Grip/Order on the Switch for first pairing.");
+}
+
+static void start(GtkButton *b,Ui *u) {
+    (void)b;
+    launch_switch_session(u,TRUE);
+}
+static void sync_clicked(GtkButton *b,Ui *u) {
+    (void)b;
+    launch_switch_session(u,FALSE);
 }
 static void stop_clicked(GtkButton *b,Ui *u){(void)b;neutral(u);request(u,"stop");}
 static gboolean close_window(GtkWindow *w,Ui *u) {
@@ -471,7 +605,7 @@ static GtkWidget *button(const char *text,GCallback callback,Ui *u){GtkWidget *b
 static void activate(GtkApplication *app,gpointer unused) {
     (void)unused;GtkWindow *existing=gtk_application_get_active_window(app);if(existing){gtk_window_present(existing);return;}
     Ui *u=g_new0(Ui,1);u->refs=1;u->app=app;u->learn_key=u->learn_pad=-1;u->joystick_count=-1;
-    u->keys=g_hash_table_new(g_direct_hash,g_direct_equal);u->adapter_ids=g_ptr_array_new_with_free_func(g_free);u->secondary_ids=g_ptr_array_new_with_free_func(g_free);u->device_ids=g_ptr_array_new();
+    u->keys=g_hash_table_new(g_direct_hash,g_direct_equal);u->adapter_ids=g_ptr_array_new_with_free_func(g_free);u->adapter_addresses=g_ptr_array_new_with_free_func(g_free);u->secondary_ids=g_ptr_array_new_with_free_func(g_free);u->device_ids=g_ptr_array_new();
     g_autofree char *config_root=g_build_filename(g_get_user_config_dir(),"pcble2gamepad",NULL);
     g_mkdir_with_parents(config_root,0700);
     u->config_dir=g_build_filename(config_root,"profiles",NULL);g_mkdir_with_parents(u->config_dir,0700);
@@ -514,11 +648,26 @@ static void activate(GtkApplication *app,gpointer unused) {
     row(g,"Primary adapter","Pro Controller, or left Joy-Con. Choose by address; hci numbers can change after reboot.",GTK_WIDGET(u->adapters));
     u->secondary_names=gtk_string_list_new(NULL);u->secondary=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->secondary_names),NULL));gtk_widget_set_size_request(GTK_WIDGET(u->secondary),280,-1);
     u->secondary_row=row(g,"Right Joy-Con adapter","A pair requires a second, distinct Classic Bluetooth identity.",GTK_WIDGET(u->secondary));gtk_widget_set_visible(u->secondary_row,FALSE);
-    u->controller_hint=GTK_LABEL(label("One Bluetooth adapter exposes one Classic HID controller. After pairing, press A once on the virtual controller to leave Change Grip/Order.","dim-label"));gtk_box_append(GTK_BOX(box),GTK_WIDGET(u->controller_hint));
-    GtkWidget *actions=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);u->start=button("Connect to Switch",G_CALLBACK(start),u);gtk_widget_add_css_class(u->start,"suggested-action");u->stop=button("Stop session",G_CALLBACK(stop_clicked),u);gtk_widget_set_sensitive(u->stop,FALSE);
-    gtk_box_append(GTK_BOX(actions),u->start);gtk_box_append(GTK_BOX(actions),u->stop);gtk_box_append(GTK_BOX(actions),button("Refresh adapters",G_CALLBACK(adapters_scan),u));gtk_box_append(GTK_BOX(box),actions);
+    u->controller_hint=GTK_LABEL(label("First pairing uses Pair / Sync new Switch and Change Grip/Order. Normal use should use Reconnect paired Switch without opening the pairing screen.","dim-label"));gtk_box_append(GTK_BOX(box),GTK_WIDGET(u->controller_hint));
+
+    u->paired_console=GTK_LABEL(label("Not paired yet","dim-label"));
+    row(g,"Paired Switch","Stored after the first successful pairing. Reconnect uses the same Bluetooth adapter and BlueZ bond.",GTK_WIDGET(u->paired_console));
+    update_paired_console(u);
+
+    GtkWidget *actions=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);
+    u->start=button("Reconnect paired Switch",G_CALLBACK(start),u);
+    gtk_widget_add_css_class(u->start,"suggested-action");
+    u->sync=button("Pair / Sync new Switch",G_CALLBACK(sync_clicked),u);
+    u->stop=button("Stop session",G_CALLBACK(stop_clicked),u);
+    gtk_widget_set_sensitive(u->stop,FALSE);
+
+    gtk_box_append(GTK_BOX(actions),u->start);
+    gtk_box_append(GTK_BOX(actions),u->sync);
+    gtk_box_append(GTK_BOX(actions),u->stop);
+    gtk_box_append(GTK_BOX(actions),button("Refresh adapters",G_CALLBACK(adapters_scan),u));
+    gtk_box_append(GTK_BOX(box),actions);
     u->error=GTK_LABEL(label("","error"));gtk_box_append(GTK_BOX(box),GTK_WIDGET(u->error));
-    g=group(box,"Input routing","The console must be on Controllers → Change Grip/Order for first pairing.");
+    g=group(box,"Input routing","Change Grip/Order is required only for Pair / Sync. Normal reconnects are initiated directly from the PC.");
     const char *sources[]={"Keyboard","PC controller",NULL};u->source=GTK_DROP_DOWN(gtk_drop_down_new_from_strings(sources));gtk_drop_down_set_selected(u->source,u->saved_source);row(g,"Input source",NULL,GTK_WIDGET(u->source));
     u->arm=gtk_switch_new();gtk_switch_set_active(GTK_SWITCH(u->arm),u->saved_arm);row(g,"Enable input","Remembered between launches. Escape pauses keyboard input.",u->arm);
     u->source_hint=GTK_LABEL(label(u->saved_source==0?"Keyboard input works while this window is focused. Escape pauses input.":"Standard SDL gamepad mapping. Customize buttons and stick settings below.","dim-label"));gtk_box_append(GTK_BOX(box),GTK_WIDGET(u->source_hint));

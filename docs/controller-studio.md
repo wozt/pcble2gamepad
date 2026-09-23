@@ -27,6 +27,26 @@ and detailed HID logging. The Nintendo face-button layout option swaps A/B and X
 for SDL gamepads only; keyboard actions retain their explicit Nintendo labels.
 The live controller drawing previews the composed input frame before it is sent.
 
+## Pairing and reconnect lifecycle
+
+Controller Studio treats first pairing and normal reconnection as different
+operations.
+
+- **Pair / Sync new Switch** makes the emulated controller discoverable and
+  pairable. The console must be on Controllers -> Change Grip/Order and initiates
+  HID PSM 17/19.
+- After the first successful Pro Controller session, the console Bluetooth address
+  and the local Bluetooth adapter address are persisted in `settings.ini`.
+- **Reconnect paired Switch** reuses that BlueZ bond and local controller identity.
+  The PC initiates L2CAP control PSM 17 followed by interrupt PSM 19 toward the
+  stored Switch address. The console should be powered on and outside
+  Change Grip/Order.
+- Reconnection is adapter-specific because the Bluetooth bond belongs to that local
+  adapter identity.
+
+Joy-Con-pair outbound reconnect is intentionally deferred until the two-adapter
+profile has been validated on real hardware.
+
 ## Process boundary
 
 The GTK process never opens Bluetooth sockets and does not run as root. Starting a
