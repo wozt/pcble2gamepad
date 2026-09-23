@@ -528,11 +528,15 @@ static void launch_switch_session(Ui *u,gboolean reconnect) {
         *build=exe?g_path_get_dirname(exe):NULL,
         *root=build?g_path_get_dirname(build):NULL;
     g_autofree char *checkout=root?g_build_filename(root,"poc","run-classic.sh",NULL):NULL;
+    /*
+     * Development builds must use the runner from the same checkout before
+     * considering an older system-wide installation.
+     */
     g_autofree char *runner=override?g_strdup(override):
-        g_file_test(PCBLE2GAMEPAD_PRO_RUNNER,G_FILE_TEST_IS_EXECUTABLE)?
-            g_strdup(PCBLE2GAMEPAD_PRO_RUNNER):
         checkout&&g_file_test(checkout,G_FILE_TEST_IS_EXECUTABLE)?
             g_strdup(checkout):
+        g_file_test(PCBLE2GAMEPAD_PRO_RUNNER,G_FILE_TEST_IS_EXECUTABLE)?
+            g_strdup(PCBLE2GAMEPAD_PRO_RUNNER):
             g_strdup(PCBLE2GAMEPAD_PRO_RUNNER);
 
     if(!g_file_test(runner,G_FILE_TEST_IS_EXECUTABLE)) {
