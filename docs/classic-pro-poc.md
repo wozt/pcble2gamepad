@@ -92,3 +92,15 @@ a BlueZ Busy error occurred during one property restoration; the service was
 restored normally, discovery was off, and the adapter alias read back as
 `BlueZ 5.82`. The final POC now reports incomplete restoration as an error instead
 of unconditionally claiming success. The runner still restores normal BlueZ.
+
+## Change Grip/Order transition investigation
+
+The initial real-console validation kept the Switch 2 on Change Grip/Order, so the
+observed multi-minute connection did not validate the transition back to the HOME
+menu. Historical NXBT implementations explicitly use a reduced report cadence
+during this phase: 1 Hz before the first Switch response, then 15 Hz during pairing,
+remaining slow until A, B or HOME is used to leave Change Grip/Order.
+
+The current backend mirrors that transition for the Pro Controller experiment and
+no longer injects an automatic L+R press. This is an experimental compatibility
+change and requires real-console validation.

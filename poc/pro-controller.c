@@ -36,7 +36,8 @@ static guint watches[2];
 static ProState state;
 static unsigned sent, received;
 static gboolean initialized;
-static gint64 release_at,join_until;
+static gint64 release_at,next_report_at,slow_exit_until;
+static gboolean slow_input_frequency,saw_interrupt_output;
 typedef struct { char *event, *detail; } PendingLog;
 static GQueue pending_logs = G_QUEUE_INIT;
 static gboolean desktop_requested;
@@ -115,7 +116,8 @@ static void reset_link(void) {
         if(channels[i]>=0) close(channels[i]);
         channels[i]=-1;
     }
-    peer[0]=0;initialized=FALSE;join_until=0;
+    peer[0]=0;initialized=FALSE;next_report_at=0;slow_exit_until=0;
+    slow_input_frequency=FALSE;saw_interrupt_output=FALSE;
     uint8_t addr[6];memcpy(addr,state.address,6);controller_init(&state,controller_type,addr);
     log_event("link_closed","Waiting for a new control/interrupt connection; see btmon for HCI reason");
 }
@@ -132,6 +134,10 @@ static gboolean receive_packet(gint fd,GIOCondition cond,gpointer user) {
     uint8_t in[1024],out[50];ssize_t n=recv(fd,in,sizeof(in),MSG_DONTWAIT);
     if(n<0 && (errno==EAGAIN || errno==EWOULDBLOCK)) return G_SOURCE_CONTINUE;
     if(n<=0) {watches[index]=0;reset_link();return G_SOURCE_REMOVE;}
+    if(index && !saw_interrupt_output) {
+        saw_interrupt_output=TRUE;
+        log_event("pairing_rx","First Switch interrupt report received; pairing cadence is now 15 Hz");
+    }
     received++;
     char *hex=g_malloc((size_t)n*2+1);
     for(ssize_t i=0;i<n;i++) sprintf(hex+2*i,"%02x",in[i]);
@@ -150,11 +156,7 @@ static gboolean receive_packet(gint fd,GIOCondition cond,gpointer user) {
         log_event("hid_reply",detail);
         if(state.lights && state.vibration && !initialized) {
             initialized=TRUE;
-            if(controller_type==CONTROLLER_PRO) {
-                join_until=g_get_monotonic_time()+500000;
-                log_event("controller_join","Sending L+R for 500 ms to validate Change Grip/Order");
-            }
-            log_event("initialization_observed","Player lights and vibration configured; console visibility/input still require user verification");
+            log_event("initialization_observed","Player lights and vibration configured; keeping slow Change Grip/Order cadence until A, B or HOME exits the menu");
         }
     } else if(n>=2 && in[0]==0xa2 && in[1]==0x01) log_event("unsupported_subcommand","No invented ACK sent");
     return G_SOURCE_CONTINUE;
@@ -171,6 +173,13 @@ static gboolean accept_peer(gint fd,GIOCondition cond,gpointer user) {
     g_strlcpy(peer,address,sizeof(peer));channels[index]=client;
     watches[index]=g_unix_fd_add(client,G_IO_IN|G_IO_HUP|G_IO_ERR,receive_packet,GINT_TO_POINTER(index));
     char msg[100];snprintf(msg,sizeof(msg),"peer=%s psm=%d",address,index?19:17);log_event("l2cap_connected",msg);
+    if(channels[0]>=0 && channels[1]>=0) {
+        slow_input_frequency=TRUE;
+        saw_interrupt_output=FALSE;
+        next_report_at=0;
+        slow_exit_until=0;
+        log_event("pairing_rate","Using reduced report cadence during Change Grip/Order");
+    }
     return G_SOURCE_CONTINUE;
 }
 static gboolean tick(gpointer unused) {
@@ -179,24 +188,78 @@ static gboolean tick(gpointer unused) {
         log_event("desktop_timeout","No UI request for five seconds; stopping session");
         g_main_loop_quit(loop);return G_SOURCE_REMOVE;
     }
-    if(release_at && g_get_monotonic_time()>=release_at) {
-        memset(state.buttons,0,3);state.sticks[0]=0x86f;state.sticks[1]=0x77c;state.sticks[2]=0x816;state.sticks[3]=0x7dd;
-        release_at=0;log_event("input_released","neutral");
+
+    gint64 now=g_get_monotonic_time();
+
+    if(release_at && now>=release_at) {
+        memset(state.buttons,0,3);
+        state.sticks[0]=0x86f;state.sticks[1]=0x77c;
+        state.sticks[2]=0x816;state.sticks[3]=0x7dd;
+        release_at=0;
+        log_event("input_released","neutral");
     }
+
     if(channels[1]>=0 && channels[0]>=0) {
-        ProState report=state;
-        if(join_until) {
-            if(g_get_monotonic_time()<join_until){report.buttons[0]|=0x40;report.buttons[2]|=0x40;}
-            else join_until=0;
+        /*
+         * Historical NXBT behaviour: the Switch processes controller traffic
+         * much more slowly in Change Grip/Order. Stay in the reduced-rate
+         * phase until A, B or HOME is used to leave that menu.
+         *
+         * Right button byte: B=0x04, A=0x08
+         * Shared button byte: HOME=0x10
+         */
+        gboolean grip_exit_pressed =
+            (state.buttons[0] & 0x0c) ||
+            (state.buttons[1] & 0x10);
+
+        if(slow_input_frequency && initialized &&
+           grip_exit_pressed && !slow_exit_until) {
+            slow_exit_until=now+1000000;
+            log_event("grip_exit_input",
+                "A/B/HOME observed; keeping 15 Hz for one second while Change Grip/Order exits");
         }
-        uint8_t out[50];pro_input(&report,timer_byte(),out);
-        if(!send_report(out)) reset_link();
+
+        if(slow_input_frequency && slow_exit_until &&
+           now>=slow_exit_until) {
+            slow_input_frequency=FALSE;
+            slow_exit_until=0;
+            next_report_at=0;
+            log_event("input_rate",
+                "Change Grip/Order transition complete; switching to normal report cadence");
+        }
+
+        if(!next_report_at || now>=next_report_at) {
+            uint8_t out[50];
+            pro_input(&state,timer_byte(),out);
+
+            if(!send_report(out)) {
+                reset_link();
+            } else {
+                gint64 interval;
+
+                if(slow_input_frequency)
+                    interval=saw_interrupt_output ? 66667 : 1000000;
+                else
+                    interval=15000;
+
+                next_report_at=now+interval;
+            }
+        }
     }
-    pro_control_update(desktop,mock_mode?"Simulation":peer,mock_mode || initialized,sent,received);
+
+    pro_control_update(desktop,mock_mode?"Simulation":peer,
+                       mock_mode || initialized,sent,received);
     return G_SOURCE_CONTINUE;
 }
 static void status_event(void) {
-    char msg[120];snprintf(msg,sizeof(msg),"peer=%s tx=%u rx=%u initialized=%s",peer[0]?peer:"none",sent,received,initialized?"true":"false");
+    const char *phase=!peer[0]?"waiting":
+        !saw_interrupt_output?"pairing-1hz":
+        slow_input_frequency?"grip-order-15hz":"normal";
+    char msg[180];
+    snprintf(msg,sizeof(msg),
+        "peer=%s tx=%u rx=%u initialized=%s phase=%s",
+        peer[0]?peer:"none",sent,received,
+        initialized?"true":"false",phase);
     log_event("status",msg);
 }
 static gboolean stats(gpointer unused) {

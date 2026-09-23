@@ -31,8 +31,10 @@ listeners. The backend temporarily powers the selected adapter if BlueZ's restar
 left it off, then restores the previous power state. It also records a private
 `btmon` capture. The backend accepts commands
 only from the desktop UID over the local socket documented in [the API](api.md).
-For the Pro Controller profile, it sends one 500 ms L+R pulse after HID
-initialization. This completes the controller-selection step on Change Grip/Order.
+For the Pro Controller profile, the backend uses a reduced report cadence during
+Change Grip/Order. After HID initialization, A, B or HOME marks the menu-exit
+transition; the backend remains at 15 Hz for one additional second before returning
+to its normal report cadence.
 
 Detailed traffic is off by default, so normal logs omit high-frequency `hid_rx`
 packets and periodic `status` lines. The Diagnostics switch changes this live on
