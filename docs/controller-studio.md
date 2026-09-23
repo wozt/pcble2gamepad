@@ -36,13 +36,16 @@ operations.
   pairable. The console must be on Controllers -> Change Grip/Order and initiates
   HID PSM 17/19.
 - After the first successful Pro Controller session, the console Bluetooth address
-  and the local Bluetooth adapter address are persisted in `settings.ini`.
-- **Reconnect paired Switch** uses a minimal outbound path. It leaves the normal
-  BlueZ service untouched and directly initiates L2CAP control PSM 17 followed by
-  interrupt PSM 19 toward the stored Switch address. The console should be powered
-  on and outside Change Grip/Order.
-- Reconnection is adapter-specific because the Bluetooth bond belongs to that local
-  adapter identity.
+  and local Bluetooth adapter address are persisted in `settings.ini`. The privileged
+  backend separately persists the generated BR/EDR Link Key in a root-private pairing
+  record under `/var/lib/pcble2gamepad/pairings/`.
+- **Reconnect paired Switch** restarts the isolated Classic Bluetooth environment,
+  reloads the stored Link Key into the kernel through the Bluetooth Management API,
+  restores the Pro Controller identity and initiates L2CAP control PSM 17 followed
+  by interrupt PSM 19 toward the stored Switch address.
+- The persistent pairing is expected to survive application restarts, Stop session,
+  PC restarts and Switch restarts. Reconnection remains adapter-specific because
+  the Switch paired to that Bluetooth controller identity.
 
 Joy-Con-pair outbound reconnect is intentionally deferred until the two-adapter
 profile has been validated on real hardware.
@@ -55,8 +58,9 @@ allows the exact root-owned launcher for an active local session without a passw
 it does not authorize arbitrary commands. For first pairing, the runner temporarily restarts BlueZ in compatibility mode
 with plugins disabled, matching the configuration validated with the Switch, and
 starts a C backend that owns the temporary Agent1, SDP record and L2CAP PSM 17/19
-listeners. Reconnect sessions do not restart BlueZ or register a new pairing
-agent/profile; they only open the outbound Classic HID channels. The backend temporarily powers the selected adapter if BlueZ's restart
+listeners. Reconnect sessions use the same isolated BlueZ environment, but skip new
+pairing and instead load the previously captured BR/EDR Link Key before opening the
+outbound Classic HID channels. The backend temporarily powers the selected adapter if BlueZ's restart
 left it off, then restores the previous power state. It also records a private
 `btmon` capture in a per-session `/tmp/pcble2gamepad-UID-XXXXXXXX` directory.
 The backend accepts commands

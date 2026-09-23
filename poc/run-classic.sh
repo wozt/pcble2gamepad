@@ -62,12 +62,10 @@ done
 dropin=/run/systemd/system/bluetooth.service.d/90-pcble2gamepad-pro-poc.conf
 bluetooth_overridden=false
 
-if [[ -z $reconnect ]]; then
-    [[ ! -e "$dropin" ]] || {
-        echo 'A pcble2gamepad Bluetooth service override already exists'
-        exit 1
-    }
-fi
+[[ ! -e "$dropin" ]] || {
+    echo 'A pcble2gamepad Bluetooth service override already exists'
+    exit 1
+}
 
 systemctl is-active --quiet bluetooth || {
     echo 'Bluetooth service must already be active'
@@ -103,23 +101,27 @@ trap cleanup EXIT
 # The foreground timeout forwards terminal signals to the POC, which restores adapter properties.
 trap 'exit 130' INT
 trap 'exit 143' TERM
-if [[ -z $reconnect ]]; then
+if [[ -n $reconnect ]]; then
+    echo 'Reconnect mode: starting isolated BlueZ and restoring persistent controller pairing.'
+else
     echo 'Pairing mode: starting isolated BlueZ compatibility service.'
+fi
 
-    mkdir -p /run/systemd/system/bluetooth.service.d
-    cat > "$dropin" <<'SERVICE'
+mkdir -p /run/systemd/system/bluetooth.service.d
+cat > "$dropin" <<'SERVICE'
 [Service]
 ExecStart=
 ExecStart=/usr/libexec/bluetooth/bluetoothd --compat --noplugin=*
 SERVICE
 
-    bluetooth_overridden=true
-    systemctl daemon-reload
-    systemctl restart bluetooth
+bluetooth_overridden=true
+systemctl daemon-reload
+systemctl restart bluetooth
 
-    echo 'Pairing mode: BlueZ restarted; starting controller backend.'
+if [[ -n $reconnect ]]; then
+    echo 'Reconnect mode: BlueZ restarted; loading saved Link Key.'
 else
-    echo 'Reconnect mode: keeping the existing BlueZ service and controller state.'
+    echo 'Pairing mode: BlueZ restarted; starting controller backend.'
 fi
 
 btmon -i "$adapter" -w "$capture/hci.btsnoop" > "$capture/btmon.log" 2>&1 &

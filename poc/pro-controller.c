@@ -8,6 +8,8 @@
 #include <bluetooth/hci_lib.h>
 #include <bluetooth/l2cap.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <poll.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <signal.h>
@@ -30,6 +32,62 @@ static gboolean reconnect_mode;
 static char reconnect_peer[18];
 static bdaddr_t selected_local_address;
 static gboolean have_selected_local_address;
+
+/*
+ * pcble2gamepad owns a small persistent BR/EDR pairing store because some
+ * Nintendo-style pairing flows generate a valid kernel Link Key with
+ * store_hint=0. BlueZ then exposes Paired=true for the live session but does
+ * not persist the key for the next bluetoothd/host restart.
+ */
+static uid_t pairing_owner;
+static int pairing_mgmt_index=-1;
+static int pairing_mgmt_fd=-1;
+static guint pairing_mgmt_watch;
+static char pairing_local_address[18];
+
+#define PC_MGMT_EV_CMD_COMPLETE   0x0001
+#define PC_MGMT_EV_CMD_STATUS     0x0002
+#define PC_MGMT_EV_NEW_LINK_KEY   0x0009
+#define PC_MGMT_OP_LOAD_LINK_KEYS 0x0012
+
+#ifndef HCI_CHANNEL_CONTROL
+#define HCI_CHANNEL_CONTROL 3
+#endif
+
+typedef struct __attribute__((packed)) {
+    uint16_t opcode;
+    uint16_t index;
+    uint16_t len;
+} PcMgmtHdr;
+
+typedef struct __attribute__((packed)) {
+    bdaddr_t bdaddr;
+    uint8_t type;
+} PcMgmtAddrInfo;
+
+typedef struct __attribute__((packed)) {
+    PcMgmtAddrInfo addr;
+    uint8_t type;
+    uint8_t val[16];
+    uint8_t pin_len;
+} PcMgmtLinkKey;
+
+typedef struct __attribute__((packed)) {
+    uint8_t store_hint;
+    PcMgmtLinkKey key;
+} PcMgmtNewLinkKey;
+
+typedef struct __attribute__((packed)) {
+    uint16_t opcode;
+    uint8_t status;
+} PcMgmtCommandResult;
+
+typedef struct __attribute__((packed)) {
+    PcMgmtHdr hdr;
+    uint8_t debug_keys;
+    uint16_t key_count;
+    PcMgmtLinkKey key;
+} PcMgmtLoadOneKey;
 static gboolean select_controller(const char *type) {
     if(!strcmp(type,"pro")){controller_type=CONTROLLER_PRO;controller_alias="Pro Controller";control_socket="pro.sock";return TRUE;}
     if(!strcmp(type,"joycon-l")){controller_type=CONTROLLER_JOYCON_L;controller_alias="Joy-Con (L)";control_socket="joycon-left.sock";return TRUE;}
@@ -62,6 +120,348 @@ static void log_event(const char *event, const char *detail) {
     g_print("%s %s %s\n",time,event,detail); fflush(stdout);
     g_free(time); g_date_time_unref(now);
 }
+
+static int pairing_mgmt_open(gboolean nonblocking) {
+    int flags=SOCK_RAW|SOCK_CLOEXEC;
+    if(nonblocking)flags|=SOCK_NONBLOCK;
+
+    int fd=socket(PF_BLUETOOTH,flags,BTPROTO_HCI);
+    if(fd<0)return -1;
+
+    struct sockaddr_hci address={0};
+    address.hci_family=AF_BLUETOOTH;
+    address.hci_dev=HCI_DEV_NONE;
+    address.hci_channel=HCI_CHANNEL_CONTROL;
+
+    if(bind(fd,(struct sockaddr *)&address,sizeof(address))<0) {
+        close(fd);
+        return -1;
+    }
+
+    return fd;
+}
+
+static char *pairing_safe_address(const char *address) {
+    char *copy=g_strdup(address);
+    for(char *p=copy;*p;p++)
+        if(*p==':')*p='_';
+    return copy;
+}
+
+static char *pairing_store_path(const char *remote,gboolean create) {
+    g_autofree char *local_safe=pairing_safe_address(pairing_local_address);
+    g_autofree char *remote_safe=pairing_safe_address(remote);
+    g_autofree char *base=g_strdup_printf(
+        "/var/lib/pcble2gamepad/pairings/%u",
+        (unsigned)pairing_owner);
+
+    if(create) {
+        if(g_mkdir_with_parents(base,0700)<0)
+            return NULL;
+
+        g_chmod("/var/lib/pcble2gamepad",0700);
+        g_chmod("/var/lib/pcble2gamepad/pairings",0700);
+        g_chmod(base,0700);
+    }
+
+    g_autofree char *name=g_strdup_printf(
+        "%s__%s.ini",local_safe,remote_safe);
+    return g_build_filename(base,name,NULL);
+}
+
+static gboolean pairing_write_all(int fd,const char *data,gsize size) {
+    gsize offset=0;
+
+    while(offset<size) {
+        ssize_t written=write(fd,data+offset,size-offset);
+        if(written<0) {
+            if(errno==EINTR)continue;
+            return FALSE;
+        }
+        offset+=(gsize)written;
+    }
+
+    return TRUE;
+}
+
+static gboolean pairing_save_key(const PcMgmtNewLinkKey *event) {
+    char remote[18];
+    ba2str(&event->key.addr.bdaddr,remote);
+
+    if(event->key.addr.type!=0)
+        return TRUE;
+
+    g_autofree char *path=pairing_store_path(remote,TRUE);
+    if(!path) {
+        log_event("pairing_key_error","Cannot create persistent pairing directory");
+        return FALSE;
+    }
+
+    GKeyFile *config=g_key_file_new();
+    g_key_file_set_integer(config,"Pairing","Version",1);
+    g_key_file_set_string(config,"Pairing","Controller","pro");
+    g_key_file_set_string(config,"Pairing","AdapterAddress",pairing_local_address);
+    g_key_file_set_string(config,"Pairing","SwitchAddress",remote);
+    g_key_file_set_integer(config,"Pairing","KeyType",event->key.type);
+    g_key_file_set_integer(config,"Pairing","PINLength",event->key.pin_len);
+    g_key_file_set_integer(config,"Pairing","StoreHint",event->store_hint);
+
+    g_autofree char *encoded=g_base64_encode(event->key.val,sizeof(event->key.val));
+    g_key_file_set_string(config,"Pairing","LinkKeyBase64",encoded);
+
+    GDateTime *now=g_date_time_new_now_utc();
+    g_autofree char *timestamp=g_date_time_format_iso8601(now);
+    g_date_time_unref(now);
+    g_key_file_set_string(config,"Pairing","SavedAt",timestamp);
+
+    gsize length=0;
+    g_autofree char *contents=g_key_file_to_data(config,&length,NULL);
+    g_key_file_unref(config);
+
+    int fd=open(path,
+        O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC|O_NOFOLLOW,
+        0600);
+
+    if(fd<0) {
+        log_event("pairing_key_error",strerror(errno));
+        return FALSE;
+    }
+
+    gboolean ok=
+        fchmod(fd,0600)==0 &&
+        pairing_write_all(fd,contents,length) &&
+        fsync(fd)==0;
+
+    close(fd);
+
+    if(!ok) {
+        log_event("pairing_key_error","Failed to persist BR/EDR Link Key");
+        return FALSE;
+    }
+
+    char detail[160];
+    snprintf(detail,sizeof(detail),
+        "peer=%s key_type=%u store_hint=%u persistent=true",
+        remote,event->key.type,event->store_hint);
+    log_event("pairing_key_saved",detail);
+
+    return TRUE;
+}
+
+static gboolean pairing_mgmt_event(gint fd,GIOCondition condition,gpointer unused) {
+    (void)unused;
+
+    if(condition&(G_IO_HUP|G_IO_ERR|G_IO_NVAL)) {
+        pairing_mgmt_watch=0;
+        return G_SOURCE_REMOVE;
+    }
+
+    uint8_t buffer[1024];
+    ssize_t size=recv(fd,buffer,sizeof(buffer),MSG_DONTWAIT);
+
+    if(size<0 && (errno==EAGAIN || errno==EWOULDBLOCK))
+        return G_SOURCE_CONTINUE;
+
+    if(size<(ssize_t)sizeof(PcMgmtHdr))
+        return G_SOURCE_CONTINUE;
+
+    PcMgmtHdr *header=(PcMgmtHdr *)buffer;
+    uint16_t opcode=btohs(header->opcode);
+    uint16_t index=btohs(header->index);
+    uint16_t payload_size=btohs(header->len);
+
+    if(index!=(uint16_t)pairing_mgmt_index ||
+       opcode!=PC_MGMT_EV_NEW_LINK_KEY ||
+       payload_size<sizeof(PcMgmtNewLinkKey) ||
+       size<(ssize_t)(sizeof(PcMgmtHdr)+sizeof(PcMgmtNewLinkKey)))
+        return G_SOURCE_CONTINUE;
+
+    const PcMgmtNewLinkKey *event=
+        (const PcMgmtNewLinkKey *)(buffer+sizeof(PcMgmtHdr));
+
+    pairing_save_key(event);
+    return G_SOURCE_CONTINUE;
+}
+
+static gboolean pairing_capture_start(void) {
+    pairing_mgmt_fd=pairing_mgmt_open(TRUE);
+
+    if(pairing_mgmt_fd<0) {
+        log_event("pairing_key_error",
+            "Cannot open Bluetooth management channel for Link Key capture");
+        return FALSE;
+    }
+
+    pairing_mgmt_watch=g_unix_fd_add(
+        pairing_mgmt_fd,
+        G_IO_IN|G_IO_HUP|G_IO_ERR,
+        pairing_mgmt_event,
+        NULL);
+
+    log_event("pairing_key_capture",
+        "Persistent BR/EDR Link Key capture armed");
+
+    return TRUE;
+}
+
+static gboolean pairing_read_key(const char *remote,PcMgmtLinkKey *key) {
+    g_autofree char *path=pairing_store_path(remote,FALSE);
+
+    if(!path || !g_file_test(path,G_FILE_TEST_IS_REGULAR)) {
+        log_event("pairing_key_missing",
+            "No persistent pairing key; use Pair / Sync new Switch once");
+        return FALSE;
+    }
+
+    GKeyFile *config=g_key_file_new();
+    GError *error=NULL;
+
+    if(!g_key_file_load_from_file(config,path,G_KEY_FILE_NONE,&error)) {
+        log_event("pairing_key_error",error->message);
+        g_error_free(error);
+        g_key_file_unref(config);
+        return FALSE;
+    }
+
+    g_autofree char *controller=
+        g_key_file_get_string(config,"Pairing","Controller",NULL);
+    g_autofree char *local=
+        g_key_file_get_string(config,"Pairing","AdapterAddress",NULL);
+    g_autofree char *stored_remote=
+        g_key_file_get_string(config,"Pairing","SwitchAddress",NULL);
+    g_autofree char *encoded=
+        g_key_file_get_string(config,"Pairing","LinkKeyBase64",NULL);
+
+    gint type=g_key_file_get_integer(config,"Pairing","KeyType",NULL);
+    gint pin_length=g_key_file_get_integer(config,"Pairing","PINLength",NULL);
+
+    gboolean metadata_ok=
+        controller && !strcmp(controller,"pro") &&
+        local && !g_ascii_strcasecmp(local,pairing_local_address) &&
+        stored_remote && !g_ascii_strcasecmp(stored_remote,remote) &&
+        encoded &&
+        type>=0 && type<=8 &&
+        pin_length>=0 && pin_length<=16;
+
+    if(!metadata_ok) {
+        log_event("pairing_key_error","Persistent pairing metadata does not match this controller");
+        g_key_file_unref(config);
+        return FALSE;
+    }
+
+    gsize decoded_size=0;
+    g_autofree guchar *decoded=g_base64_decode(encoded,&decoded_size);
+
+    if(decoded_size!=16) {
+        log_event("pairing_key_error","Persistent Bluetooth Link Key has invalid length");
+        g_key_file_unref(config);
+        return FALSE;
+    }
+
+    memset(key,0,sizeof(*key));
+    str2ba(remote,&key->addr.bdaddr);
+    key->addr.type=0;
+    key->type=(uint8_t)type;
+    memcpy(key->val,decoded,16);
+    key->pin_len=(uint8_t)pin_length;
+
+    g_key_file_unref(config);
+    return TRUE;
+}
+
+static gboolean pairing_load_into_kernel(const char *remote) {
+    PcMgmtLinkKey key;
+
+    if(!pairing_read_key(remote,&key))
+        return FALSE;
+
+    int fd=pairing_mgmt_open(FALSE);
+    if(fd<0) {
+        log_event("pairing_key_error",
+            "Cannot open Bluetooth management channel for Link Key restore");
+        return FALSE;
+    }
+
+    PcMgmtLoadOneKey request={0};
+    request.hdr.opcode=htobs(PC_MGMT_OP_LOAD_LINK_KEYS);
+    request.hdr.index=htobs((uint16_t)pairing_mgmt_index);
+    request.hdr.len=htobs(sizeof(request)-sizeof(request.hdr));
+    request.debug_keys=0;
+    request.key_count=htobs(1);
+    memcpy(&request.key,&key,sizeof(key));
+
+    if(send(fd,&request,sizeof(request),0)!=(ssize_t)sizeof(request)) {
+        log_event("pairing_key_error","Failed to send Load Link Keys command");
+        close(fd);
+        return FALSE;
+    }
+
+    gint64 deadline=g_get_monotonic_time()+2000000;
+    gboolean success=FALSE;
+
+    while(g_get_monotonic_time()<deadline) {
+        gint64 left=deadline-g_get_monotonic_time();
+        int timeout=(int)MAX(1,left/1000);
+
+        struct pollfd pollfd={
+            .fd=fd,
+            .events=POLLIN
+        };
+
+        int poll_result=poll(&pollfd,1,timeout);
+        if(poll_result<0) {
+            if(errno==EINTR)continue;
+            break;
+        }
+
+        if(poll_result==0)
+            break;
+
+        uint8_t buffer[1024];
+        ssize_t size=recv(fd,buffer,sizeof(buffer),0);
+
+        if(size<(ssize_t)(sizeof(PcMgmtHdr)+sizeof(PcMgmtCommandResult)))
+            continue;
+
+        PcMgmtHdr *header=(PcMgmtHdr *)buffer;
+        uint16_t event=btohs(header->opcode);
+        uint16_t index=btohs(header->index);
+
+        if(index!=(uint16_t)pairing_mgmt_index ||
+           (event!=PC_MGMT_EV_CMD_COMPLETE &&
+            event!=PC_MGMT_EV_CMD_STATUS))
+            continue;
+
+        PcMgmtCommandResult *result=
+            (PcMgmtCommandResult *)(buffer+sizeof(PcMgmtHdr));
+
+        if(btohs(result->opcode)!=PC_MGMT_OP_LOAD_LINK_KEYS)
+            continue;
+
+        if(result->status==0) {
+            success=TRUE;
+            log_event("pairing_key_loaded",
+                "Persistent BR/EDR Link Key restored into kernel");
+        } else {
+            char detail[96];
+            snprintf(detail,sizeof(detail),
+                "Load Link Keys failed with MGMT status 0x%02x",
+                result->status);
+            log_event("pairing_key_error",detail);
+        }
+
+        break;
+    }
+
+    close(fd);
+
+    if(!success)
+        log_event("pairing_key_error",
+            "Kernel did not accept persistent Link Key");
+
+    return success;
+}
+
 static GVariant *call(const char *path,const char *iface,const char *method,GVariant *args) {
     GError *err=NULL;
     GVariant *r=g_dbus_connection_call_sync(bus,"org.bluez",path,iface,method,args,NULL,
@@ -195,10 +595,24 @@ static gboolean connect_outbound(const bdaddr_t *local,const char *address) {
         }
 
         /*
-         * Reconnect deliberately uses a plain Classic L2CAP socket.
-         * JoyControl and NXBT do not request an additional BlueZ
-         * authentication/security level for this path.
+         * The one-time Pair / Sync operation persisted the BR/EDR Link Key.
+         * Require authenticated/encrypted Classic Bluetooth before HID PSM
+         * negotiation so the kernel actively uses that saved key.
          */
+        struct bt_security security={0};
+        security.level=BT_SECURITY_MEDIUM;
+
+        if(setsockopt(fd,SOL_BLUETOOTH,BT_SECURITY,
+                      &security,sizeof(security))<0) {
+            char failure[160];
+            snprintf(failure,sizeof(failure),
+                "psm=%d security=medium error=%s",
+                i?19:17,strerror(errno));
+            log_event("reconnect_security_error",failure);
+            close(fd);
+            goto failed;
+        }
+
         struct sockaddr_l2 source={0};
         source.l2_family=AF_BLUETOOTH;
         bacpy(&source.l2_bdaddr,local);
@@ -500,6 +914,11 @@ int main(int argc,char **argv) {
     str2ba(address,&local);
     bacpy(&selected_local_address,&local);
     have_selected_local_address=TRUE;
+
+    pairing_owner=desktop_mode?desktop_owner:0;
+    pairing_mgmt_index=hci_devid(argv[1]);
+    g_strlcpy(pairing_local_address,address,sizeof(pairing_local_address));
+
     uint8_t mac[6];for(int i=0;i<6;i++) mac[i]=local.b[5-i];
     controller_init(&state,controller_type,mac);log_event("adapter_selected",address);g_variant_unref(v);
     for(int i=0;i<6;i++) {saved[i]=property(keys[i]);if(!saved[i]) goto cleanup;}
@@ -510,6 +929,11 @@ int main(int argc,char **argv) {
     dd=hci_open_dev(hci_devid(argv[1]));
     if(dd<0 || hci_read_class_of_dev(dd,old_class,2000)<0) {log_event("hci_error",strerror(errno));goto cleanup;}
     have_class=TRUE;
+
+    if(!reconnect_mode && controller_type==CONTROLLER_PRO &&
+       !pairing_capture_start())
+        goto cleanup;
+
     static const GDBusInterfaceVTable av={.method_call=agent},pv={.method_call=profile};
 
     if(!reconnect_mode) {
@@ -564,17 +988,36 @@ int main(int argc,char **argv) {
                 "Using the companion controller's HID profile");
         }
     } else {
-        log_event("reconnect_minimal",
-            "Skipping Agent, SDP and pairing configuration for outbound reconnect");
+        log_event("reconnect_persistent",
+            "Restoring persisted controller identity and Bluetooth Link Key");
     }
     if(reconnect_mode) {
         /*
-         * Minimal reconnect path: preserve the current BlueZ state and only
-         * initiate the two Classic HID L2CAP channels to the known console.
+         * Durable reconnect path. Rehydrate the BR/EDR Link Key captured
+         * during the one-time Pair / Sync operation before opening HID.
          */
+        if(controller_type!=CONTROLLER_PRO) {
+            log_event("pairing_key_error",
+                "Persistent reconnect is currently implemented for Pro Controller only");
+            goto cleanup;
+        }
+
+        if(!pairing_load_into_kernel(reconnect_peer))
+            goto cleanup;
+
+        if(!set_property("Alias",g_variant_new_string(controller_alias)) ||
+           !set_property("Pairable",g_variant_new_boolean(FALSE)) ||
+           !set_property("Discoverable",g_variant_new_boolean(FALSE)))
+            goto cleanup;
+
+        if(hci_write_class_of_dev(dd,0x002508,2000)<0) {
+            log_event("class_error",strerror(errno));
+            goto cleanup;
+        }
+
         char ready[180];
         snprintf(ready,sizeof(ready),
-            "Minimal reconnect to %s; initiating PSM 17/19",
+            "Persistent reconnect to %s; Link Key loaded, initiating PSM 17/19",
             reconnect_peer);
         log_event("ready",ready);
 
@@ -649,6 +1092,15 @@ cleanup:
         if(!set_property(keys[0],saved[0]))restored=FALSE;
         g_variant_unref(saved[0]);
     }
+    if(pairing_mgmt_watch) {
+        g_source_remove(pairing_mgmt_watch);
+        pairing_mgmt_watch=0;
+    }
+    if(pairing_mgmt_fd>=0) {
+        close(pairing_mgmt_fd);
+        pairing_mgmt_fd=-1;
+    }
+
     if(dd>=0) close(dd);
     if(profile_id) g_dbus_connection_unregister_object(bus,profile_id);
     if(agent_id) g_dbus_connection_unregister_object(bus,agent_id);
