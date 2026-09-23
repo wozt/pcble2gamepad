@@ -464,10 +464,32 @@ static gboolean tick(gpointer data) {
     return G_SOURCE_CONTINUE;
 }
 static void launcher_done(GObject *source,GAsyncResult *result,gpointer data) {
-    Ui *u=data;g_autoptr(GError)e=NULL;gboolean ok=g_subprocess_wait_check_finish(G_SUBPROCESS(source),result,&e);
+    Ui *u=data;g_autoptr(GError)e=NULL;
+    GSubprocess *process=G_SUBPROCESS(source);
+    gboolean ok=g_subprocess_wait_check_finish(process,result,&e);
     g_clear_object(&u->launcher);
+
     if(u->closing){finish_close(u);ui_unref(u);return;}
-    if(!u->closed){if(!ok)gtk_label_set_text(u->error,e->message);update_controls(u);request(u,"status");}
+
+    if(!u->closed) {
+        if(!ok) {
+            g_autofree char *message=NULL;
+            if(g_subprocess_get_if_exited(process))
+                message=g_strdup_printf(
+                    "Bluetooth session process exited with code %d.",
+                    g_subprocess_get_exit_status(process));
+            else if(g_subprocess_get_if_signaled(process))
+                message=g_strdup_printf(
+                    "Bluetooth session process was terminated by signal %d.",
+                    g_subprocess_get_term_sig(process));
+            else
+                message=g_strdup("Bluetooth session process failed.");
+
+            gtk_label_set_text(u->error,message);
+        }
+        update_controls(u);
+        request(u,"status");
+    }
     ui_unref(u);
 }
 static void controller_selected(GObject *o,GParamSpec *p,Ui *u) {
@@ -528,15 +550,41 @@ static void launch_switch_session(Ui *u,gboolean reconnect) {
         *build=exe?g_path_get_dirname(exe):NULL,
         *root=build?g_path_get_dirname(build):NULL;
     g_autofree char *checkout=root?g_build_filename(root,"poc","run-classic.sh",NULL):NULL;
+    g_autofree char *checkout_backend=build?
+        g_build_filename(build,"pcble2gamepad-controller-backend",NULL):NULL;
+    g_autofree char *installed_dir=g_path_get_dirname(PCBLE2GAMEPAD_PRO_RUNNER);
+    g_autofree char *installed_backend=
+        g_build_filename(installed_dir,"pcble2gamepad-controller-backend",NULL);
+
     /*
-     * Development builds must use the runner from the same checkout before
-     * considering an older system-wide installation.
+     * Runtime privilege is deliberately granted only to the installed,
+     * root-owned launcher through Polkit. Never grant passwordless root
+     * execution to a launcher writable by the desktop user.
+     *
+     * Development builds therefore use the installed launcher too. Refuse
+     * to silently run an older installed backend when the checkout was
+     * rebuilt more recently.
      */
+    if(!override &&
+       g_file_test(PCBLE2GAMEPAD_PRO_RUNNER,G_FILE_TEST_IS_EXECUTABLE) &&
+       checkout_backend &&
+       g_file_test(checkout_backend,G_FILE_TEST_IS_EXECUTABLE) &&
+       g_file_test(installed_backend,G_FILE_TEST_IS_EXECUTABLE)) {
+        GStatBuf checkout_stat,installed_stat;
+        if(!g_stat(checkout_backend,&checkout_stat) &&
+           !g_stat(installed_backend,&installed_stat) &&
+           checkout_stat.st_mtime>installed_stat.st_mtime) {
+            toast(u,
+                "Installed Bluetooth backend is older than this build. Run: sudo meson install -C build");
+            return;
+        }
+    }
+
     g_autofree char *runner=override?g_strdup(override):
-        checkout&&g_file_test(checkout,G_FILE_TEST_IS_EXECUTABLE)?
-            g_strdup(checkout):
         g_file_test(PCBLE2GAMEPAD_PRO_RUNNER,G_FILE_TEST_IS_EXECUTABLE)?
             g_strdup(PCBLE2GAMEPAD_PRO_RUNNER):
+        checkout&&g_file_test(checkout,G_FILE_TEST_IS_EXECUTABLE)?
+            g_strdup(checkout):
             g_strdup(PCBLE2GAMEPAD_PRO_RUNNER);
 
     if(!g_file_test(runner,G_FILE_TEST_IS_EXECUTABLE)) {
