@@ -7,6 +7,7 @@ struct ProControl {
     IpcServer *ipc;
     ProState *state;
     gint64 *release_at;
+    gboolean *verbose;
     GMainLoop *loop;
     gboolean mock, initialized;
     gint64 last_request;
@@ -16,7 +17,6 @@ struct ProControl {
 };
 void pro_control_log(ProControl *c,const char *event,const char *detail) {
     if(!c)return;
-    if(!strcmp(event,"hid_rx"))return;
     g_queue_push_tail(&c->logs,g_strdup_printf("%s  %s",event,detail));
     while(g_queue_get_length(&c->logs)>60)g_free(g_queue_pop_head(&c->logs));
 }
@@ -62,6 +62,10 @@ static char *request(gpointer data,const char *text) {
         c->state->sticks[2]=2070;c->state->sticks[3]=2013;*c->release_at=0;
     } else if(!strcmp(method,"stop")) {
         g_timeout_add(100,stop,c->loop);
+    } else if(!strcmp(method,"logging")) {
+        JsonNode *enabled=json_object_get_member(o,"enabled");
+        if(!enabled || !JSON_NODE_HOLDS_VALUE(enabled) || json_node_get_value_type(enabled)!=G_TYPE_BOOLEAN)return failure("Expected enabled boolean");
+        *c->verbose=json_node_get_boolean(enabled);
     } else if(strcmp(method,"status"))return failure("Unknown method");
     JsonObject *r=json_object_new(),*result=json_object_new();
     json_object_set_boolean_member(r,"ok",TRUE);json_object_set_int_member(r,"version",1);
@@ -82,7 +86,7 @@ static char *request(gpointer data,const char *text) {
     json_object_set_array_member(result,"logs",a);
     return serialize(r);
 }
-ProControl *pro_control_new(ProState *state,gint64 *release_at,uid_t owner,gboolean mock,const char *socket_name,GMainLoop *loop,GError **error) {
+ProControl *pro_control_new(ProState *state,gint64 *release_at,gboolean *verbose,uid_t owner,gboolean mock,const char *socket_name,GMainLoop *loop,GError **error) {
     g_autofree char *directory=NULL,*path=NULL;
     if(mock) {
         const char *override=g_getenv("PCBLE2GAMEPAD_PRO_SOCKET");
@@ -93,7 +97,7 @@ ProControl *pro_control_new(ProState *state,gint64 *release_at,uid_t owner,gbool
         if(chown(directory,owner,(gid_t)-1)<0 || g_chmod(directory,0700)<0) {g_set_error_literal(error,G_IO_ERROR,G_IO_ERROR_FAILED,"Cannot secure runtime directory");return NULL;}
         path=g_build_filename(directory,socket_name,NULL);
     }
-    ProControl *c=g_new0(ProControl,1);c->state=state;c->release_at=release_at;c->mock=mock;c->loop=loop;c->last_request=g_get_monotonic_time();
+    ProControl *c=g_new0(ProControl,1);c->state=state;c->release_at=release_at;c->verbose=verbose;c->mock=mock;c->loop=loop;c->last_request=g_get_monotonic_time();
     c->ipc=ipc_server_new_full(request,c,path,owner,error);
     if(!c->ipc) {g_free(c);return NULL;}
     pro_control_log(c,"ipc_ready",path);return c;

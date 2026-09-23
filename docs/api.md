@@ -118,6 +118,7 @@ The same one-line JSON framing and version `1` apply:
 ```json
 {"version":1,"method":"status"}
 {"version":1,"method":"input","buttons":[8,0,0],"sticks":[2159,1916,2070,2013]}
+{"version":1,"method":"logging","enabled":true}
 {"version":1,"method":"release"}
 {"version":1,"method":"stop"}
 ```
@@ -132,12 +133,15 @@ request also renews a five-second presence lease. If the UI crashes or disappear
 the backend exits when that lease expires and the launcher performs the same
 restoration.
 
+`logging` enables or disables repetitive `hid_rx` packet lines and periodic
+`status` lines immediately. Detailed traffic is disabled when a backend starts.
+
 Successful responses contain `simulated`, `initialized`, `state`, `peer`, report
 counters, player lights, current buttons/sticks and a bounded diagnostics list.
 `state:connected` means the HID peer is present; `initialized:true` means the
 console configured vibration and player lights. The UI labels mock results as
-simulation. High-volume raw HID receive events are kept in the private capture
-rather than the bounded UI log.
+simulation. High-volume raw HID receive events remain in the private HCI capture
+when detailed application logging is disabled.
 
 For a Joy-Con pair, Controller Studio sends the same atomic input frame to both
 sockets. The left backend masks right-side buttons and the right stick; the right

@@ -2,18 +2,20 @@
 # Run the reversible Classic HID backend.
 set -euo pipefail
 [[ $EUID == 0 ]] || { echo 'Run through pkexec or sudo.' >&2; exit 1; }
-[[ $# -ge 1 && $1 =~ ^hci[0-9]+$ ]] || { echo "Usage: $0 hciN [--desktop] [--profile pro|joycon-pair] [--secondary hciN]" >&2; exit 2; }
+[[ $# -ge 1 && $1 =~ ^hci[0-9]+$ ]] || { echo "Usage: $0 hciN [--desktop] [--profile pro|joycon-pair] [--secondary hciN] [--verbose]" >&2; exit 2; }
 script_dir=$(cd -- "$(dirname -- "$0")" && pwd)
 adapter=$1
 shift
 desktop=false
 profile=pro
 secondary=
+verbose=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         --desktop) desktop=true; shift ;;
         --profile) [[ $# -ge 2 ]] || { echo 'Missing profile value' >&2; exit 2; }; profile=$2; shift 2 ;;
         --secondary) [[ $# -ge 2 && $2 =~ ^hci[0-9]+$ ]] || { echo 'Invalid secondary adapter' >&2; exit 2; }; secondary=$2; shift 2 ;;
+        --verbose) verbose=true; shift ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -22,6 +24,8 @@ if [[ $profile == joycon-pair ]]; then
     $desktop || { echo 'Joy-Con pair currently requires desktop mode' >&2; exit 2; }
     [[ -n $secondary && $secondary != "$adapter" ]] || { echo 'Joy-Con pair requires two distinct adapters' >&2; exit 2; }
 fi
+backend_options=()
+$verbose && backend_options+=(--verbose)
 installed=false
 if [[ -x "$script_dir/pcble2gamepad-controller-backend" && -f "$script_dir/pro-controller.xml" ]]; then
     app="$script_dir/pcble2gamepad-controller-backend"
@@ -103,14 +107,14 @@ if $desktop; then
     chown "$PKEXEC_UID" "/run/pcble2gamepad/$PKEXEC_UID"
     chmod 700 "/run/pcble2gamepad/$PKEXEC_UID"
     if [[ $profile == pro ]]; then
-        "$app" "$adapter" "$sdp" --desktop "$PKEXEC_UID" --type pro | tee "$capture/daemon.log"
+        "$app" "$adapter" "$sdp" --desktop "$PKEXEC_UID" --type pro "${backend_options[@]}" | tee "$capture/daemon.log"
     else
-        "$app" "$adapter" "$sdp" --desktop "$PKEXEC_UID" --type joycon-l --allow-adapter "$secondary" > "$capture/joycon-left.log" 2>&1 &
+        "$app" "$adapter" "$sdp" --desktop "$PKEXEC_UID" --type joycon-l --allow-adapter "$secondary" "${backend_options[@]}" > "$capture/joycon-left.log" 2>&1 &
         left_pid=$!;backend_pids+=("$left_pid")
         left_socket="/run/pcble2gamepad/$PKEXEC_UID/joycon-left.sock"
         for _ in {1..100}; do [[ -S $left_socket ]] && break; kill -0 "$left_pid" 2>/dev/null || break; sleep .05; done
         [[ -S $left_socket ]] || { echo 'Left Joy-Con backend failed to start' >&2; wait "$left_pid" || true; exit 1; }
-        "$app" "$secondary" "$sdp" --desktop "$PKEXEC_UID" --type joycon-r --allow-adapter "$adapter" --shared-profile > "$capture/joycon-right.log" 2>&1 &
+        "$app" "$secondary" "$sdp" --desktop "$PKEXEC_UID" --type joycon-r --allow-adapter "$adapter" --shared-profile "${backend_options[@]}" > "$capture/joycon-right.log" 2>&1 &
         right_pid=$!;backend_pids+=("$right_pid")
         set +e
         wait "$left_pid"; left_status=$?
@@ -122,5 +126,5 @@ if $desktop; then
 else
     echo 'Open Change Grip/Order. Commands: buttons HEX HEX HEX; sticks LX LY RX RY; release; status; quit.'
     echo 'The test ends after 10 minutes; no buttons are pressed automatically.'
-    timeout --foreground --signal=TERM --kill-after=10s 600 "$app" "$adapter" "$sdp" --type pro | tee "$capture/daemon.log"
+    timeout --foreground --signal=TERM --kill-after=10s 600 "$app" "$adapter" "$sdp" --type pro "${backend_options[@]}" | tee "$capture/daemon.log"
 fi

@@ -64,12 +64,17 @@ meson test -C build --print-errorlogs
 For a headless-only build, omit the GTK development packages and use
 `meson setup build-headless -Dgui=disabled`. The daemon and CLI never link GTK.
 There is no Python application code or runtime dependency; Meson is a build tool.
-For optional installation in your user account, configure the prefix first:
+Install Controller Studio system-wide once so its narrowly scoped Polkit policy and
+root-owned Bluetooth launcher are available:
 
 ```sh
-meson configure build --prefix="$HOME/.local"
-meson install -C build
+meson configure build --prefix=/usr/local
+sudo meson install -C build
 ```
+
+After installation, an active local desktop session can start this exact launcher
+without entering an administrator password. The policy does not authorize other
+commands. A user-local installation cannot provide this privileged integration.
 
 ## Run Controller Studio
 
@@ -81,7 +86,8 @@ Choose the emulated controller and Bluetooth adapter by address, then click
 **Connect to Switch**. The
 application invokes its narrow backend with `pkexec`, temporarily restarts BlueZ
 in Classic HID compatibility mode, and restores the normal service when the
-session stops. This pauses other Bluetooth services for the duration. On first
+session stops. The installed Polkit policy permits this launcher without another
+password prompt for the active local session. This pauses other Bluetooth services for the duration. On first
 pairing, open **Controllers -> Change Grip/Order** on the console.
 
 A Pro Controller needs one Bluetooth adapter. A Joy-Con pair exposes two Classic
@@ -95,6 +101,10 @@ then enable input. Escape immediately pauses keyboard input. The backend returns
 buttons and sticks to neutral if updates stop for 500 ms. Closing Controller
 Studio stops the session and restores BlueZ. Profiles are INI files under
 `~/.config/pcble2gamepad/profiles`.
+
+Repetitive HID receive packets and periodic status lines are hidden by default.
+Enable **Detailed HID traffic** on the Diagnostics page when protocol-level output
+is needed; the switch also works during an active session.
 
 The session stores a private HCI capture and backend log under
 `/var/lib/pcble2gamepad/UID` when installed, or `artifacts/` when run from a

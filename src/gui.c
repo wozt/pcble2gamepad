@@ -16,7 +16,7 @@ typedef struct {
     GtkStringList *adapter_names,*secondary_names,*device_names,*profile_names;
     GPtrArray *adapter_ids,*secondary_ids,*device_ids;
     GtkButton *key_buttons[INPUT_ACTIONS],*pad_buttons[INPUT_BUTTONS];
-    GtkScale *deadzone,*sensitivity;GtkSwitch *invert[4],*swap,*background;
+    GtkScale *deadzone,*sensitivity;GtkSwitch *invert[4],*swap,*background,*traffic_logs;
     GtkTextBuffer *logs;GHashTable *keys;
     InputProfile profile;InputFrame frame;
     SDL_GameController *pad;int joystick_count,learn_key,learn_pad;
@@ -259,7 +259,7 @@ static void request(Ui *u,const char *method) {
     if(!strcmp(method,"input")){
         JsonArray *a=json_array_new();for(int i=0;i<3;i++)json_array_add_int_element(a,u->frame.buttons[i]);json_object_set_array_member(r->request,"buttons",a);
         a=json_array_new();for(int i=0;i<4;i++)json_array_add_int_element(a,u->frame.sticks[i]);json_object_set_array_member(r->request,"sticks",a);
-    }
+    } else if(!strcmp(method,"logging"))json_object_set_boolean_member(r->request,"enabled",gtk_switch_get_active(u->traffic_logs));
     u->refs++;GTask *task=g_task_new(NULL,NULL,complete,u);g_task_set_task_data(task,r,request_free);g_task_run_in_thread(task,worker);g_object_unref(task);
 }
 static gboolean tick(gpointer data) {
@@ -302,17 +302,23 @@ static void controller_selected(GObject *o,GParamSpec *p,Ui *u) {
     }
     gtk_label_set_text(u->status,"OFFLINE");gtk_label_set_text(u->peer,"Start a Bluetooth session to connect your console.");gtk_label_set_text(u->error,"");gtk_widget_queue_draw(u->drawing);update_controls(u);request(u,"status");
 }
+static void traffic_logs_changed(GObject *o,GParamSpec *p,Ui *u) {
+    (void)o;(void)p;if(u->online)request(u,"logging");
+}
 static void start(GtkButton *b,Ui *u) {
     (void)b;if(u->launcher || u->online)return;
     guint i=gtk_drop_down_get_selected(u->adapters);if(i>=u->adapter_ids->len){toast(u,"Select a Bluetooth adapter first");return;}
     guint j=gtk_drop_down_get_selected(u->secondary);if(pair_mode(u) && (j>=u->secondary_ids->len || !strcmp(g_ptr_array_index(u->adapter_ids,i),g_ptr_array_index(u->secondary_ids,j)))){toast(u,"Choose two distinct Bluetooth adapters for the Joy-Con pair");return;}
     const char *override=g_getenv("PCBLE2GAMEPAD_RUNNER");g_autofree char *exe=g_file_read_link("/proc/self/exe",NULL),*build=exe?g_path_get_dirname(exe):NULL,*root=build?g_path_get_dirname(build):NULL;
     g_autofree char *checkout=root?g_build_filename(root,"poc","run-classic.sh",NULL):NULL;
-    g_autofree char *runner=override?g_strdup(override):checkout&&g_file_test(checkout,G_FILE_TEST_IS_EXECUTABLE)?g_strdup(checkout):g_strdup(PCBLE2GAMEPAD_PRO_RUNNER);
+    g_autofree char *runner=override?g_strdup(override):g_file_test(PCBLE2GAMEPAD_PRO_RUNNER,G_FILE_TEST_IS_EXECUTABLE)?g_strdup(PCBLE2GAMEPAD_PRO_RUNNER):checkout&&g_file_test(checkout,G_FILE_TEST_IS_EXECUTABLE)?g_strdup(checkout):g_strdup(PCBLE2GAMEPAD_PRO_RUNNER);
     if(!g_file_test(runner,G_FILE_TEST_IS_EXECUTABLE)){toast(u,"Bluetooth backend launcher is not installed");return;}
     g_autoptr(GError)e=NULL;
-    if(pair_mode(u))u->launcher=g_subprocess_new(G_SUBPROCESS_FLAGS_NONE,&e,"pkexec",runner,g_ptr_array_index(u->adapter_ids,i),"--desktop","--profile","joycon-pair","--secondary",g_ptr_array_index(u->secondary_ids,j),NULL);
-    else u->launcher=g_subprocess_new(G_SUBPROCESS_FLAGS_NONE,&e,"pkexec",runner,g_ptr_array_index(u->adapter_ids,i),"--desktop","--profile","pro",NULL);
+    const char *args[12];guint n=0;args[n++]="pkexec";args[n++]=runner;args[n++]=g_ptr_array_index(u->adapter_ids,i);args[n++]="--desktop";args[n++]="--profile";
+    if(pair_mode(u)){args[n++]="joycon-pair";args[n++]="--secondary";args[n++]=g_ptr_array_index(u->secondary_ids,j);}else args[n++]="pro";
+    if(gtk_switch_get_active(u->traffic_logs))args[n++]="--verbose";
+    args[n]=NULL;
+    u->launcher=g_subprocess_newv(args,G_SUBPROCESS_FLAGS_NONE,&e);
     if(!u->launcher){toast(u,e->message);return;}
     u->refs++;g_subprocess_wait_check_async(u->launcher,NULL,launcher_done,u);update_controls(u);gtk_label_set_text(u->status,"STARTING SESSION");
 }
@@ -389,12 +395,14 @@ static void activate(GtkApplication *app,gpointer unused) {
     row(g,"Automatic release","Buttons and sticks return to neutral within 500 ms if input updates stop.",NULL);
     row(g,"Session lifetime","Stopping or closing this window stops the backend and restores normal Bluetooth.",NULL);
     box=page(u,"diagnostics","Diagnostics","Live session events, association requests and HID initialization. Simulation is always labeled.");
+    u->traffic_logs=GTK_SWITCH(gtk_switch_new());row(group(box,"Logging",NULL),"Detailed HID traffic","Show repetitive hid_rx packets and periodic status lines. Disabled by default.",GTK_WIDGET(u->traffic_logs));
     gtk_box_append(GTK_BOX(box),button("Copy diagnostics",G_CALLBACK(copy_logs),u));GtkWidget *view=gtk_text_view_new();gtk_text_view_set_editable(GTK_TEXT_VIEW(view),FALSE);gtk_text_view_set_monospace(GTK_TEXT_VIEW(view),TRUE);gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(view),GTK_WRAP_WORD_CHAR);u->logs=gtk_text_view_get_buffer(GTK_TEXT_VIEW(view));gtk_widget_set_size_request(view,-1,430);margin(view,10);gtk_box_append(GTK_BOX(box),view);
     row(group(box,"Current scope",NULL),"Nintendo controller profiles","Switch Pro Controller is verified on Switch 2. Joy-Con (L/R) wire formats and dual-adapter routing are implemented but cannot be hardware-tested until a second adapter is connected. Sony and Microsoft profiles remain future additions.",NULL);
     refresh_bindings(u);profile_scan(u);devices_scan(u);adapters_scan(NULL,u);
     g_signal_connect(u->profiles,"notify::selected",G_CALLBACK(profile_selected),u);g_signal_connect(u->devices,"notify::selected",G_CALLBACK(device_selected),u);g_signal_connect(u->source,"notify::selected",G_CALLBACK(source_changed),u);g_signal_connect(u->controllers,"notify::selected",G_CALLBACK(controller_selected),u);
     g_signal_connect(u->arm,"notify::active",G_CALLBACK(armed_changed),u);g_signal_connect(u->window,"notify::is-active",G_CALLBACK(focus_changed),u);g_signal_connect(u->window,"close-request",G_CALLBACK(close_window),u);
     g_signal_connect(u->deadzone,"value-changed",G_CALLBACK(scale_changed),u);g_signal_connect(u->sensitivity,"value-changed",G_CALLBACK(scale_changed),u);g_signal_connect(u->swap,"notify::active",G_CALLBACK(settings_changed),u);g_signal_connect(u->background,"notify::active",G_CALLBACK(settings_changed),u);
+    g_signal_connect(u->traffic_logs,"notify::active",G_CALLBACK(traffic_logs_changed),u);
     GtkEventController *keys=gtk_event_controller_key_new();gtk_event_controller_set_propagation_phase(keys,GTK_PHASE_CAPTURE);g_signal_connect(keys,"key-pressed",G_CALLBACK(key_pressed),u);g_signal_connect(keys,"key-released",G_CALLBACK(key_released),u);gtk_widget_add_controller(GTK_WIDGET(u->window),keys);
     controller_selected(NULL,NULL,u);u->timer=g_timeout_add(16,tick,u);request(u,"status");gtk_window_present(u->window);
 }

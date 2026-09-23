@@ -24,6 +24,7 @@ static char adapter[64], allowed_adapter[64], peer[18];
 static ControllerType controller_type=CONTROLLER_PRO;
 static const char *controller_alias="Pro Controller",*control_socket="pro.sock";
 static gboolean shared_profile;
+static gboolean verbose_traffic;
 static gboolean select_controller(const char *type) {
     if(!strcmp(type,"pro")){controller_type=CONTROLLER_PRO;controller_alias="Pro Controller";control_socket="pro.sock";return TRUE;}
     if(!strcmp(type,"joycon-l")){controller_type=CONTROLLER_JOYCON_L;controller_alias="Joy-Con (L)";control_socket="joycon-left.sock";return TRUE;}
@@ -43,8 +44,9 @@ static void pending_log_free(PendingLog *item) {
     g_free(item->event);g_free(item->detail);g_free(item);
 }
 static void log_event(const char *event, const char *detail) {
+    if(!verbose_traffic && !strcmp(event,"hid_rx"))return;
     if(desktop)pro_control_log(desktop,event,detail);
-    else if(desktop_requested && strcmp(event,"hid_rx")) {
+    else if(desktop_requested) {
         PendingLog *item=g_new0(PendingLog,1);item->event=g_strdup(event);item->detail=g_strdup(detail);
         g_queue_push_tail(&pending_logs,item);
         while(g_queue_get_length(&pending_logs)>60)pending_log_free(g_queue_pop_head(&pending_logs));
@@ -183,9 +185,12 @@ static gboolean tick(gpointer unused) {
     pro_control_update(desktop,mock_mode?"Simulation":peer,mock_mode || initialized,sent,received);
     return G_SOURCE_CONTINUE;
 }
+static void status_event(void) {
+    char msg[120];snprintf(msg,sizeof(msg),"peer=%s tx=%u rx=%u initialized=%s",peer[0]?peer:"none",sent,received,initialized?"true":"false");
+    log_event("status",msg);
+}
 static gboolean stats(gpointer unused) {
-    (void)unused;char msg[120];snprintf(msg,sizeof(msg),"peer=%s tx=%u rx=%u initialized=%s",peer[0]?peer:"none",sent,received,initialized?"true":"false");
-    log_event("status",msg);return G_SOURCE_CONTINUE;
+    (void)unused;if(verbose_traffic)status_event();return G_SOURCE_CONTINUE;
 }
 static gboolean quit(gpointer unused) {(void)unused;g_main_loop_quit(loop);return G_SOURCE_CONTINUE;}
 static gboolean input(GIOChannel *io,GIOCondition cond,gpointer unused) {
@@ -195,7 +200,7 @@ static gboolean input(GIOChannel *io,GIOCondition cond,gpointer unused) {
     g_strstrip(line);
     if(!strcmp(line,"quit")) quit(NULL);
     else if(!strcmp(line,"release")) release_at=1;
-    else if(!strcmp(line,"status")) stats(NULL);
+    else if(!strcmp(line,"status"))status_event();
     else if(g_str_has_prefix(line,"buttons ")) {
         unsigned a,b,c;if(sscanf(line+8,"%x %x %x",&a,&b,&c)==3 && a<256 && b<256 && c<256) {
             state.buttons[0]=a;state.buttons[1]=b;state.buttons[2]=c;
@@ -228,7 +233,7 @@ int main(int argc,char **argv) {
         if(argc>3 || (argc==3 && !select_controller(argv[2]))) {fprintf(stderr,"Usage: %s --mock [pro|joycon-l|joycon-r]\n",argv[0]);return 2;}
         uint8_t addr[6]={0};controller_init(&state,controller_type,addr);
         loop=g_main_loop_new(NULL,FALSE);GError *error=NULL;
-        desktop=pro_control_new(&state,&release_at,getuid(),TRUE,control_socket,loop,&error);
+        desktop=pro_control_new(&state,&release_at,&verbose_traffic,getuid(),TRUE,control_socket,loop,&error);
         if(!desktop) {g_printerr("%s\n",error->message);g_error_free(error);return 1;}
         g_unix_signal_add(SIGINT,quit,NULL);g_unix_signal_add(SIGTERM,quit,NULL);
         g_timeout_add(15,tick,NULL);log_event("mock_ready","No Bluetooth activity");
@@ -245,11 +250,12 @@ int main(int argc,char **argv) {
         } else if(!strcmp(argv[i],"--allow-adapter") && i+1<argc && g_regex_match_simple("^hci[0-9]+$",argv[i+1],0,0)) {
             snprintf(allowed_adapter,sizeof(allowed_adapter),"/org/bluez/%s/dev_",argv[++i]);
         } else if(!strcmp(argv[i],"--shared-profile"))shared_profile=TRUE;
+        else if(!strcmp(argv[i],"--verbose"))verbose_traffic=TRUE;
         else {fprintf(stderr,"Unknown or incomplete option: %s\n",argv[i]);return 2;}
     }
     desktop_requested=desktop_mode;
     if(argc<3 || !g_regex_match_simple("^hci[0-9]+$",argv[1],0,0) || (desktop_mode && getuid()!=0)) {
-        fprintf(stderr,"Usage: %s hciN SDP_XML [--desktop UID] [--type pro|joycon-l|joycon-r] [--allow-adapter hciN] [--shared-profile]\n",argv[0]);return 2;
+        fprintf(stderr,"Usage: %s hciN SDP_XML [--desktop UID] [--type pro|joycon-l|joycon-r] [--allow-adapter hciN] [--shared-profile] [--verbose]\n",argv[0]);return 2;
     }
     int result=1,dd=-1;uint8_t old_class[3]={0};gboolean have_class=FALSE;
     GVariant *saved[6]={0};const char *keys[]={"Powered","Alias","Pairable","Discoverable","PairableTimeout","DiscoverableTimeout"};
@@ -307,7 +313,7 @@ int main(int argc,char **argv) {
     g_dbus_connection_signal_subscribe(bus,"org.bluez","org.freedesktop.DBus.Properties","PropertiesChanged",NULL,NULL,0,changed,NULL,NULL);
     loop=g_main_loop_new(NULL,FALSE);g_unix_signal_add(SIGINT,quit,NULL);g_unix_signal_add(SIGTERM,quit,NULL);
     if(desktop_mode) {
-        desktop=pro_control_new(&state,&release_at,desktop_owner,FALSE,control_socket,loop,&err);
+        desktop=pro_control_new(&state,&release_at,&verbose_traffic,desktop_owner,FALSE,control_socket,loop,&err);
         if(!desktop)goto cleanup;
         while(!g_queue_is_empty(&pending_logs)) {
             PendingLog *item=g_queue_pop_head(&pending_logs);

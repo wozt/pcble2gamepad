@@ -3,9 +3,15 @@ gio = dependency('gio-unix-2.0', version: '>=2.74')
 json = dependency('json-glib-1.0')
 bluetooth = dependency('bluez')
 libexec_dir = get_option('libexecdir') / 'pcble2gamepad'
+runner_path = get_option('prefix') / libexec_dir / 'run-classic.sh'
 configuration = configuration_data()
-configuration.set_quoted('PCBLE2GAMEPAD_PRO_RUNNER', get_option('prefix') / libexec_dir / 'run-classic.sh')
+configuration.set_quoted('PCBLE2GAMEPAD_PRO_RUNNER', runner_path)
+configuration.set('PCBLE2GAMEPAD_RUNNER_PATH', runner_path)
 configure_file(output: 'config.h', configuration: configuration)
+polkit_policy = configure_file(
+  input: 'data/io.github.wozt.pcble2gamepad.policy.in',
+  output: 'io.github.wozt.pcble2gamepad.policy',
+  configuration: configuration)
 executable('pcble2gamepaddiag', 'src/adapter-diag.c', dependencies: [gio, bluetooth], install: true)
 inc = include_directories('src')
 protocol = static_library('joycon2-protocol', 'src/protocol.c', dependencies: gio)
@@ -19,6 +25,7 @@ executable('pcble2gamepad-controller-backend',
 install_data('poc/pro-controller.xml', install_dir: libexec_dir)
 install_data('poc/run-classic.sh', install_dir: libexec_dir,
   install_mode: 'rwxr-xr-x')
+install_data(polkit_policy, install_dir: '/usr/share/polkit-1/actions')
 gtk = dependency('gtk4', version: '>=4.8', required: get_option('gui'))
 adw = dependency('libadwaita-1', version: '>=1.2', required: get_option('gui'))
 if gtk.found() and adw.found()

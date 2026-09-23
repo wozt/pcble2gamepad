@@ -13,8 +13,8 @@ controller backend. The interface has five pages:
   their buttons and triggers. Hot-unplug releases controller state.
 - **Input settings** controls radial dead zone, sensitivity, per-axis inversion,
   stick swapping and optional background gamepad input.
-- **Diagnostics** shows association, L2CAP and HID initialization milestones and
-  can copy them to the clipboard.
+- **Diagnostics** shows association, L2CAP and HID initialization milestones, can
+  copy them to the clipboard and can enable detailed HID traffic when needed.
 
 Profiles are stored as readable INI files in
 `~/.config/pcble2gamepad/profiles`. The default profile is created on first run.
@@ -23,12 +23,18 @@ The live controller drawing previews the composed input frame before it is sent.
 ## Process boundary
 
 The GTK process never opens Bluetooth sockets and does not run as root. Starting a
-session authenticates the installed `run-classic.sh` through `pkexec`. The runner
+session invokes the installed `run-classic.sh` through `pkexec`. Its Polkit action
+allows the exact root-owned launcher for an active local session without a password;
+it does not authorize arbitrary commands. The runner
 starts a C backend that owns the temporary Agent1, SDP record and L2CAP PSM 17/19
 listeners. The backend temporarily powers the selected adapter if BlueZ's restart
 left it off, then restores the previous power state. It also records a private
 `btmon` capture. The backend accepts commands
 only from the desktop UID over the local socket documented in [the API](api.md).
+
+Detailed traffic is off by default, so normal logs omit high-frequency `hid_rx`
+packets and periodic `status` lines. The Diagnostics switch changes this live on
+both backends of a Joy-Con pair. The private HCI capture remains complete.
 
 The Pro Controller profile uses one adapter and one backend. A Joy-Con pair uses
 two adapters and two backend instances, because left and right Joy-Con must have

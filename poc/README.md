@@ -24,6 +24,7 @@ On 2026-09-23 Realtek `E0:AD:47:40:70:D9` is `hci1`.
 
 ```sh
 sudo ./poc/run-classic.sh hci1
+# Add --verbose only when raw HID packet logs are needed.
 ```
 
 The runner refuses existing Bluetooth links, temporarily restarts Debian's BlueZ
