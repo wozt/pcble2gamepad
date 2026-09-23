@@ -1305,7 +1305,31 @@ int main(int argc,char **argv) {
     have_selected_local_address=TRUE;
 
     pairing_owner=desktop_mode?desktop_owner:0;
-    pairing_mgmt_index=hci_devid(argv[1]);
+
+    /*
+     * argv[1] is already validated as hciN above. Do not use hci_devid()
+     * here: hci_devid("hciN") internally calls hci_devba(), which fails
+     * while the controller is still DOWN. That previously left the MGMT
+     * controller index at -1 (0xffff / MGMT_INDEX_NONE).
+     */
+    char *index_end=NULL;
+    guint64 parsed_index=
+        g_ascii_strtoull(argv[1]+3,&index_end,10);
+
+    if(!index_end || *index_end || parsed_index>G_MAXUINT16) {
+        log_event("adapter_index_error",
+            "Invalid HCI controller index");
+        goto cleanup;
+    }
+
+    pairing_mgmt_index=(int)parsed_index;
+
+    char index_detail[96];
+    snprintf(index_detail,sizeof(index_detail),
+        "adapter=%s mgmt_index=%d",
+        argv[1],pairing_mgmt_index);
+    log_event("adapter_index",index_detail);
+
     g_strlcpy(pairing_local_address,address,sizeof(pairing_local_address));
 
     uint8_t mac[6];for(int i=0;i<6;i++) mac[i]=local.b[5-i];
@@ -1315,8 +1339,11 @@ int main(int argc,char **argv) {
         if(!set_property("Powered",g_variant_new_boolean(TRUE)))goto cleanup;
         log_event("adapter_powered","Powered on temporarily for the Classic HID session");
     }
-    dd=hci_open_dev(hci_devid(argv[1]));
-    if(dd<0 || hci_read_class_of_dev(dd,old_class,2000)<0) {log_event("hci_error",strerror(errno));goto cleanup;}
+    dd=hci_open_dev(pairing_mgmt_index);
+    if(dd<0 || hci_read_class_of_dev(dd,old_class,2000)<0) {
+        log_event("hci_error",strerror(errno));
+        goto cleanup;
+    }
     have_class=TRUE;
 
     if(!reconnect_mode && controller_type==CONTROLLER_PRO &&
