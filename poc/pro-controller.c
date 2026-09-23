@@ -965,8 +965,13 @@ int main(int argc,char **argv) {
 
         g_variant_builder_add(&opts,"{sv}","Role",
                               g_variant_new_string("server"));
+        /*
+         * Pair / Sync must create a real BR/EDR bond. Without authentication
+         * the Switch can use the HID channels for the current session while
+         * Linux never receives a persistent Link Key.
+         */
         g_variant_builder_add(&opts,"{sv}","RequireAuthentication",
-                              g_variant_new_boolean(FALSE));
+                              g_variant_new_boolean(TRUE));
         g_variant_builder_add(&opts,"{sv}","RequireAuthorization",
                               g_variant_new_boolean(FALSE));
         g_variant_builder_add(&opts,"{sv}","AutoConnect",
@@ -1029,16 +1034,71 @@ int main(int argc,char **argv) {
          * connection while Change Grip/Order is open.
          */
         for(int i=0;i<2;i++) {
-            listeners[i]=socket(AF_BLUETOOTH,SOCK_SEQPACKET|SOCK_NONBLOCK|SOCK_CLOEXEC,BTPROTO_L2CAP);
+            listeners[i]=socket(
+                AF_BLUETOOTH,
+                SOCK_SEQPACKET|SOCK_NONBLOCK|SOCK_CLOEXEC,
+                BTPROTO_L2CAP);
 
-            struct sockaddr_l2 bind_addr={.l2_family=AF_BLUETOOTH,.l2_psm=htobs(i?19:17)};
-            bacpy(&bind_addr.l2_bdaddr,&local);
-            if(listeners[i]<0 ||
-               bind(listeners[i],(struct sockaddr *)&bind_addr,sizeof(bind_addr))<0 ||
-               listen(listeners[i],1)<0) {
-                log_event("l2cap_listen_error",strerror(errno));goto cleanup;
+            if(listeners[i]<0) {
+                log_event("l2cap_listen_error",strerror(errno));
+                goto cleanup;
             }
-            g_unix_fd_add(listeners[i],G_IO_IN,accept_peer,GINT_TO_POINTER(i));
+
+            /*
+             * Require a real BR/EDR authenticated/encrypted link during the
+             * one-time pairing operation. MEDIUM accepts an unauthenticated
+             * SSP combination key ("Just Works"), which matches the controller
+             * use case without requiring MITM/passkey authentication.
+             *
+             * This is deliberately applied before bind/listen so an incoming
+             * Switch HID connection cannot become usable before link security
+             * has been negotiated.
+             */
+            struct bt_security security={0};
+            security.level=BT_SECURITY_MEDIUM;
+
+            if(setsockopt(
+                    listeners[i],
+                    SOL_BLUETOOTH,
+                    BT_SECURITY,
+                    &security,
+                    sizeof(security))<0) {
+                char detail[160];
+                snprintf(
+                    detail,sizeof(detail),
+                    "psm=%d level=BT_SECURITY_MEDIUM error=%s",
+                    i?19:17,strerror(errno));
+                log_event("pairing_security_error",detail);
+                goto cleanup;
+            }
+
+            char security_detail[96];
+            snprintf(
+                security_detail,sizeof(security_detail),
+                "psm=%d level=BT_SECURITY_MEDIUM",
+                i?19:17);
+            log_event("pairing_security",security_detail);
+
+            struct sockaddr_l2 bind_addr={
+                .l2_family=AF_BLUETOOTH,
+                .l2_psm=htobs(i?19:17)
+            };
+            bacpy(&bind_addr.l2_bdaddr,&local);
+
+            if(bind(
+                    listeners[i],
+                    (struct sockaddr *)&bind_addr,
+                    sizeof(bind_addr))<0 ||
+               listen(listeners[i],1)<0) {
+                log_event("l2cap_listen_error",strerror(errno));
+                goto cleanup;
+            }
+
+            g_unix_fd_add(
+                listeners[i],
+                G_IO_IN,
+                accept_peer,
+                GINT_TO_POINTER(i));
         }
 
         if(!set_property("Alias",g_variant_new_string(controller_alias)) ||
