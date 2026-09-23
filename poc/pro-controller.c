@@ -901,20 +901,48 @@ static gboolean secure_reconnect_acl(const bdaddr_t *remote,
 
     gint64 deadline=g_get_monotonic_time()+2000000;
     gboolean found=FALSE;
+    gboolean saw_pending=FALSE;
 
+    /*
+     * Linux creates the hci_conn object before the physical ACL exists.
+     * During that phase it assigns an internal "unset" handle starting at
+     * 0x0f00. Real BR/EDR HCI connection handles are <= 0x0eff.
+     *
+     * HCIGETCONNINFO therefore succeeding is not enough: wait until
+     * Connection Complete replaces the temporary handle with the real one.
+     */
     while(g_get_monotonic_time()<deadline) {
         if(ioctl(
                 hci_fd,
                 HCIGETCONNINFO,
                 (unsigned long)request)==0) {
-            found=TRUE;
-            break;
+
+            uint16_t candidate=request->conn_info->handle;
+
+            if(candidate<=0x0eff) {
+                found=TRUE;
+                break;
+            }
+
+            if(!saw_pending) {
+                char detail[160];
+                snprintf(
+                    detail,sizeof(detail),
+                    "peer=%s temporary_handle=0x%04x; waiting for HCI Connect Complete",
+                    address,
+                    candidate);
+
+                log_event("reconnect_acl_pending",detail);
+                saw_pending=TRUE;
+            }
+
+            g_usleep(1000);
+            continue;
         }
 
         /*
-         * The L2CAP connect has already started paging the Switch. There is
-         * a short interval between connect() returning EINPROGRESS and the
-         * ACL handle becoming visible through HCIGETCONNINFO.
+         * The L2CAP connect has already started paging the Switch. The
+         * connection object may not exist yet during the first few polls.
          */
         if(errno!=ENOENT &&
            errno!=ENOTCONN &&
@@ -959,7 +987,7 @@ static gboolean secure_reconnect_acl(const bdaddr_t *remote,
         char detail[160];
         snprintf(
             detail,sizeof(detail),
-            "peer=%s handle=0x%04x; authenticating saved Link Key",
+            "peer=%s real_handle=0x%04x; HCI Connect Complete observed; authenticating saved Link Key",
             address,
             request->conn_info->handle);
         log_event("reconnect_acl_found",detail);
