@@ -104,34 +104,20 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 if [[ -z $reconnect ]]; then
+    echo 'Pairing mode: starting isolated BlueZ compatibility service.'
+
     mkdir -p /run/systemd/system/bluetooth.service.d
     cat > "$dropin" <<'SERVICE'
 [Service]
 ExecStart=
 ExecStart=/usr/libexec/bluetooth/bluetoothd --compat --noplugin=*
 SERVICE
+
     bluetooth_overridden=true
     systemctl daemon-reload
     systemctl restart bluetooth
 
-    # systemctl may return before the controller has completely settled.
-    # Do not start the HID backend while BlueZ is still returning Busy.
-    adapter_ready=false
-    for _ in {1..50}; do
-        if busctl get-property                 org.bluez                 "/org/bluez/$adapter"                 org.bluez.Adapter1                 Address >/dev/null 2>&1            && btmgmt -i "$adapter" info >/dev/null 2>&1; then
-            adapter_ready=true
-            break
-        fi
-        sleep 0.1
-    done
-
-    if ! $adapter_ready; then
-        echo "Bluetooth adapter $adapter did not become ready after BlueZ restart." >&2
-        exit 1
-    fi
-
-    # Give BlueZ one final scheduling cycle before changing adapter properties.
-    sleep 0.3
+    echo 'Pairing mode: BlueZ restarted; starting controller backend.'
 else
     echo 'Reconnect mode: keeping the existing BlueZ service and controller state.'
 fi
