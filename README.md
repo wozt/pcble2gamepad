@@ -1,7 +1,18 @@
 # pcble2gamepad
 
-Experimental **C11** software for emulating Nintendo Switch 2 Joy-Con 2 controllers
-from a Linux PC's standard Bluetooth LE adapter.
+Experimental **C11** software for emulating console controllers from a Linux PC.
+
+The immediate milestone is a software-only **Switch 1 Pro Controller over Classic
+Bluetooth HID**, tested against a real Switch 2. The standalone [C POC](poc/README.md)
+has paired and appeared as a Pro Controller on the console; detailed validation
+and limitations are in [the experiment report](docs/classic-pro-poc.md).
+No real Joy-Con or Pro Controller is required in the emulation chain.
+General backend abstractions and capture2cloud integration remain deferred.
+
+## Earlier Joy-Con 2 BLE work
+
+The existing daemon, CLI and GTK application below currently implement the earlier
+Joy-Con 2 discovery experiment. The Classic POC is a separate executable.
 
 The first milestone is deliberately small: advertise one **Joy-Con 2 R** and
 observe whether a real Switch 2 attempts to connect. **This milestone was observed

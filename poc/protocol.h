@@ -1,0 +1,15 @@
+#ifndef PRO_POC_PROTOCOL_H
+#define PRO_POC_PROTOCOL_H
+#include <stddef.h>
+#include <stdint.h>
+#include <stdbool.h>
+typedef struct {
+    uint8_t address[6], buttons[3], lights, mode;
+    uint16_t sticks[4];
+    bool imu, vibration;
+} ProState;
+void pro_init(ProState *s, const uint8_t address[6]);
+void pro_input(const ProState *s, uint8_t timer, uint8_t out[50]);
+/* Returns false for malformed/unsupported output reports; never reads past len. */
+bool pro_reply(ProState *s, const uint8_t *in, size_t len, uint8_t timer, uint8_t out[50]);
+#endif
