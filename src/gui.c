@@ -1119,14 +1119,32 @@ static void update_pro_svg_colors(Ui *u) {
      * represented by the Switch SPI color fields.
      */
     g_autofree char *css=g_strdup_printf(
-        "#path9073,#path1675-3,#path1685-5 { fill:#%s !important; }"
-        "#path9067 { fill:#%s !important; }"
-        "#path9077 { fill:#%s !important; }"
-        "#path1458,#path8519,#path5183,#path2365,"
-        "#path1717-9,#path1701-7,"
-        "#path1737-4,#path1733-7,#path1725-4,#path1729-5,"
-        "#path4084,#path1759-9,#path1767-5,#path1773-8,"
-        "#path1779-7 { fill:#%s !important; }",
+        /*
+         * Main shell/front. The imported SVG uses #3a3b40 for the visible
+         * primary body surfaces, including the upper shell.
+         */
+        "path[style*=\"fill:#3a3b40\"] {"
+        "  fill:#%s !important;"
+        "}"
+
+        /*
+         * Secondary grips are separate SPI colors.
+         */
+        "#path9067 {"
+        "  fill:#%s !important;"
+        "}"
+        "#path9077 {"
+        "  fill:#%s !important;"
+        "}"
+
+        /*
+         * The VSCView asset consistently uses #686b6e for physical controls:
+         * A/B/X/Y, D-pad, stick caps, Home, Capture, +/-,
+         * L/R bumpers and ZL/ZR triggers.
+         */
+        "path[style*=\"fill:#686b6e\"] {"
+        "  fill:#%s !important;"
+        "}",
         body,
         left,
         right,
@@ -1563,7 +1581,29 @@ static void worker(GTask *task,gpointer source,gpointer data,GCancellable *cance
     if(r->path2){GError *second_error=NULL;JsonObject *second=jc_client_request_object(r->path2,r->request,&second_error);if(!second){json_object_unref(o);g_task_return_error(task,second_error);return;}JsonObject *merged=merge_pair(o,second);json_object_unref(o);json_object_unref(second);o=merged;}
     g_task_return_pointer(task,o,(GDestroyNotify)json_object_unref);
 }
-static void finish_close(Ui *u){u->closed=TRUE;gtk_window_destroy(u->window);g_application_quit(G_APPLICATION(u->app));ui_unref(u);}
+static void finish_close(Ui *u) {
+    /*
+     * Both the IPC completion callback and the launcher completion callback
+     * can observe the application closing. Only the first one may destroy
+     * the window and release the Ui owner's reference.
+     *
+     * Each async callback still releases its own reference afterwards.
+     */
+    if(u->closed)
+        return;
+
+    u->closed=TRUE;
+
+    if(u->window) {
+        gtk_window_destroy(u->window);
+        u->window=NULL;
+    }
+
+    g_application_quit(G_APPLICATION(u->app));
+
+    /* Release the Ui owner's lifetime reference exactly once. */
+    ui_unref(u);
+}
 static void complete(GObject *source,GAsyncResult *result,gpointer data) {
     (void)source;Ui *u=data;g_autoptr(GError)e=NULL;g_autoptr(JsonObject)o=g_task_propagate_pointer(G_TASK(result),&e);u->busy=FALSE;
     Request *r=g_task_get_task_data(G_TASK(result));const char *method=json_object_get_string_member(r->request,"method");
