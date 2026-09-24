@@ -28,7 +28,7 @@ install_data('poc/pro-controller.xml', install_dir: libexec_dir)
 install_data('poc/run-classic.sh', install_dir: libexec_dir,
   install_mode: 'rwxr-xr-x')
 install_data(polkit_policy, install_dir: '/usr/share/polkit-1/actions')
-gtk = dependency('gtk4', version: '>=4.8', required: get_option('gui'))
+gtk = dependency('gtk4', version: '>=4.10', required: get_option('gui'))
 adw = dependency('libadwaita-1', version: '>=1.2', required: get_option('gui'))
 rsvg = dependency('librsvg-2.0', version: '>=2.46', required: get_option('gui'))
 if gtk.found() and adw.found() and rsvg.found()

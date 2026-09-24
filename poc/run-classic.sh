@@ -2,7 +2,7 @@
 # Run the reversible Classic HID backend.
 set -euo pipefail
 [[ $EUID == 0 ]] || { echo 'Run through pkexec or sudo.' >&2; exit 1; }
-[[ $# -ge 1 && $1 =~ ^hci[0-9]+$ ]] || { echo "Usage: $0 hciN [--desktop] [--profile pro|joycon-pair] [--secondary hciN] [--verbose] [--reconnect MAC]" >&2; exit 2; }
+[[ $# -ge 1 && $1 =~ ^hci[0-9]+$ ]] || { echo "Usage: $0 hciN [--desktop] [--profile pro|joycon-pair] [--secondary hciN] [--verbose] [--body-color RRGGBB] [--button-color RRGGBB] [--left-grip-color RRGGBB] [--right-grip-color RRGGBB] [--reconnect MAC]" >&2; exit 2; }
 script_dir=$(cd -- "$(dirname -- "$0")" && pwd)
 adapter=$1
 shift
@@ -11,6 +11,10 @@ profile=pro
 secondary=
 reconnect=
 verbose=false
+body_color=828282
+button_color=0F0F0F
+left_grip_color=828282
+right_grip_color=828282
 while [[ $# -gt 0 ]]; do
     case $1 in
         --desktop) desktop=true; shift ;;
@@ -22,6 +26,26 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --verbose) verbose=true; shift ;;
+        --body-color)
+            [[ $# -ge 2 && $2 =~ ^[0-9A-Fa-f]{6}$ ]] || { echo 'Invalid body color' >&2; exit 2; }
+            body_color=$2
+            shift 2
+            ;;
+        --button-color)
+            [[ $# -ge 2 && $2 =~ ^[0-9A-Fa-f]{6}$ ]] || { echo 'Invalid button color' >&2; exit 2; }
+            button_color=$2
+            shift 2
+            ;;
+        --left-grip-color)
+            [[ $# -ge 2 && $2 =~ ^[0-9A-Fa-f]{6}$ ]] || { echo 'Invalid left grip color' >&2; exit 2; }
+            left_grip_color=$2
+            shift 2
+            ;;
+        --right-grip-color)
+            [[ $# -ge 2 && $2 =~ ^[0-9A-Fa-f]{6}$ ]] || { echo 'Invalid right grip color' >&2; exit 2; }
+            right_grip_color=$2
+            shift 2
+            ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -34,6 +58,14 @@ fi
 backend_options=()
 $verbose && backend_options+=(--verbose)
 [[ -n $reconnect ]] && backend_options+=(--reconnect "$reconnect")
+if [[ $profile == pro ]]; then
+    backend_options+=(
+        --body-color "$body_color"
+        --button-color "$button_color"
+        --left-grip-color "$left_grip_color"
+        --right-grip-color "$right_grip_color"
+    )
+fi
 installed=false
 if [[ -x "$script_dir/pcble2gamepad-controller-backend" && -f "$script_dir/pro-controller.xml" ]]; then
     app="$script_dir/pcble2gamepad-controller-backend"

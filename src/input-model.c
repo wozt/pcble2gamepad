@@ -13,6 +13,18 @@ void input_profile_defaults(InputProfile *p,gboolean azerty) {
 }
 gboolean input_profile_save(const InputProfile *p,const char *path,GError **error) {
     g_autoptr(GKeyFile) k=g_key_file_new();
+
+    /*
+     * Profiles also contain Controller Studio state (Bluetooth adapters,
+     * pairing association, colors, input enable state, diagnostics, ...).
+     * Preserve those sections when only the bindings are being rewritten.
+     */
+    if(g_file_test(path,G_FILE_TEST_EXISTS))
+        g_key_file_load_from_file(
+            k,
+            path,
+            G_KEY_FILE_NONE,
+            NULL);
     int keys[INPUT_ACTIONS], buttons[INPUT_BUTTONS];
     gboolean invert[4];
     for(int i=0;i<INPUT_ACTIONS;i++)keys[i]=(int)p->keys[i];

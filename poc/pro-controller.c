@@ -129,6 +129,40 @@ static gboolean select_controller(const char *type) {
 static int channels[2]={-1,-1}, listeners[2]={-1,-1};
 static guint watches[2];
 static ProState state;
+
+static uint8_t configured_body_color[3]={0x82,0x82,0x82};
+static uint8_t configured_button_color[3]={0x0f,0x0f,0x0f};
+static uint8_t configured_left_grip_color[3]={0x82,0x82,0x82};
+static uint8_t configured_right_grip_color[3]={0x82,0x82,0x82};
+
+static gboolean parse_rgb_color(const char *text,uint8_t color[3]) {
+    if(!text || strlen(text)!=6)
+        return FALSE;
+
+    unsigned r,g,b;
+    char extra;
+
+    if(sscanf(text,"%2x%2x%2x%c",&r,&g,&b,&extra)!=3)
+        return FALSE;
+
+    color[0]=(uint8_t)r;
+    color[1]=(uint8_t)g;
+    color[2]=(uint8_t)b;
+    return TRUE;
+}
+
+static void apply_controller_colors(void) {
+    if(controller_type!=CONTROLLER_PRO)
+        return;
+
+    controller_set_colors(
+        &state,
+        configured_body_color,
+        configured_button_color,
+        configured_left_grip_color,
+        configured_right_grip_color);
+}
+
 static unsigned sent, received;
 static gboolean initialized;
 static gint64 release_at,next_report_at,slow_exit_until;
@@ -1031,6 +1065,7 @@ static void reset_link(void) {
     uint8_t addr[6];
     memcpy(addr,state.address,6);
     controller_init(&state,controller_type,addr);
+    apply_controller_colors();
 
     log_event("link_closed",reconnect_mode
         ?"Paired Switch disconnected; start Reconnect again to initiate a new connection"
@@ -1926,6 +1961,27 @@ int main(int argc,char **argv) {
             snprintf(allowed_adapter,sizeof(allowed_adapter),"/org/bluez/%s/dev_",argv[++i]);
         } else if(!strcmp(argv[i],"--shared-profile"))shared_profile=TRUE;
         else if(!strcmp(argv[i],"--verbose"))verbose_traffic=TRUE;
+        else if(!strcmp(argv[i],"--body-color") && i+1<argc) {
+            if(!parse_rgb_color(argv[++i],configured_body_color)) {
+                fprintf(stderr,"Invalid body color; expected RRGGBB\n");
+                return 2;
+            }
+        } else if(!strcmp(argv[i],"--button-color") && i+1<argc) {
+            if(!parse_rgb_color(argv[++i],configured_button_color)) {
+                fprintf(stderr,"Invalid button color; expected RRGGBB\n");
+                return 2;
+            }
+        } else if(!strcmp(argv[i],"--left-grip-color") && i+1<argc) {
+            if(!parse_rgb_color(argv[++i],configured_left_grip_color)) {
+                fprintf(stderr,"Invalid left grip color; expected RRGGBB\n");
+                return 2;
+            }
+        } else if(!strcmp(argv[i],"--right-grip-color") && i+1<argc) {
+            if(!parse_rgb_color(argv[++i],configured_right_grip_color)) {
+                fprintf(stderr,"Invalid right grip color; expected RRGGBB\n");
+                return 2;
+            }
+        }
         else if(!strcmp(argv[i],"--reconnect") && i+1<argc &&
                 g_regex_match_simple("^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$",argv[i+1],0,0)) {
             g_strlcpy(reconnect_peer,argv[++i],sizeof(reconnect_peer));
@@ -1935,7 +1991,7 @@ int main(int argc,char **argv) {
     }
     desktop_requested=desktop_mode;
     if(argc<3 || !g_regex_match_simple("^hci[0-9]+$",argv[1],0,0) || (desktop_mode && getuid()!=0)) {
-        fprintf(stderr,"Usage: %s hciN SDP_XML [--desktop UID] [--type pro|joycon-l|joycon-r] [--allow-adapter hciN] [--shared-profile] [--verbose] [--reconnect MAC]\n",argv[0]);return 2;
+        fprintf(stderr,"Usage: %s hciN SDP_XML [--desktop UID] [--type pro|joycon-l|joycon-r] [--allow-adapter hciN] [--shared-profile] [--verbose] [--body-color RRGGBB] [--button-color RRGGBB] [--left-grip-color RRGGBB] [--right-grip-color RRGGBB] [--reconnect MAC]\n",argv[0]);return 2;
     }
     int result=1,dd=-1;uint8_t old_class[3]={0};gboolean have_class=FALSE;
     GVariant *saved[6]={0};const char *keys[]={"Powered","Alias","Pairable","Discoverable","PairableTimeout","DiscoverableTimeout"};
@@ -1979,7 +2035,22 @@ int main(int argc,char **argv) {
     g_strlcpy(pairing_local_address,address,sizeof(pairing_local_address));
 
     uint8_t mac[6];for(int i=0;i<6;i++) mac[i]=local.b[5-i];
-    controller_init(&state,controller_type,mac);log_event("adapter_selected",address);g_variant_unref(v);
+    controller_init(&state,controller_type,mac);
+    apply_controller_colors();
+
+    if(controller_type==CONTROLLER_PRO) {
+        char colors[192];
+        snprintf(
+            colors,sizeof(colors),
+            "body=%02X%02X%02X buttons=%02X%02X%02X left_grip=%02X%02X%02X right_grip=%02X%02X%02X",
+            configured_body_color[0],configured_body_color[1],configured_body_color[2],
+            configured_button_color[0],configured_button_color[1],configured_button_color[2],
+            configured_left_grip_color[0],configured_left_grip_color[1],configured_left_grip_color[2],
+            configured_right_grip_color[0],configured_right_grip_color[1],configured_right_grip_color[2]);
+        log_event("controller_colors",colors);
+    }
+
+    log_event("adapter_selected",address);g_variant_unref(v);
     for(int i=0;i<6;i++) {saved[i]=property(keys[i]);if(!saved[i]) goto cleanup;}
     if(!g_variant_get_boolean(saved[0])) {
         if(!set_property("Powered",g_variant_new_boolean(TRUE)))goto cleanup;

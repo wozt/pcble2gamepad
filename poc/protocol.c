@@ -13,10 +13,48 @@ void controller_init(ProState *s, ControllerType type, const uint8_t address[6])
     memcpy(s->address, address, 6);
     s->type = type;
     s->mode = type == CONTROLLER_PRO ? 0x3f : 0x30;
+
+    if (type == CONTROLLER_PRO) {
+        const uint8_t body[3] = {0x82,0x82,0x82};
+        const uint8_t buttons[3] = {0x0f,0x0f,0x0f};
+
+        memcpy(s->body_color, body, 3);
+        memcpy(s->button_color, buttons, 3);
+        memcpy(s->left_grip_color, body, 3);
+        memcpy(s->right_grip_color, body, 3);
+    } else if (type == CONTROLLER_JOYCON_L) {
+        const uint8_t body[3] = {0x0a,0xb9,0xe6};
+        const uint8_t buttons[3] = {0x00,0x1e,0x1e};
+
+        memcpy(s->body_color, body, 3);
+        memcpy(s->button_color, buttons, 3);
+        memcpy(s->left_grip_color, body, 3);
+        memcpy(s->right_grip_color, body, 3);
+    } else {
+        const uint8_t body[3] = {0xff,0x3c,0x28};
+        const uint8_t buttons[3] = {0x1e,0x0a,0x0a};
+
+        memcpy(s->body_color, body, 3);
+        memcpy(s->button_color, buttons, 3);
+        memcpy(s->left_grip_color, body, 3);
+        memcpy(s->right_grip_color, body, 3);
+    }
+
     s->sticks[0] = 0x86f;
     s->sticks[1] = 0x77c;
     s->sticks[2] = 0x816;
     s->sticks[3] = 0x7dd;
+}
+
+void controller_set_colors(ProState *s,
+                           const uint8_t body[3],
+                           const uint8_t buttons[3],
+                           const uint8_t left_grip[3],
+                           const uint8_t right_grip[3]) {
+    memcpy(s->body_color, body, 3);
+    memcpy(s->button_color, buttons, 3);
+    memcpy(s->left_grip_color, left_grip, 3);
+    memcpy(s->right_grip_color, right_grip, 3);
 }
 
 void pro_init(ProState *s, const uint8_t address[6]) {
@@ -119,17 +157,24 @@ static uint8_t spi(const ProState *s, uint32_t a) {
         0x0f,0x30,0x61,0x96,0x30,0xf3,0xd4,0x14,0x54,
         0x41,0x15,0x54,0xc7,0x79,0x9c,0x33,0x36,0x63
     };
-    static const uint8_t left_body[] = {0x0a,0xb9,0xe6};
-    static const uint8_t right_body[] = {0xff,0x3c,0x28};
-    static const uint8_t left_buttons[] = {0x00,0x1e,0x1e};
-    static const uint8_t right_buttons[] = {0x1e,0x0a,0x0a};
-
     if (s->type == CONTROLLER_PRO) {
         if (a >= 0x603d && a < 0x603d + sizeof(pro_sticks)) return pro_sticks[a - 0x603d];
         if (a >= 0x6080 && a < 0x6080 + sizeof(pro_config)) return pro_config[a - 0x6080];
         if (a >= 0x6098 && a < 0x6098 + sizeof(pro_params)) return pro_params[a - 0x6098];
-        if ((a >= 0x8010 && a < 0x8040) || (a >= 0x6020 && a < 0x6038) ||
-            (a >= 0x6050 && a < 0x6068)) return a >= 0x8010 ? 0xff : 0;
+        if (a >= 0x6050 && a < 0x6053)
+            return s->body_color[a - 0x6050];
+        if (a >= 0x6053 && a < 0x6056)
+            return s->button_color[a - 0x6053];
+        if (a >= 0x6056 && a < 0x6059)
+            return s->left_grip_color[a - 0x6056];
+        if (a >= 0x6059 && a < 0x605c)
+            return s->right_grip_color[a - 0x6059];
+        if (a >= 0x605c && a < 0x6068)
+            return 0;
+        if (a >= 0x8010 && a < 0x8040)
+            return 0xff;
+        if (a >= 0x6020 && a < 0x6038)
+            return 0;
         return 0xff;
     }
 
@@ -145,9 +190,9 @@ static uint8_t spi(const ProState *s, uint32_t a) {
     if (a >= 0x6086 && a < 0x6098) return a == 0x6089 ? 0xae : params[a - 0x6086];
     if (a >= 0x6098 && a < 0x60aa) return a == 0x609b ? 0xae : params[a - 0x6098];
     if (a >= 0x6050 && a < 0x6053)
-        return (s->type == CONTROLLER_JOYCON_L ? left_body : right_body)[a - 0x6050];
+        return s->body_color[a - 0x6050];
     if (a >= 0x6053 && a < 0x6056)
-        return (s->type == CONTROLLER_JOYCON_L ? left_buttons : right_buttons)[a - 0x6053];
+        return s->button_color[a - 0x6053];
     return 0xff;
 }
 

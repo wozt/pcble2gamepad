@@ -15,17 +15,19 @@ typedef struct {
     GtkWidget *drawing,*start,*sync,*stop,*arm,*capture_hint,*secondary_row,*pro_color_panel;
     GtkDropDown *controllers,*adapters,*secondary,*devices,*source,*profiles;
     GtkStringList *adapter_names,*secondary_names,*device_names,*profile_names;
-    GPtrArray *adapter_ids,*adapter_addresses,*secondary_ids,*device_ids;
+    GPtrArray *adapter_ids,*adapter_addresses,*secondary_ids,*secondary_addresses,*device_ids;
     GtkButton *key_buttons[INPUT_ACTIONS],*pad_buttons[INPUT_BUTTONS];
     GtkScale *deadzone,*sensitivity;GtkSwitch *invert[4],*swap,*background,*traffic_logs,*swap_face,*auto_select;
     GtkColorDialogButton *pro_body_color_button,*pro_button_color_button;
     GtkColorDialogButton *pro_left_grip_color_button,*pro_right_grip_color_button;
+    GtkColorDialog *color_dialog;
     GdkRGBA pro_body_color,pro_button_color,pro_left_grip_color,pro_right_grip_color;
     GtkTextBuffer *logs;GHashTable *keys;
     InputProfile profile;InputFrame frame;
     SDL_GameController *pad;int joystick_count,learn_key,learn_pad;
     gboolean previous_pad[SDL_CONTROLLER_BUTTON_MAX+2];
     char *socket,*socket2,*config_dir,*profile_name,*pending,*settings_path,*preferred_gamepad_guid;
+    char *preferred_adapter_address,*preferred_secondary_address;
     char *paired_switch_address,*paired_adapter_address;
     guint timer,ticks,saved_source;
     gboolean saved_arm,saved_auto_select,saved_traffic;
@@ -36,6 +38,10 @@ typedef struct {char *path,*path2;JsonObject *request;} Request;
 static void refresh_bindings(Ui *u);
 static void request(Ui *u,const char *method);
 static void devices_scan(Ui *u);
+static void adapters_scan(GtkButton *b,Ui *u);
+static void controller_selected(GObject *o,GParamSpec *p,Ui *u);
+static void update_pro_svg_colors(Ui *u);
+static void apply_profile_state(Ui *u);
 static gboolean pair_mode(Ui *u){return u->controllers && gtk_drop_down_get_selected(u->controllers)==1;}
 static gboolean paired_adapter_selected(Ui *u) {
     if(!u->adapters || !u->paired_adapter_address || !*u->paired_adapter_address)return FALSE;
@@ -87,10 +93,25 @@ static void ui_unref(Ui *u) {
     if(--u->refs)return;
     if(u->pad)SDL_GameControllerClose(u->pad);
     g_clear_object(&u->launcher);g_hash_table_unref(u->keys);
-    g_ptr_array_unref(u->adapter_ids);g_ptr_array_unref(u->adapter_addresses);g_ptr_array_unref(u->secondary_ids);g_ptr_array_unref(u->device_ids);
-    g_free(u->socket);g_free(u->socket2);g_free(u->config_dir);g_free(u->profile_name);g_free(u->pending);
-    g_free(u->settings_path);g_free(u->preferred_gamepad_guid);
-    g_free(u->paired_switch_address);g_free(u->paired_adapter_address);
+    g_ptr_array_unref(u->adapter_ids);
+    g_ptr_array_unref(u->adapter_addresses);
+    g_ptr_array_unref(u->secondary_ids);
+    g_ptr_array_unref(u->secondary_addresses);
+    g_ptr_array_unref(u->device_ids);
+
+    g_free(u->socket);
+    g_free(u->socket2);
+    g_free(u->config_dir);
+    g_free(u->profile_name);
+    g_free(u->pending);
+    g_free(u->settings_path);
+    g_free(u->preferred_gamepad_guid);
+    g_free(u->preferred_adapter_address);
+    g_free(u->preferred_secondary_address);
+    g_free(u->paired_switch_address);
+    g_free(u->paired_adapter_address);
+
+    g_clear_object(&u->color_dialog);
     g_clear_object(&u->pro_svg);
     g_clear_object(&u->joycon_left_svg);
     g_clear_object(&u->joycon_right_svg);
@@ -121,20 +142,16 @@ static void release_input(Ui *u) {
     if(u->online)request(u,"release");
 }
 static void neutral(Ui *u) {
+    /*
+     * Neutral means "release all current buttons/sticks".
+     *
+     * Do not change the persistent Enable input preference here. Stopping a
+     * Bluetooth session, editing a binding or reconnecting must not silently
+     * turn input off.
+     */
     release_input(u);
-    gboolean loading=u->loading;u->loading=TRUE;
-    gtk_switch_set_active(GTK_SWITCH(u->arm),FALSE);
-    u->loading=loading;
 }
 static char *profile_path(Ui *u,const char *name) {char *file=g_strconcat(name,".ini",NULL);char *path=g_build_filename(u->config_dir,file,NULL);g_free(file);return path;}
-
-static void save_profile_quiet(Ui *u) {
-    if(u->loading || !u->profile_name)return;
-    g_autofree char *path=profile_path(u,u->profile_name);
-    g_autoptr(GError) error=NULL;
-    if(!input_profile_save(&u->profile,path,&error))
-        g_warning("Could not save input profile: %s",error->message);
-}
 
 static char *rgba_hex(const GdkRGBA *color) {
     int r=CLAMP((int)lrint(color->red*255.0),0,255);
@@ -154,46 +171,487 @@ static void load_color_setting(GKeyFile *file,
         g_key_file_get_string(file,"Appearance",key,NULL);
 
     GdkRGBA parsed;
+
     if(value && gdk_rgba_parse(&parsed,value))
         *color=parsed;
 }
 
-static void app_state_load(Ui *u) {
+static void load_string_setting(GKeyFile *file,
+                                const char *group,
+                                const char *key,
+                                char **target) {
+    if(!g_key_file_has_key(file,group,key,NULL))
+        return;
+
+    g_autofree char *value=
+        g_key_file_get_string(file,group,key,NULL);
+
+    if(!value || !*value)
+        return;
+
+    g_free(*target);
+    *target=g_strdup(value);
+}
+
+static void save_optional_string(GKeyFile *file,
+                                 const char *group,
+                                 const char *key,
+                                 const char *value) {
+    if(value && *value)
+        g_key_file_set_string(file,group,key,value);
+    else
+        g_key_file_remove_key(file,group,key,NULL);
+}
+
+static void profile_state_defaults(Ui *u) {
     u->saved_source=0;
     u->saved_arm=FALSE;
     u->saved_auto_select=TRUE;
     u->saved_traffic=FALSE;
-    if(!u->settings_path || !g_file_test(u->settings_path,G_FILE_TEST_EXISTS))return;
+
+    g_clear_pointer(&u->preferred_gamepad_guid,g_free);
+    g_clear_pointer(&u->preferred_adapter_address,g_free);
+    g_clear_pointer(&u->preferred_secondary_address,g_free);
+    g_clear_pointer(&u->paired_switch_address,g_free);
+    g_clear_pointer(&u->paired_adapter_address,g_free);
+
+    gdk_rgba_parse(&u->pro_body_color,"#828282");
+    gdk_rgba_parse(&u->pro_button_color,"#0f0f0f");
+    gdk_rgba_parse(&u->pro_left_grip_color,"#828282");
+    gdk_rgba_parse(&u->pro_right_grip_color,"#828282");
+}
+
+static gboolean profile_state_load_path(Ui *u,const char *path) {
+    if(!path || !g_file_test(path,G_FILE_TEST_EXISTS))
+        return FALSE;
 
     g_autoptr(GKeyFile) k=g_key_file_new();
-    if(!g_key_file_load_from_file(k,u->settings_path,G_KEY_FILE_NONE,NULL))return;
 
-    if(g_key_file_has_key(k,"UI","profile",NULL)) {
-        g_autofree char *profile=g_key_file_get_string(k,"UI","profile",NULL);
-        if(profile && *profile) {
-            g_free(u->profile_name);
-            u->profile_name=g_strdup(profile);
+    if(!g_key_file_load_from_file(
+            k,
+            path,
+            G_KEY_FILE_NONE,
+            NULL))
+        return FALSE;
+
+    gboolean has_state=
+        g_key_file_has_group(k,"Studio") ||
+        g_key_file_has_group(k,"Bluetooth") ||
+        g_key_file_has_group(k,"Appearance") ||
+        g_key_file_has_group(k,"Diagnostics");
+
+    if(g_key_file_has_key(k,"Studio","source",NULL)) {
+        gint source=
+            g_key_file_get_integer(k,"Studio","source",NULL);
+
+        if(source>=0 && source<=1)
+            u->saved_source=(guint)source;
+    }
+
+    if(g_key_file_has_key(k,"Studio","input_enabled",NULL))
+        u->saved_arm=
+            g_key_file_get_boolean(
+                k,
+                "Studio",
+                "input_enabled",
+                NULL);
+
+    if(g_key_file_has_key(k,"Studio","auto_select_gamepad",NULL))
+        u->saved_auto_select=
+            g_key_file_get_boolean(
+                k,
+                "Studio",
+                "auto_select_gamepad",
+                NULL);
+
+    load_string_setting(
+        k,
+        "Studio",
+        "gamepad_guid",
+        &u->preferred_gamepad_guid);
+
+    load_string_setting(
+        k,
+        "Bluetooth",
+        "primary_adapter",
+        &u->preferred_adapter_address);
+
+    load_string_setting(
+        k,
+        "Bluetooth",
+        "secondary_adapter",
+        &u->preferred_secondary_address);
+
+    load_string_setting(
+        k,
+        "Bluetooth",
+        "switch_address",
+        &u->paired_switch_address);
+
+    load_string_setting(
+        k,
+        "Bluetooth",
+        "paired_adapter",
+        &u->paired_adapter_address);
+
+    if(g_key_file_has_key(
+            k,
+            "Diagnostics",
+            "detailed_hid",
+            NULL))
+        u->saved_traffic=
+            g_key_file_get_boolean(
+                k,
+                "Diagnostics",
+                "detailed_hid",
+                NULL);
+
+    load_color_setting(k,"pro_body",&u->pro_body_color);
+    load_color_setting(k,"pro_buttons",&u->pro_button_color);
+    load_color_setting(k,"pro_left_grip",&u->pro_left_grip_color);
+    load_color_setting(k,"pro_right_grip",&u->pro_right_grip_color);
+
+    return has_state;
+}
+
+static gboolean profile_state_save_path(Ui *u,
+                                        const char *path,
+                                        gboolean active) {
+    if(!path)
+        return FALSE;
+
+    g_autoptr(GKeyFile) k=g_key_file_new();
+
+    if(g_file_test(path,G_FILE_TEST_EXISTS))
+        g_key_file_load_from_file(
+            k,
+            path,
+            G_KEY_FILE_NONE,
+            NULL);
+
+    g_key_file_set_boolean(k,"Studio","active",active);
+    g_key_file_set_integer(
+        k,
+        "Studio",
+        "source",
+        (gint)u->saved_source);
+
+    g_key_file_set_boolean(
+        k,
+        "Studio",
+        "input_enabled",
+        u->saved_arm);
+
+    g_key_file_set_boolean(
+        k,
+        "Studio",
+        "auto_select_gamepad",
+        u->saved_auto_select);
+
+    save_optional_string(
+        k,
+        "Studio",
+        "gamepad_guid",
+        u->preferred_gamepad_guid);
+
+    save_optional_string(
+        k,
+        "Bluetooth",
+        "primary_adapter",
+        u->preferred_adapter_address);
+
+    save_optional_string(
+        k,
+        "Bluetooth",
+        "secondary_adapter",
+        u->preferred_secondary_address);
+
+    save_optional_string(
+        k,
+        "Bluetooth",
+        "switch_address",
+        u->paired_switch_address);
+
+    save_optional_string(
+        k,
+        "Bluetooth",
+        "paired_adapter",
+        u->paired_adapter_address);
+
+    g_key_file_set_boolean(
+        k,
+        "Diagnostics",
+        "detailed_hid",
+        u->saved_traffic);
+
+    g_autofree char *body=rgba_hex(&u->pro_body_color);
+    g_autofree char *buttons=rgba_hex(&u->pro_button_color);
+    g_autofree char *left=rgba_hex(&u->pro_left_grip_color);
+    g_autofree char *right=rgba_hex(&u->pro_right_grip_color);
+
+    g_autofree char *body_css=g_strconcat("#",body,NULL);
+    g_autofree char *buttons_css=g_strconcat("#",buttons,NULL);
+    g_autofree char *left_css=g_strconcat("#",left,NULL);
+    g_autofree char *right_css=g_strconcat("#",right,NULL);
+
+    g_key_file_set_string(
+        k,
+        "Appearance",
+        "pro_body",
+        body_css);
+
+    g_key_file_set_string(
+        k,
+        "Appearance",
+        "pro_buttons",
+        buttons_css);
+
+    g_key_file_set_string(
+        k,
+        "Appearance",
+        "pro_left_grip",
+        left_css);
+
+    g_key_file_set_string(
+        k,
+        "Appearance",
+        "pro_right_grip",
+        right_css);
+
+    g_autoptr(GError) error=NULL;
+
+    if(!g_key_file_save_to_file(k,path,&error)) {
+        g_warning(
+            "Could not save profile state: %s",
+            error->message);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static void mark_profile_active(Ui *u,const char *active_name) {
+    GDir *dir=g_dir_open(u->config_dir,0,NULL);
+
+    if(!dir)
+        return;
+
+    const char *filename;
+
+    while((filename=g_dir_read_name(dir))) {
+        if(!g_str_has_suffix(filename,".ini"))
+            continue;
+
+        g_autofree char *name=
+            g_strndup(
+                filename,
+                strlen(filename)-4);
+
+        g_autofree char *path=
+            g_build_filename(
+                u->config_dir,
+                filename,
+                NULL);
+
+        g_autoptr(GKeyFile) k=g_key_file_new();
+
+        if(!g_key_file_load_from_file(
+                k,
+                path,
+                G_KEY_FILE_NONE,
+                NULL))
+            continue;
+
+        g_key_file_set_boolean(
+            k,
+            "Studio",
+            "active",
+            !strcmp(name,active_name));
+
+        g_key_file_save_to_file(k,path,NULL);
+    }
+
+    g_dir_close(dir);
+}
+
+static char *active_profile_name(Ui *u) {
+    GDir *dir=g_dir_open(u->config_dir,0,NULL);
+
+    if(!dir)
+        return g_strdup("Default");
+
+    char *fallback=NULL;
+    gboolean have_default=FALSE;
+    const char *filename;
+
+    while((filename=g_dir_read_name(dir))) {
+        if(!g_str_has_suffix(filename,".ini"))
+            continue;
+
+        g_autofree char *name=
+            g_strndup(
+                filename,
+                strlen(filename)-4);
+
+        if(!fallback)
+            fallback=g_strdup(name);
+
+        if(!strcmp(name,"Default"))
+            have_default=TRUE;
+
+        g_autofree char *path=
+            g_build_filename(
+                u->config_dir,
+                filename,
+                NULL);
+
+        g_autoptr(GKeyFile) k=g_key_file_new();
+
+        if(g_key_file_load_from_file(
+                k,
+                path,
+                G_KEY_FILE_NONE,
+                NULL) &&
+           g_key_file_has_key(
+                k,
+                "Studio",
+                "active",
+                NULL) &&
+           g_key_file_get_boolean(
+                k,
+                "Studio",
+                "active",
+                NULL)) {
+            g_dir_close(dir);
+            g_free(fallback);
+            return g_strdup(name);
         }
     }
-    if(g_key_file_has_key(k,"Input","source",NULL)) {
-        gint source=g_key_file_get_integer(k,"Input","source",NULL);
-        if(source>=0 && source<=1)u->saved_source=(guint)source;
-    }
-    if(g_key_file_has_key(k,"Input","enabled",NULL))
-        u->saved_arm=g_key_file_get_boolean(k,"Input","enabled",NULL);
-    if(g_key_file_has_key(k,"Input","auto_select_gamepad",NULL))
-        u->saved_auto_select=g_key_file_get_boolean(k,"Input","auto_select_gamepad",NULL);
-    if(g_key_file_has_key(k,"Input","gamepad_guid",NULL)) {
-        g_free(u->preferred_gamepad_guid);
-        u->preferred_gamepad_guid=g_key_file_get_string(k,"Input","gamepad_guid",NULL);
-    }
-    if(g_key_file_has_key(k,"Diagnostics","detailed_hid",NULL))
-        u->saved_traffic=g_key_file_get_boolean(k,"Diagnostics","detailed_hid",NULL);
 
-    if(g_key_file_has_key(k,"Console","switch_address",NULL))
-        u->paired_switch_address=g_key_file_get_string(k,"Console","switch_address",NULL);
-    if(g_key_file_has_key(k,"Console","adapter_address",NULL))
-        u->paired_adapter_address=g_key_file_get_string(k,"Console","adapter_address",NULL);
+    g_dir_close(dir);
+
+    if(have_default) {
+        g_free(fallback);
+        return g_strdup("Default");
+    }
+
+    return fallback?fallback:g_strdup("Default");
+}
+
+/*
+ * One-time migration from the old ~/.config/pcble2gamepad/settings.ini.
+ * Once successfully copied into the selected profile, settings.ini is
+ * removed and never written again.
+ */
+static char *legacy_profile_name(Ui *u) {
+    if(!u->settings_path ||
+       !g_file_test(
+            u->settings_path,
+            G_FILE_TEST_EXISTS))
+        return NULL;
+
+    g_autoptr(GKeyFile) k=g_key_file_new();
+
+    if(!g_key_file_load_from_file(
+            k,
+            u->settings_path,
+            G_KEY_FILE_NONE,
+            NULL))
+        return NULL;
+
+    if(!g_key_file_has_key(k,"UI","profile",NULL))
+        return NULL;
+
+    return g_key_file_get_string(
+        k,
+        "UI",
+        "profile",
+        NULL);
+}
+
+static void legacy_state_load(Ui *u) {
+    if(!u->settings_path ||
+       !g_file_test(
+            u->settings_path,
+            G_FILE_TEST_EXISTS))
+        return;
+
+    g_autoptr(GKeyFile) k=g_key_file_new();
+
+    if(!g_key_file_load_from_file(
+            k,
+            u->settings_path,
+            G_KEY_FILE_NONE,
+            NULL))
+        return;
+
+    if(g_key_file_has_key(k,"Input","source",NULL)) {
+        gint source=
+            g_key_file_get_integer(
+                k,
+                "Input",
+                "source",
+                NULL);
+
+        if(source>=0 && source<=1)
+            u->saved_source=(guint)source;
+    }
+
+    if(g_key_file_has_key(k,"Input","enabled",NULL))
+        u->saved_arm=
+            g_key_file_get_boolean(
+                k,
+                "Input",
+                "enabled",
+                NULL);
+
+    if(g_key_file_has_key(
+            k,
+            "Input",
+            "auto_select_gamepad",
+            NULL))
+        u->saved_auto_select=
+            g_key_file_get_boolean(
+                k,
+                "Input",
+                "auto_select_gamepad",
+                NULL);
+
+    load_string_setting(
+        k,
+        "Input",
+        "gamepad_guid",
+        &u->preferred_gamepad_guid);
+
+    load_string_setting(
+        k,
+        "Console",
+        "switch_address",
+        &u->paired_switch_address);
+
+    load_string_setting(
+        k,
+        "Console",
+        "adapter_address",
+        &u->paired_adapter_address);
+
+    if(u->paired_adapter_address) {
+        g_free(u->preferred_adapter_address);
+        u->preferred_adapter_address=
+            g_strdup(u->paired_adapter_address);
+    }
+
+    if(g_key_file_has_key(
+            k,
+            "Diagnostics",
+            "detailed_hid",
+            NULL))
+        u->saved_traffic=
+            g_key_file_get_boolean(
+                k,
+                "Diagnostics",
+                "detailed_hid",
+                NULL);
 
     load_color_setting(k,"pro_body",&u->pro_body_color);
     load_color_setting(k,"pro_buttons",&u->pro_button_color);
@@ -202,58 +660,138 @@ static void app_state_load(Ui *u) {
 }
 
 static void app_state_save(Ui *u) {
-    if(u->loading || !u->settings_path)return;
+    if(u->loading || !u->profile_name)
+        return;
 
-    g_autoptr(GKeyFile) k=g_key_file_new();
-    g_key_file_set_string(k,"UI","profile",u->profile_name?u->profile_name:"Default");
-    g_key_file_set_integer(k,"Input","source",(gint)u->saved_source);
-    g_key_file_set_boolean(k,"Input","enabled",u->saved_arm);
-    g_key_file_set_boolean(k,"Input","auto_select_gamepad",u->saved_auto_select);
-    if(u->preferred_gamepad_guid && *u->preferred_gamepad_guid)
-        g_key_file_set_string(k,"Input","gamepad_guid",u->preferred_gamepad_guid);
-    g_key_file_set_boolean(k,"Diagnostics","detailed_hid",u->saved_traffic);
-    if(u->paired_switch_address && *u->paired_switch_address)
-        g_key_file_set_string(k,"Console","switch_address",u->paired_switch_address);
-    if(u->paired_adapter_address && *u->paired_adapter_address)
-        g_key_file_set_string(k,"Console","adapter_address",u->paired_adapter_address);
+    g_autofree char *path=
+        profile_path(u,u->profile_name);
 
-    g_autofree char *body=rgba_hex(&u->pro_body_color);
-    g_autofree char *buttons=rgba_hex(&u->pro_button_color);
-    g_autofree char *left_grip=rgba_hex(&u->pro_left_grip_color);
-    g_autofree char *right_grip=rgba_hex(&u->pro_right_grip_color);
+    profile_state_save_path(u,path,TRUE);
+}
 
-    g_autofree char *body_css=g_strconcat("#",body,NULL);
-    g_autofree char *buttons_css=g_strconcat("#",buttons,NULL);
-    g_autofree char *left_css=g_strconcat("#",left_grip,NULL);
-    g_autofree char *right_css=g_strconcat("#",right_grip,NULL);
+static gboolean save_profile_quiet(Ui *u) {
+    if(u->loading || !u->profile_name)
+        return TRUE;
 
-    g_key_file_set_string(k,"Appearance","pro_body",body_css);
-    g_key_file_set_string(k,"Appearance","pro_buttons",buttons_css);
-    g_key_file_set_string(k,"Appearance","pro_left_grip",left_css);
-    g_key_file_set_string(k,"Appearance","pro_right_grip",right_css);
+    g_autofree char *path=
+        profile_path(u,u->profile_name);
 
     g_autoptr(GError) error=NULL;
-    if(!g_key_file_save_to_file(k,u->settings_path,&error))
-        g_warning("Could not save application settings: %s",error->message);
+
+    if(!input_profile_save(
+            &u->profile,
+            path,
+            &error)) {
+        g_warning(
+            "Could not save input profile: %s",
+            error->message);
+        return FALSE;
+    }
+
+    return profile_state_save_path(
+        u,
+        path,
+        TRUE);
 }
+
 static void profile_scan(Ui *u) {
-    u->loading=TRUE;gtk_string_list_splice(u->profile_names,0,g_list_model_get_n_items(G_LIST_MODEL(u->profile_names)),NULL);
-    GDir *d=g_dir_open(u->config_dir,0,NULL);const char *name;guint selected=0,i=0;
-    if(d){while((name=g_dir_read_name(d)))if(g_str_has_suffix(name,".ini")) {
-        char *s=g_strndup(name,strlen(name)-4);if(!strcmp(s,u->profile_name))selected=i;gtk_string_list_append(u->profile_names,s);g_free(s);i++;
-    }g_dir_close(d);}
-    gtk_drop_down_set_selected(u->profiles,selected);u->loading=FALSE;
+    gboolean previous_loading=u->loading;
+    u->loading=TRUE;
+
+    gtk_string_list_splice(
+        u->profile_names,
+        0,
+        g_list_model_get_n_items(
+            G_LIST_MODEL(u->profile_names)),
+        NULL);
+
+    GDir *d=g_dir_open(u->config_dir,0,NULL);
+    const char *name;
+    guint selected=0;
+    guint i=0;
+
+    if(d) {
+        while((name=g_dir_read_name(d))) {
+            if(!g_str_has_suffix(name,".ini"))
+                continue;
+
+            char *profile=
+                g_strndup(name,strlen(name)-4);
+
+            if(!strcmp(profile,u->profile_name))
+                selected=i;
+
+            gtk_string_list_append(
+                u->profile_names,
+                profile);
+
+            g_free(profile);
+            i++;
+        }
+
+        g_dir_close(d);
+    }
+
+    gtk_drop_down_set_selected(
+        u->profiles,
+        selected);
+
+    u->loading=previous_loading;
 }
+
 static void profile_saved(GtkButton *b,Ui *u) {
-    (void)b;g_autofree char *path=profile_path(u,u->profile_name);g_autoptr(GError) e=NULL;
-    if(input_profile_save(&u->profile,path,&e)){app_state_save(u);toast(u,"Profile saved");}else toast(u,e->message);
+    (void)b;
+
+    if(save_profile_quiet(u)) {
+        mark_profile_active(u,u->profile_name);
+        toast(u,"Profile saved");
+    } else {
+        toast(u,"Could not save profile");
+    }
 }
+
 static void profile_selected(GObject *o,GParamSpec *p,Ui *u) {
-    (void)o;(void)p;if(u->loading)return;
-    guint i=gtk_drop_down_get_selected(u->profiles);const char *name=gtk_string_list_get_string(u->profile_names,i);if(!name)return;
-    g_autofree char *path=profile_path(u,name);g_autoptr(GError) e=NULL;
-    if(!input_profile_load(&u->profile,path,&e)){toast(u,e->message);return;}
-    g_free(u->profile_name);u->profile_name=g_strdup(name);release_input(u);refresh_bindings(u);app_state_save(u);
+    (void)o;
+    (void)p;
+
+    if(u->loading)
+        return;
+
+    guint i=gtk_drop_down_get_selected(u->profiles);
+    const char *name=
+        gtk_string_list_get_string(
+            u->profile_names,
+            i);
+
+    if(!name)
+        return;
+
+    g_autofree char *path=
+        profile_path(u,name);
+
+    g_autoptr(GError) error=NULL;
+
+    release_input(u);
+
+    if(!input_profile_load(
+            &u->profile,
+            path,
+            &error)) {
+        toast(u,error->message);
+        return;
+    }
+
+    g_free(u->profile_name);
+    u->profile_name=g_strdup(name);
+
+    profile_state_defaults(u);
+    profile_state_load_path(u,path);
+
+    mark_profile_active(
+        u,
+        u->profile_name);
+
+    apply_profile_state(u);
 }
 static void new_profile_response(AdwAlertDialog *dialog,const char *response,Ui *u) {
     if(strcmp(response,"save"))return;
@@ -289,12 +827,110 @@ static void refresh_bindings(Ui *u) {
         int b=u->profile.buttons[i];const char *name=b<0?"Unbound":b==SDL_CONTROLLER_BUTTON_MAX?"Left trigger":b==SDL_CONTROLLER_BUTTON_MAX+1?"Right trigger":SDL_GameControllerGetStringForButton((SDL_GameControllerButton)b);
         gtk_button_set_label(u->pad_buttons[i],name?name:"Unbound");
     }
-    u->loading=TRUE;gtk_range_set_value(GTK_RANGE(u->deadzone),u->profile.deadzone*100);gtk_range_set_value(GTK_RANGE(u->sensitivity),u->profile.sensitivity*100);
-    for(int i=0;i<4;i++)gtk_switch_set_active(u->invert[i],u->profile.invert[i]);
-    gtk_switch_set_active(u->swap,u->profile.swap_sticks);gtk_switch_set_active(u->background,u->profile.background);
-    if(u->swap_face)gtk_switch_set_active(u->swap_face,u->profile.swap_face_buttons);
-    u->loading=FALSE;
-    if(u->controllers)gtk_drop_down_set_selected(u->controllers,(guint)u->profile.emulated_controller);
+    gboolean previous_loading=u->loading;
+    u->loading=TRUE;
+
+    gtk_range_set_value(
+        GTK_RANGE(u->deadzone),
+        u->profile.deadzone*100);
+
+    gtk_range_set_value(
+        GTK_RANGE(u->sensitivity),
+        u->profile.sensitivity*100);
+
+    for(int i=0;i<4;i++)
+        gtk_switch_set_active(
+            u->invert[i],
+            u->profile.invert[i]);
+
+    gtk_switch_set_active(
+        u->swap,
+        u->profile.swap_sticks);
+
+    gtk_switch_set_active(
+        u->background,
+        u->profile.background);
+
+    if(u->swap_face)
+        gtk_switch_set_active(
+            u->swap_face,
+            u->profile.swap_face_buttons);
+
+    if(u->controllers)
+        gtk_drop_down_set_selected(
+            u->controllers,
+            (guint)u->profile.emulated_controller);
+
+    u->loading=previous_loading;
+}
+
+static void apply_profile_state(Ui *u) {
+    gboolean previous_loading=u->loading;
+    u->loading=TRUE;
+
+    if(u->source)
+        gtk_drop_down_set_selected(
+            u->source,
+            u->saved_source);
+
+    if(u->arm)
+        gtk_switch_set_active(
+            GTK_SWITCH(u->arm),
+            u->saved_arm);
+
+    if(u->auto_select)
+        gtk_switch_set_active(
+            u->auto_select,
+            u->saved_auto_select);
+
+    if(u->traffic_logs)
+        gtk_switch_set_active(
+            u->traffic_logs,
+            u->saved_traffic);
+
+    if(u->pro_body_color_button)
+        gtk_color_dialog_button_set_rgba(
+            u->pro_body_color_button,
+            &u->pro_body_color);
+
+    if(u->pro_button_color_button)
+        gtk_color_dialog_button_set_rgba(
+            u->pro_button_color_button,
+            &u->pro_button_color);
+
+    if(u->pro_left_grip_color_button)
+        gtk_color_dialog_button_set_rgba(
+            u->pro_left_grip_color_button,
+            &u->pro_left_grip_color);
+
+    if(u->pro_right_grip_color_button)
+        gtk_color_dialog_button_set_rgba(
+            u->pro_right_grip_color_button,
+            &u->pro_right_grip_color);
+
+    refresh_bindings(u);
+
+    if(u->source_hint)
+        gtk_label_set_text(
+            u->source_hint,
+            u->saved_source==0
+                ?"Keyboard input works while this window is focused. Escape pauses input."
+                :"Standard SDL gamepad mapping. Customize buttons and stick settings below.");
+
+    update_paired_console(u);
+
+    u->loading=previous_loading;
+
+    update_pro_svg_colors(u);
+
+    devices_scan(u);
+    adapters_scan(NULL,u);
+    controller_selected(NULL,NULL,u);
+
+    if(u->saved_arm && u->drawing)
+        gtk_widget_grab_focus(u->drawing);
+
+    update_controls(u);
 }
 static void bind_key(GtkButton *b,Ui *u) {
     neutral(u);u->learn_pad=-1;u->learn_key=GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b),"index"));
@@ -311,7 +947,18 @@ static gboolean key_pressed(GtkEventControllerKey *c,guint key,guint code,GdkMod
         if(key!=GDK_KEY_Escape){guint value=key==GDK_KEY_BackSpace?0:key;for(int i=0;i<INPUT_ACTIONS;i++)if(value && u->profile.keys[i]==value)u->profile.keys[i]=0;u->profile.keys[u->learn_key]=value;}
         u->learn_key=-1;refresh_bindings(u);gtk_label_set_text(GTK_LABEL(u->capture_hint),"Click a binding to change it. Save your profile when finished.");return TRUE;
     }
-    if(key==GDK_KEY_Escape){u->learn_pad=-1;neutral(u);refresh_bindings(u);return TRUE;}
+    if(key==GDK_KEY_Escape) {
+        u->learn_pad=-1;
+        release_input(u);
+
+        if(gtk_switch_get_active(GTK_SWITCH(u->arm)))
+            gtk_switch_set_active(
+                GTK_SWITCH(u->arm),
+                FALSE);
+
+        refresh_bindings(u);
+        return TRUE;
+    }
     if(!gtk_switch_get_active(GTK_SWITCH(u->arm)) || gtk_drop_down_get_selected(u->source)!=0)return FALSE;
     for(int i=0;i<INPUT_ACTIONS;i++)if(u->profile.keys[i]==key){g_hash_table_add(u->keys,GUINT_TO_POINTER(key));return TRUE;}
     return FALSE;
@@ -456,6 +1103,52 @@ static RsvgHandle *load_controller_svg(const char *name) {
     return handle;
 }
 
+static void update_pro_svg_colors(Ui *u) {
+    if(!u->pro_svg)
+        return;
+
+    g_autofree char *body=rgba_hex(&u->pro_body_color);
+    g_autofree char *buttons=rgba_hex(&u->pro_button_color);
+    g_autofree char *left=rgba_hex(&u->pro_left_grip_color);
+    g_autofree char *right=rgba_hex(&u->pro_right_grip_color);
+
+    /*
+     * The imported VSCView SVG already exposes stable element IDs.
+     *
+     * Keep outlines/text untouched and recolor only the physical surfaces
+     * represented by the Switch SPI color fields.
+     */
+    g_autofree char *css=g_strdup_printf(
+        "#path9073,#path1675-3,#path1685-5 { fill:#%s !important; }"
+        "#path9067 { fill:#%s !important; }"
+        "#path9077 { fill:#%s !important; }"
+        "#path1458,#path8519,#path5183,#path2365,"
+        "#path1717-9,#path1701-7,"
+        "#path1737-4,#path1733-7,#path1725-4,#path1729-5,"
+        "#path4084,#path1759-9,#path1767-5,#path1773-8,"
+        "#path1779-7 { fill:#%s !important; }",
+        body,
+        left,
+        right,
+        buttons);
+
+    g_autoptr(GError) error=NULL;
+
+    if(!rsvg_handle_set_stylesheet(
+            u->pro_svg,
+            (const guint8 *)css,
+            strlen(css),
+            &error)) {
+        g_warning(
+            "Could not update Pro Controller SVG colors: %s",
+            error?error->message:"unknown error");
+        return;
+    }
+
+    if(u->drawing)
+        gtk_widget_queue_draw(u->drawing);
+}
+
 static void render_controller_svg(RsvgHandle *handle,
                                   cairo_t *cr,
                                   double x,
@@ -569,26 +1262,281 @@ static void draw(GtkDrawingArea *area,
     cairo_restore(cr);
 }
 
-static void adapters_scan(GtkButton *b,Ui *u) {
-    (void)b;g_autoptr(GError)e=NULL;g_autoptr(GDBusConnection)bus=g_bus_get_sync(G_BUS_TYPE_SYSTEM,NULL,&e);if(!bus){toast(u,e->message);return;}
-    g_autoptr(GVariant)reply=g_dbus_connection_call_sync(bus,"org.bluez","/","org.freedesktop.DBus.ObjectManager","GetManagedObjects",NULL,G_VARIANT_TYPE("(a{oa{sa{sv}}})"),0,1500,NULL,&e);
-    if(!reply){toast(u,e->message);return;}
-    gtk_string_list_splice(u->adapter_names,0,g_list_model_get_n_items(G_LIST_MODEL(u->adapter_names)),NULL);g_ptr_array_set_size(u->adapter_ids,0);g_ptr_array_set_size(u->adapter_addresses,0);
-    gtk_string_list_splice(u->secondary_names,0,g_list_model_get_n_items(G_LIST_MODEL(u->secondary_names)),NULL);g_ptr_array_set_size(u->secondary_ids,0);
-    GVariantIter *objects;g_variant_get(reply,"(a{oa{sa{sv}}})",&objects);char *path;GVariant *interfaces;
-    guint selected=0;gboolean paired_selected=FALSE;
-    while(g_variant_iter_next(objects,"{o@a{sa{sv}}}",&path,&interfaces)) {
-        GVariant *props=g_variant_lookup_value(interfaces,"org.bluez.Adapter1",G_VARIANT_TYPE_VARDICT);
-        if(props){const char *address="",*alias="Bluetooth adapter";g_variant_lookup(props,"Address","&s",&address);g_variant_lookup(props,"Alias","&s",&alias);
-            char *id=g_path_get_basename(path),*name=g_strdup_printf("%s · %s · %s",id,address,alias);gtk_string_list_append(u->adapter_names,name);gtk_string_list_append(u->secondary_names,name);g_ptr_array_add(u->adapter_ids,id);g_ptr_array_add(u->adapter_addresses,g_strdup(address));g_ptr_array_add(u->secondary_ids,g_strdup(id));g_free(name);
-            if(u->paired_adapter_address && !g_ascii_strcasecmp(address,u->paired_adapter_address)) {
-                selected=u->adapter_ids->len-1;paired_selected=TRUE;
-            } else if(!paired_selected && !strcmp(address,"E0:AD:47:40:70:D9"))
-                selected=u->adapter_ids->len-1;
-            g_variant_unref(props);
-        }g_free(path);g_variant_unref(interfaces);
-    }g_variant_iter_free(objects);gtk_drop_down_set_selected(u->adapters,selected);gtk_drop_down_set_selected(u->secondary,selected?0:1);update_controls(u);
+static guint adapter_index_for_address(Ui *u,
+                                       const char *address,
+                                       gboolean *found) {
+    if(found)
+        *found=FALSE;
+
+    if(!address || !*address)
+        return 0;
+
+    for(guint i=0;i<u->adapter_addresses->len;i++) {
+        const char *candidate=
+            g_ptr_array_index(
+                u->adapter_addresses,
+                i);
+
+        if(!g_ascii_strcasecmp(candidate,address)) {
+            if(found)
+                *found=TRUE;
+            return i;
+        }
+    }
+
+    return 0;
 }
+
+static void adapter_selection_changed(GObject *object,
+                                      GParamSpec *pspec,
+                                      Ui *u) {
+    (void)pspec;
+
+    if(u->loading)
+        return;
+
+    if(object==G_OBJECT(u->adapters)) {
+        guint i=
+            gtk_drop_down_get_selected(
+                u->adapters);
+
+        if(i<u->adapter_addresses->len) {
+            const char *address=
+                g_ptr_array_index(
+                    u->adapter_addresses,
+                    i);
+
+            if(!u->preferred_adapter_address ||
+               g_ascii_strcasecmp(
+                    u->preferred_adapter_address,
+                    address)) {
+                g_free(u->preferred_adapter_address);
+                u->preferred_adapter_address=
+                    g_strdup(address);
+            }
+        }
+    } else if(object==G_OBJECT(u->secondary)) {
+        guint i=
+            gtk_drop_down_get_selected(
+                u->secondary);
+
+        if(i<u->secondary_addresses->len) {
+            const char *address=
+                g_ptr_array_index(
+                    u->secondary_addresses,
+                    i);
+
+            if(!u->preferred_secondary_address ||
+               g_ascii_strcasecmp(
+                    u->preferred_secondary_address,
+                    address)) {
+                g_free(u->preferred_secondary_address);
+                u->preferred_secondary_address=
+                    g_strdup(address);
+            }
+        }
+    }
+
+    app_state_save(u);
+    update_controls(u);
+}
+
+static void adapters_scan(GtkButton *b,Ui *u) {
+    (void)b;
+
+    g_autoptr(GError) error=NULL;
+
+    g_autoptr(GDBusConnection) bus=
+        g_bus_get_sync(
+            G_BUS_TYPE_SYSTEM,
+            NULL,
+            &error);
+
+    if(!bus) {
+        toast(u,error->message);
+        return;
+    }
+
+    g_autoptr(GVariant) reply=
+        g_dbus_connection_call_sync(
+            bus,
+            "org.bluez",
+            "/",
+            "org.freedesktop.DBus.ObjectManager",
+            "GetManagedObjects",
+            NULL,
+            G_VARIANT_TYPE("(a{oa{sa{sv}}})"),
+            0,
+            1500,
+            NULL,
+            &error);
+
+    if(!reply) {
+        toast(u,error->message);
+        return;
+    }
+
+    gboolean previous_loading=u->loading;
+    u->loading=TRUE;
+
+    gtk_string_list_splice(
+        u->adapter_names,
+        0,
+        g_list_model_get_n_items(
+            G_LIST_MODEL(u->adapter_names)),
+        NULL);
+
+    gtk_string_list_splice(
+        u->secondary_names,
+        0,
+        g_list_model_get_n_items(
+            G_LIST_MODEL(u->secondary_names)),
+        NULL);
+
+    g_ptr_array_set_size(u->adapter_ids,0);
+    g_ptr_array_set_size(u->adapter_addresses,0);
+    g_ptr_array_set_size(u->secondary_ids,0);
+    g_ptr_array_set_size(u->secondary_addresses,0);
+
+    GVariantIter *objects;
+    g_variant_get(
+        reply,
+        "(a{oa{sa{sv}}})",
+        &objects);
+
+    char *path;
+    GVariant *interfaces;
+
+    while(g_variant_iter_next(
+            objects,
+            "{o@a{sa{sv}}}",
+            &path,
+            &interfaces)) {
+        GVariant *props=
+            g_variant_lookup_value(
+                interfaces,
+                "org.bluez.Adapter1",
+                G_VARIANT_TYPE_VARDICT);
+
+        if(props) {
+            const char *address="";
+
+            g_variant_lookup(
+                props,
+                "Address",
+                "&s",
+                &address);
+
+            char *id=g_path_get_basename(path);
+
+            /*
+             * Deliberately omit Adapter1.Alias here. During emulation the
+             * backend changes it to Pro Controller / Joy-Con (L/R), so it is
+             * not a stable identifier for a physical dongle.
+             */
+            char *name=
+                g_strdup_printf(
+                    "%s · %s",
+                    id,
+                    address);
+
+            gtk_string_list_append(
+                u->adapter_names,
+                name);
+
+            gtk_string_list_append(
+                u->secondary_names,
+                name);
+
+            g_ptr_array_add(
+                u->adapter_ids,
+                id);
+
+            g_ptr_array_add(
+                u->adapter_addresses,
+                g_strdup(address));
+
+            g_ptr_array_add(
+                u->secondary_ids,
+                g_strdup(id));
+
+            g_ptr_array_add(
+                u->secondary_addresses,
+                g_strdup(address));
+
+            g_free(name);
+            g_variant_unref(props);
+        }
+
+        g_free(path);
+        g_variant_unref(interfaces);
+    }
+
+    g_variant_iter_free(objects);
+
+    guint primary=0;
+    gboolean found=FALSE;
+
+    if(u->preferred_adapter_address)
+        primary=
+            adapter_index_for_address(
+                u,
+                u->preferred_adapter_address,
+                &found);
+
+    if(!found && u->paired_adapter_address)
+        primary=
+            adapter_index_for_address(
+                u,
+                u->paired_adapter_address,
+                &found);
+
+    if(!found)
+        primary=
+            adapter_index_for_address(
+                u,
+                "E0:AD:47:40:70:D9",
+                &found);
+
+    if(primary>=u->adapter_ids->len)
+        primary=0;
+
+    guint secondary=0;
+    gboolean secondary_found=FALSE;
+
+    if(u->preferred_secondary_address)
+        secondary=
+            adapter_index_for_address(
+                u,
+                u->preferred_secondary_address,
+                &secondary_found);
+
+    if(!secondary_found ||
+       secondary==primary) {
+        secondary=0;
+
+        for(guint i=0;i<u->secondary_ids->len;i++) {
+            if(i!=primary) {
+                secondary=i;
+                break;
+            }
+        }
+    }
+
+    gtk_drop_down_set_selected(
+        u->adapters,
+        primary);
+
+    if(u->secondary_ids->len)
+        gtk_drop_down_set_selected(
+            u->secondary,
+            secondary);
+
+    u->loading=previous_loading;
+
+    update_controls(u);
+}
+
 static void request_free(gpointer data){Request *r=data;g_free(r->path);g_free(r->path2);json_object_unref(r->request);g_free(r);}
 static JsonObject *merge_pair(JsonObject *left,JsonObject *right) {
     if(!json_object_get_boolean_member_with_default(left,"ok",FALSE))return json_object_ref(left);
@@ -636,13 +1584,33 @@ static void complete(GObject *source,GAsyncResult *result,gpointer data) {
             if(adapter_index<u->adapter_addresses->len) {
                 const char *adapter_address=g_ptr_array_index(u->adapter_addresses,adapter_index);
                 gboolean changed=
-                    !u->paired_switch_address || g_ascii_strcasecmp(u->paired_switch_address,peer_address) ||
-                    !u->paired_adapter_address || g_ascii_strcasecmp(u->paired_adapter_address,adapter_address);
+                    !u->paired_switch_address ||
+                    g_ascii_strcasecmp(
+                        u->paired_switch_address,
+                        peer_address) ||
+                    !u->paired_adapter_address ||
+                    g_ascii_strcasecmp(
+                        u->paired_adapter_address,
+                        adapter_address) ||
+                    !u->preferred_adapter_address ||
+                    g_ascii_strcasecmp(
+                        u->preferred_adapter_address,
+                        adapter_address);
+
                 if(changed) {
                     g_free(u->paired_switch_address);
                     g_free(u->paired_adapter_address);
-                    u->paired_switch_address=g_strdup(peer_address);
-                    u->paired_adapter_address=g_strdup(adapter_address);
+                    g_free(u->preferred_adapter_address);
+
+                    u->paired_switch_address=
+                        g_strdup(peer_address);
+
+                    u->paired_adapter_address=
+                        g_strdup(adapter_address);
+
+                    u->preferred_adapter_address=
+                        g_strdup(adapter_address);
+
                     app_state_save(u);
                     update_paired_console(u);
                 }
@@ -730,7 +1698,7 @@ static void controller_selected(GObject *o,GParamSpec *p,Ui *u) {
     (void)p;if(u->loading || u->online || u->launcher)return;
     if(o)release_input(u);
     u->profile.emulated_controller=pair_mode(u)?1:0;
-    save_profile_quiet(u);app_state_save(u);
+    save_profile_quiet(u);
     g_free(u->socket);g_free(u->socket2);u->socket2=NULL;
     if(pair_mode(u)) {
         const char *mock_dir=g_getenv("PCBLE2GAMEPAD_JOYCON_SOCKET_DIR");g_autofree char *runtime=mock_dir?g_strdup(mock_dir):g_strdup_printf("/run/pcble2gamepad/%u",(unsigned)getuid());
@@ -763,13 +1731,17 @@ static void traffic_logs_changed(GObject *o,GParamSpec *p,Ui *u) {
     if(u->online)request(u,"logging");
 }
 
-static void pro_colors_changed(GObject *object,GParamSpec *pspec,Ui *u) {
+static void pro_colors_changed(GObject *object,
+                               GParamSpec *pspec,
+                               Ui *u) {
     (void)pspec;
 
-    if(u->loading)
+    if(u->loading || u->closing || u->closed)
         return;
 
-    GtkColorDialogButton *button=GTK_COLOR_DIALOG_BUTTON(object);
+    GtkColorDialogButton *button=
+        GTK_COLOR_DIALOG_BUTTON(object);
+
     const GdkRGBA *color=
         gtk_color_dialog_button_get_rgba(button);
 
@@ -787,32 +1759,23 @@ static void pro_colors_changed(GObject *object,GParamSpec *pspec,Ui *u) {
     else
         return;
 
+    update_pro_svg_colors(u);
     app_state_save(u);
 }
 
 static GtkColorDialogButton *make_color_button(const char *title,
                                                 const GdkRGBA *color,
                                                 Ui *u) {
-    GtkColorDialog *dialog=gtk_color_dialog_new();
-
-    gtk_color_dialog_set_title(dialog,title);
-    gtk_color_dialog_set_with_alpha(dialog,FALSE);
+    (void)title;
 
     GtkColorDialogButton *button=
         GTK_COLOR_DIALOG_BUTTON(
-            gtk_color_dialog_button_new(dialog));
+            gtk_color_dialog_button_new(
+                u->color_dialog));
 
-    gtk_color_dialog_button_set_rgba(button,color);
-
-    /*
-     * GtkColorDialogButton does not take ownership of the dialog.
-     * Keep it alive for exactly as long as the button.
-     */
-    g_object_set_data_full(
-        G_OBJECT(button),
-        "pcble2gamepad-color-dialog",
-        dialog,
-        g_object_unref);
+    gtk_color_dialog_button_set_rgba(
+        button,
+        color);
 
     g_signal_connect(
         button,
@@ -1015,31 +1978,137 @@ static GtkWidget *button(const char *text,GCallback callback,Ui *u){GtkWidget *b
 static void activate(GtkApplication *app,gpointer unused) {
     (void)unused;GtkWindow *existing=gtk_application_get_active_window(app);if(existing){gtk_window_present(existing);return;}
     Ui *u=g_new0(Ui,1);u->refs=1;u->app=app;u->learn_key=u->learn_pad=-1;u->joystick_count=-1;
-    u->keys=g_hash_table_new(g_direct_hash,g_direct_equal);u->adapter_ids=g_ptr_array_new_with_free_func(g_free);u->adapter_addresses=g_ptr_array_new_with_free_func(g_free);u->secondary_ids=g_ptr_array_new_with_free_func(g_free);u->device_ids=g_ptr_array_new();
+    u->keys=g_hash_table_new(g_direct_hash,g_direct_equal);
+    u->adapter_ids=g_ptr_array_new_with_free_func(g_free);
+    u->adapter_addresses=g_ptr_array_new_with_free_func(g_free);
+    u->secondary_ids=g_ptr_array_new_with_free_func(g_free);
+    u->secondary_addresses=g_ptr_array_new_with_free_func(g_free);
+    u->device_ids=g_ptr_array_new();
     g_autofree char *config_root=g_build_filename(g_get_user_config_dir(),"pcble2gamepad",NULL);
     g_mkdir_with_parents(config_root,0700);
     u->config_dir=g_build_filename(config_root,"profiles",NULL);g_mkdir_with_parents(u->config_dir,0700);
-    u->settings_path=g_build_filename(config_root,"settings.ini",NULL);
-    u->profile_name=g_strdup("Default");
+    /*
+     * settings.ini is now migration-only. All persistent application state is
+     * stored in the active profile.
+     */
+    u->settings_path=
+        g_build_filename(
+            config_root,
+            "settings.ini",
+            NULL);
 
-    gdk_rgba_parse(&u->pro_body_color,"#828282");
-    gdk_rgba_parse(&u->pro_button_color,"#0f0f0f");
-    gdk_rgba_parse(&u->pro_left_grip_color,"#828282");
-    gdk_rgba_parse(&u->pro_right_grip_color,"#828282");
+    g_autofree char *legacy_profile=
+        legacy_profile_name(u);
 
-    app_state_load(u);
+    g_autofree char *active_profile=
+        active_profile_name(u);
 
-    u->pro_svg=load_controller_svg("pro-controller.svg");
-    u->joycon_left_svg=load_controller_svg("joycon-left.svg");
-    u->joycon_right_svg=load_controller_svg("joycon-right.svg");
+    const char *initial_profile=
+        active_profile?active_profile:"Default";
 
-    input_profile_defaults(&u->profile,FALSE);
-    g_autofree char *path=profile_path(u,u->profile_name);
-    if(!g_file_test(path,G_FILE_TEST_EXISTS) && strcmp(u->profile_name,"Default")) {
-        g_free(u->profile_name);u->profile_name=g_strdup("Default");
-        g_clear_pointer(&path,g_free);path=profile_path(u,u->profile_name);
+    if(legacy_profile && *legacy_profile) {
+        g_autofree char *legacy_path=
+            profile_path(u,legacy_profile);
+
+        if(g_file_test(
+                legacy_path,
+                G_FILE_TEST_EXISTS))
+            initial_profile=legacy_profile;
     }
-    if(g_file_test(path,G_FILE_TEST_EXISTS))input_profile_load(&u->profile,path,NULL);else input_profile_save(&u->profile,path,NULL);
+
+    u->profile_name=
+        g_strdup(initial_profile);
+
+    profile_state_defaults(u);
+    input_profile_defaults(&u->profile,FALSE);
+
+    g_autofree char *path=
+        profile_path(
+            u,
+            u->profile_name);
+
+    if(!g_file_test(
+            path,
+            G_FILE_TEST_EXISTS) &&
+       strcmp(
+            u->profile_name,
+            "Default")) {
+        g_free(u->profile_name);
+        u->profile_name=g_strdup("Default");
+
+        g_clear_pointer(&path,g_free);
+        path=profile_path(
+            u,
+            u->profile_name);
+    }
+
+    if(g_file_test(path,G_FILE_TEST_EXISTS))
+        input_profile_load(
+            &u->profile,
+            path,
+            NULL);
+    else
+        input_profile_save(
+            &u->profile,
+            path,
+            NULL);
+
+    gboolean had_profile_state=
+        profile_state_load_path(
+            u,
+            path);
+
+    if(!had_profile_state &&
+       g_file_test(
+            u->settings_path,
+            G_FILE_TEST_EXISTS))
+        legacy_state_load(u);
+
+    /*
+     * Write the migrated/current state into the profile before deleting the
+     * legacy file.
+     */
+    if(profile_state_save_path(
+            u,
+            path,
+            TRUE)) {
+        mark_profile_active(
+            u,
+            u->profile_name);
+
+        if(g_file_test(
+                u->settings_path,
+                G_FILE_TEST_EXISTS))
+            g_remove(u->settings_path);
+    }
+
+    u->pro_svg=
+        load_controller_svg(
+            "pro-controller.svg");
+
+    u->joycon_left_svg=
+        load_controller_svg(
+            "joycon-left.svg");
+
+    u->joycon_right_svg=
+        load_controller_svg(
+            "joycon-right.svg");
+
+    update_pro_svg_colors(u);
+
+    /*
+     * One shared dialog object avoids per-button lifetime races while the
+     * application window is being destroyed.
+     */
+    u->color_dialog=gtk_color_dialog_new();
+
+    gtk_color_dialog_set_title(
+        u->color_dialog,
+        "Controller color");
+
+    gtk_color_dialog_set_with_alpha(
+        u->color_dialog,
+        FALSE);
     const char *override=g_getenv("PCBLE2GAMEPAD_PRO_SOCKET");u->socket=override?g_strdup(override):g_strdup_printf("/run/pcble2gamepad/%u/pro.sock",(unsigned)getuid());
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,"1");SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER);
     u->window=GTK_WINDOW(adw_application_window_new(app));gtk_window_set_title(u->window,"pcble2gamepad — Controller Studio");gtk_window_set_default_size(u->window,1120,840);
@@ -1202,7 +2271,12 @@ static void activate(GtkApplication *app,gpointer unused) {
     gtk_box_append(GTK_BOX(box),button("Copy diagnostics",G_CALLBACK(copy_logs),u));GtkWidget *view=gtk_text_view_new();gtk_text_view_set_editable(GTK_TEXT_VIEW(view),FALSE);gtk_text_view_set_monospace(GTK_TEXT_VIEW(view),TRUE);gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(view),GTK_WRAP_WORD_CHAR);u->logs=gtk_text_view_get_buffer(GTK_TEXT_VIEW(view));gtk_widget_set_size_request(view,-1,430);margin(view,10);gtk_box_append(GTK_BOX(box),view);
     row(group(box,"Current scope",NULL),"Nintendo controller profiles","Switch Pro Controller is verified on Switch 2. Joy-Con (L/R) wire formats and dual-adapter routing are implemented but cannot be hardware-tested until a second adapter is connected. Sony and Microsoft profiles remain future additions.",NULL);
     refresh_bindings(u);profile_scan(u);devices_scan(u);adapters_scan(NULL,u);
-    g_signal_connect(u->profiles,"notify::selected",G_CALLBACK(profile_selected),u);g_signal_connect(u->devices,"notify::selected",G_CALLBACK(device_selected),u);g_signal_connect(u->source,"notify::selected",G_CALLBACK(source_changed),u);g_signal_connect(u->controllers,"notify::selected",G_CALLBACK(controller_selected),u);
+    g_signal_connect(u->profiles,"notify::selected",G_CALLBACK(profile_selected),u);
+    g_signal_connect(u->devices,"notify::selected",G_CALLBACK(device_selected),u);
+    g_signal_connect(u->source,"notify::selected",G_CALLBACK(source_changed),u);
+    g_signal_connect(u->controllers,"notify::selected",G_CALLBACK(controller_selected),u);
+    g_signal_connect(u->adapters,"notify::selected",G_CALLBACK(adapter_selection_changed),u);
+    g_signal_connect(u->secondary,"notify::selected",G_CALLBACK(adapter_selection_changed),u);
     g_signal_connect(u->arm,"notify::active",G_CALLBACK(armed_changed),u);g_signal_connect(u->window,"notify::is-active",G_CALLBACK(focus_changed),u);g_signal_connect(u->window,"close-request",G_CALLBACK(close_window),u);
     g_signal_connect(u->deadzone,"value-changed",G_CALLBACK(scale_changed),u);g_signal_connect(u->sensitivity,"value-changed",G_CALLBACK(scale_changed),u);g_signal_connect(u->swap,"notify::active",G_CALLBACK(settings_changed),u);g_signal_connect(u->background,"notify::active",G_CALLBACK(settings_changed),u);g_signal_connect(u->swap_face,"notify::active",G_CALLBACK(settings_changed),u);
     g_signal_connect(u->auto_select,"notify::active",G_CALLBACK(auto_select_changed),u);
