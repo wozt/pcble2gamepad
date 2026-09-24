@@ -1117,6 +1117,270 @@ static gboolean receive_packet(gint fd,GIOCondition cond,gpointer user) {
  *
  * This uses the same public BlueZ HCI helpers as hcitool auth/enc.
  */
+static gboolean reconnect_use_immediate_auth(void) {
+    int hci_fd=hci_open_dev(pairing_mgmt_index);
+
+    if(hci_fd<0) {
+        log_event(
+            "reconnect_adapter_probe_error",
+            strerror(errno));
+        return FALSE;
+    }
+
+    struct hci_version version={0};
+
+    if(hci_read_local_version(hci_fd,&version,1000)<0) {
+        log_event(
+            "reconnect_adapter_probe_error",
+            strerror(errno));
+        hci_close_dev(hci_fd);
+        return FALSE;
+    }
+
+    hci_close_dev(hci_fd);
+
+    gboolean realtek=version.manufacturer==0x005d;
+
+    char detail[192];
+    snprintf(
+        detail,
+        sizeof(detail),
+        "manufacturer=0x%04x hci=%u lmp=%u subver=0x%04x immediate_auth=%s",
+        version.manufacturer,
+        version.hci_ver,
+        version.lmp_ver,
+        version.lmp_subver,
+        realtek?"true":"false");
+
+    log_event("reconnect_adapter_profile",detail);
+
+    return realtek;
+}
+
+/*
+ * Realtek reconnect experiment.
+ *
+ * The Switch accepts the outbound ACL from the RTL8821CU but terminates it
+ * with reason 0x13 before the normal Linux security path reaches
+ * Authentication Requested. Wait only until Connection Complete has replaced
+ * Linux's temporary 0x0fxx handle, then request authentication immediately.
+ *
+ * This path is enabled only for HCI manufacturer 0x005d (Realtek). Other
+ * adapters, including the validated CSR controller, keep the normal kernel
+ * L2CAP security path unchanged.
+ */
+static gboolean secure_reconnect_acl(const bdaddr_t *remote,
+                                     const char *address) {
+    int hci_fd=hci_open_dev(pairing_mgmt_index);
+
+    if(hci_fd<0) {
+        log_event("reconnect_hci_error",strerror(errno));
+        return FALSE;
+    }
+
+    struct hci_conn_info_req *request=
+        g_malloc0(sizeof(*request)+sizeof(struct hci_conn_info));
+
+    bacpy(&request->bdaddr,remote);
+    request->type=ACL_LINK;
+
+    gint64 started=g_get_monotonic_time();
+    gint64 deadline=started+500000;
+    gboolean found=FALSE;
+    gboolean saw_pending=FALSE;
+
+    while(g_get_monotonic_time()<deadline) {
+        if(ioctl(
+                hci_fd,
+                HCIGETCONNINFO,
+                (unsigned long)request)==0) {
+            uint16_t candidate=request->conn_info->handle;
+
+            /*
+             * Linux exposes an internal temporary handle in the 0x0fxx
+             * range before the physical BR/EDR Connection Complete.
+             */
+            if(candidate<=0x0eff) {
+                found=TRUE;
+                break;
+            }
+
+            if(!saw_pending) {
+                char detail[192];
+                snprintf(
+                    detail,
+                    sizeof(detail),
+                    "peer=%s temporary_handle=0x%04x",
+                    address,
+                    candidate);
+
+                log_event("reconnect_acl_pending",detail);
+                saw_pending=TRUE;
+            }
+
+            g_usleep(500);
+            continue;
+        }
+
+        if(errno!=ENOENT &&
+           errno!=ENOTCONN &&
+           errno!=EAGAIN &&
+           errno!=EINVAL) {
+            char detail[192];
+            snprintf(
+                detail,
+                sizeof(detail),
+                "peer=%s HCIGETCONNINFO failed: %s",
+                address,
+                strerror(errno));
+
+            log_event("reconnect_acl_error",detail);
+
+            g_free(request);
+            hci_close_dev(hci_fd);
+            return FALSE;
+        }
+
+        g_usleep(500);
+    }
+
+    if(!found) {
+        char detail[192];
+        snprintf(
+            detail,
+            sizeof(detail),
+            "peer=%s real ACL handle not visible within %.1f ms",
+            address,
+            (g_get_monotonic_time()-started)/1000.0);
+
+        log_event("reconnect_acl_timeout",detail);
+
+        g_free(request);
+        hci_close_dev(hci_fd);
+        return FALSE;
+    }
+
+    uint16_t raw_handle=request->conn_info->handle;
+    uint16_t handle=htobs(raw_handle);
+
+    {
+        char detail[224];
+        snprintf(
+            detail,
+            sizeof(detail),
+            "peer=%s handle=0x%04x after=%.1fms; sending Authentication Requested immediately",
+            address,
+            raw_handle,
+            (g_get_monotonic_time()-started)/1000.0);
+
+        log_event("reconnect_acl_found",detail);
+    }
+
+    if(hci_authenticate_link(hci_fd,handle,1000)<0) {
+        char detail[224];
+        snprintf(
+            detail,
+            sizeof(detail),
+            "peer=%s handle=0x%04x authentication failed: %s",
+            address,
+            raw_handle,
+            strerror(errno));
+
+        log_event("reconnect_auth_failed",detail);
+
+        g_free(request);
+        hci_close_dev(hci_fd);
+        return FALSE;
+    }
+
+    log_event(
+        "reconnect_authenticated",
+        "Realtek ACL authenticated with persisted BR/EDR Link Key");
+
+    if(hci_encrypt_link(hci_fd,handle,1,1000)<0) {
+        char detail[224];
+        snprintf(
+            detail,
+            sizeof(detail),
+            "peer=%s handle=0x%04x encryption failed: %s",
+            address,
+            raw_handle,
+            strerror(errno));
+
+        log_event("reconnect_encrypt_failed",detail);
+
+        g_free(request);
+        hci_close_dev(hci_fd);
+        return FALSE;
+    }
+
+    log_event(
+        "reconnect_encrypted",
+        "Realtek ACL encrypted before HID L2CAP completes");
+
+    g_free(request);
+    hci_close_dev(hci_fd);
+    return TRUE;
+}
+
+static gboolean finish_nonblocking_connect(int fd,
+                                           const char *address,
+                                           int psm) {
+    struct pollfd pfd={
+        .fd=fd,
+        .events=POLLOUT|POLLERR|POLLHUP
+    };
+
+    int rc;
+
+    do {
+        rc=poll(&pfd,1,2000);
+    } while(rc<0 && errno==EINTR);
+
+    if(rc<=0) {
+        char detail[192];
+        snprintf(
+            detail,
+            sizeof(detail),
+            "peer=%s psm=%d completion=%s",
+            address,
+            psm,
+            rc==0?"timeout":strerror(errno));
+
+        log_event("reconnect_failed",detail);
+        return FALSE;
+    }
+
+    int error=0;
+    socklen_t error_len=sizeof(error);
+
+    if(getsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_ERROR,
+            &error,
+            &error_len)<0) {
+        log_event("reconnect_failed",strerror(errno));
+        return FALSE;
+    }
+
+    if(error) {
+        char detail[192];
+        snprintf(
+            detail,
+            sizeof(detail),
+            "peer=%s psm=%d error=%s",
+            address,
+            psm,
+            strerror(error));
+
+        log_event("reconnect_failed",detail);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
 static gboolean connect_outbound(const bdaddr_t *local,
                                     const char *address) {
     bdaddr_t remote;
@@ -1128,8 +1392,13 @@ static gboolean connect_outbound(const bdaddr_t *local,
         return FALSE;
     }
 
+    const gboolean immediate_auth=
+        reconnect_use_immediate_auth();
+
     for(int i=0;i<2;i++) {
         const int psm=i?19:17;
+        const gboolean immediate_first=
+            immediate_auth && i==0;
 
         int fd=socket(
             AF_BLUETOOTH,
@@ -1207,10 +1476,33 @@ static gboolean connect_outbound(const bdaddr_t *local,
 
         log_event("reconnect_attempt",detail);
 
-        if(connect(
+        if(immediate_first) {
+            int flags=fcntl(fd,F_GETFL,0);
+
+            if(flags<0 ||
+               fcntl(fd,F_SETFL,flags|O_NONBLOCK)<0) {
+                log_event(
+                    "reconnect_socket_error",
+                    strerror(errno));
+
+                close(fd);
+                goto failed;
+            }
+
+            log_event(
+                "reconnect_realtek_immediate_auth",
+                "Starting PSM 17 asynchronously so authentication can be requested immediately after ACL Connection Complete");
+        }
+
+        int connect_result=
+            connect(
                 fd,
                 (struct sockaddr *)&destination,
-                sizeof(destination))<0) {
+                sizeof(destination));
+
+        if(connect_result<0 &&
+           (!immediate_first ||
+            (errno!=EINPROGRESS && errno!=EAGAIN))) {
             char failure[160];
 
             snprintf(
@@ -1225,6 +1517,22 @@ static gboolean connect_outbound(const bdaddr_t *local,
 
             close(fd);
             goto failed;
+        }
+
+        if(immediate_first) {
+            if(!secure_reconnect_acl(&remote,address)) {
+                close(fd);
+                goto failed;
+            }
+
+            if(connect_result<0 &&
+               !finish_nonblocking_connect(
+                    fd,
+                    address,
+                    psm)) {
+                close(fd);
+                goto failed;
+            }
         }
 
         int flags=fcntl(fd,F_GETFL,0);
