@@ -100,14 +100,6 @@ Profiles include:
 
 One profile is marked active and restored on the next launch.
 
-The old:
-
-```text
-~/.config/pcble2gamepad/settings.ini
-```
-
-is migration-only and is removed after its values have been imported.
-
 Bluetooth Link Keys are never stored in user profiles. They remain root-private under:
 
 ```text
