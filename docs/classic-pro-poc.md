@@ -195,6 +195,34 @@ record cannot correct the EIR value observed during inquiry.
 The BlueZ backend now issues the standard Management `Set Device ID` command
 (`0x0028`) with USB source, vendor `0x057e`, product `0x2009` and version
 `0x0001` before enabling inquiry visibility. This changes volatile kernel EIR state
-only; the runner's normal BlueZ restart restores the host identity. Durable reconnect
-remains unclaimed until the value is verified on air and a pair, backend stop and
-backend restart succeeds without opening Change Grip/Order.
+only; the runner's normal BlueZ restart restores the host identity. The corrected
+USB identity was verified in the HCI inquiry response on air.
+
+The durable test still failed. A fresh host-led pairing produced remote and local
+No-Bonding AuthReq `0x00` and a type-4 Link Key. The initialized controller then
+left Change Grip/Order through A and stayed connected in normal report mode for
+about 90 seconds, sending more than 5,000 reports. After a complete backend and
+BlueZ stop, the saved key was loaded successfully, but the Switch accepted the ACL
+and terminated it with reason `0x13` before Authentication Requested or Link Key
+Request. A separate successful Change Connection Link Key operation produced and
+persisted a type-6 replacement key; the Switch rejected that key at the same
+pre-authentication point. Device ID fidelity, session duration and post-pairing key
+rotation therefore do not make this Switch retain the BR/EDR bond.
+
+## Passive-pairing sequence comparison
+
+The `cajunpanda/bluetooth-nes-advantage` BTstack implementation keeps incoming HID
+PSMs at `LEVEL_0` during fresh pairing. It raises outgoing security to `LEVEL_2`
+only on a later boot that already loaded the peer's Link Key. An intermediate local
+experiment had instead called `gap_request_security_level(..., LEVEL_2)` as soon as
+the Switch opened the initial ACL. That call has been removed. The userspace-HCI
+POC now also distinguishes a key loaded at process start from one generated during
+the current host-led pairing.
+
+The aligned hardware test paired and initialized successfully, was stopped while
+HID remained active, then restarted with one stored key. All four controller-led
+pages were terminated by the Switch with reason `0x13` before authentication. The
+Switch subsequently initiated fresh SSP and generated a new key. The reference
+project documents automatic reconnect for hosts that retain a bond, but it also
+states that a host advertising No Bonding keeps no key. Our capture shows that
+No-Bonding case consistently on this Switch 2.

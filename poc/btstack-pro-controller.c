@@ -70,6 +70,7 @@ static bd_addr_t local_address;
 static bd_addr_t peer_address;
 static bool have_peer;
 static bool have_bond;
+static bool bond_loaded_at_start;
 static bool shutting_down;
 static bool reconnect_enabled = true;
 static bool saw_output;
@@ -249,7 +250,12 @@ static void reconnect_timer_handler(btstack_timer_source_t *timer) {
     }
 
     reconnect_attempts++;
-    gap_set_security_level(LEVEL_2);
+    /*
+     * A key created during this boot still belongs to the host-led pairing
+     * flow. Raise security only when this process started with a stored key,
+     * matching a real controller's later reconnect path.
+     */
+    gap_set_security_level(bond_loaded_at_start ? LEVEL_2 : LEVEL_0);
     uint16_t pending_cid = 0;
     uint8_t status = hid_device_connect(peer_address, &pending_cid);
     char address[18];
@@ -285,6 +291,7 @@ static void load_first_bond(void) {
             memcpy(peer_address, address, sizeof(peer_address));
             have_peer = true;
             have_bond = true;
+            bond_loaded_at_start = true;
         }
         count++;
     }
@@ -371,29 +378,6 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
             schedule_reconnect();
         } else if (state == HCI_STATE_OFF && shutting_down) {
             btstack_run_loop_trigger_exit();
-        }
-        return;
-    }
-
-    if (event == HCI_EVENT_CONNECTION_COMPLETE) {
-        uint8_t status = hci_event_connection_complete_get_status(packet);
-        uint8_t link_type = hci_event_connection_complete_get_link_type(packet);
-        hci_con_handle_t handle =
-            hci_event_connection_complete_get_connection_handle(packet);
-
-        if (status == ERROR_CODE_SUCCESS && link_type == 1) {
-            /*
-             * Initiate authentication from the controller side as soon as the
-             * inbound ACL exists. Waiting for the Switch to request SSP makes
-             * its remote No-Bonding requirement control the exchange, and the
-             * console then discards the key after this session.
-             */
-            gap_request_security_level(handle, LEVEL_2);
-
-            char detail[96];
-            snprintf(detail, sizeof(detail),
-                     "handle=%u level=2 initiator=controller", handle);
-            log_line("authentication_requested_local", detail);
         }
         return;
     }

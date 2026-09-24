@@ -59,8 +59,11 @@ connection starts fresh SSP and replaces the key. Link Keys are stored with mode
 
 Run the command again without `--reset-bond` to reproduce the rejected
 controller-initiated reconnect. Use `--passive` to observe a new incoming pairing.
-Automatic reconnect is limited to four attempts. This experiment establishes that
-forcing only the local AuthReq cannot create a durable Switch bond.
+Automatic reconnect is limited to four attempts. Fresh pairing remains passive at
+`LEVEL_0`; `LEVEL_2` is selected only when the process started with a stored key.
+This matches the reference controller sequence and avoids re-authenticating an ACL
+while the Switch is establishing SSP. The experiment establishes that forcing only
+the local AuthReq cannot create a durable Switch bond.
 
 BTstack is fetched into the ignored build directory and is not vendored under this
 project's MIT license. Its personal, non-commercial license is reproduced in
