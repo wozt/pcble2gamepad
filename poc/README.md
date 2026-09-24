@@ -68,8 +68,10 @@ project's MIT license. Its personal, non-commercial license is reproduced in
 
 The POC saves/restores adapter alias, pairability, discoverability, their timeouts,
 power state and device class. It powers the selected adapter temporarily when the
-compatibility-mode BlueZ restart leaves it off. It publishes the HID SDP record and
-binds PSM 17 and 19 specifically to the selected adapter. Its default pairing agent accepts requests only on that
+compatibility-mode BlueZ restart leaves it off. For Pro Controller sessions it
+temporarily replaces BlueZ's Linux Device ID in EIR with USB `057e:2009`; restarting
+normal BlueZ restores the host identity. It publishes the HID SDP record and binds
+PSM 17 and 19 specifically to the selected adapter. Its default pairing agent accepts requests only on that
 adapter, for the duration of the experiment. Visibility/pairability expire after
 180 seconds and the POC stops after 10 minutes. During initial Pro Controller
 pairing, periodic reports are deliberately rate-limited: one report per second

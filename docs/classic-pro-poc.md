@@ -182,3 +182,19 @@ occurred during this transition.
 The inbound-pairing fallback added after rejected key-based handoff attempts was not
 reached in this successful run. It remains a separate recovery path awaiting a
 console-side trigger that actually closes the initial HID link.
+
+## Controller Device ID experiment
+
+The BlueZ capture exposed one remaining identity mismatch relevant to discovery:
+the emulated controller's EIR still contained BlueZ's Linux host Device ID
+(`1d6b:0246`). The reference BTstack implementation publishes the Switch Pro
+Controller USB identity (`057e:2009`) in its Device ID service. The console did not
+query the emulated controller's SDP during the measured pairing, so an SDP-only
+record cannot correct the EIR value observed during inquiry.
+
+The BlueZ backend now issues the standard Management `Set Device ID` command
+(`0x0028`) with USB source, vendor `0x057e`, product `0x2009` and version
+`0x0001` before enabling inquiry visibility. This changes volatile kernel EIR state
+only; the runner's normal BlueZ restart restores the host identity. Durable reconnect
+remains unclaimed until the value is verified on air and a pair, backend stop and
+backend restart succeeds without opening Change Grip/Order.

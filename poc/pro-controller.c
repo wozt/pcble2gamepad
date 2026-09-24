@@ -59,6 +59,7 @@ static char pairing_local_address[18];
 #define PC_MGMT_EV_CMD_STATUS     0x0002
 #define PC_MGMT_EV_NEW_LINK_KEY   0x0009
 #define PC_MGMT_OP_LOAD_LINK_KEYS 0x0012
+#define PC_MGMT_OP_SET_DEVICE_ID   0x0028
 
 #ifndef HCI_CHANNEL_MONITOR
 #define HCI_CHANNEL_MONITOR 2
@@ -105,6 +106,14 @@ typedef struct __attribute__((packed)) {
     uint16_t key_count;
     PcMgmtLinkKey key;
 } PcMgmtLoadOneKey;
+
+typedef struct __attribute__((packed)) {
+    PcMgmtHdr hdr;
+    uint16_t source;
+    uint16_t vendor;
+    uint16_t product;
+    uint16_t version;
+} PcMgmtSetDeviceId;
 
 typedef struct __attribute__((packed)) {
     uint16_t opcode;
@@ -655,6 +664,115 @@ static gboolean pairing_read_key(const char *remote,PcMgmtLinkKey *key) {
 
     g_key_file_unref(config);
     return TRUE;
+}
+
+static gboolean pairing_set_controller_device_id(void) {
+    if(controller_type!=CONTROLLER_PRO)
+        return TRUE;
+
+    int fd=pairing_mgmt_open(FALSE);
+    if(fd<0) {
+        log_event("device_id_error",
+            "Cannot open Bluetooth management channel for controller identity");
+        return FALSE;
+    }
+
+    PcMgmtSetDeviceId request={0};
+    request.hdr.opcode=htobs(PC_MGMT_OP_SET_DEVICE_ID);
+    request.hdr.index=htobs((uint16_t)pairing_mgmt_index);
+    request.hdr.len=htobs(sizeof(request)-sizeof(request.hdr));
+    request.source=htobs(0x0002);
+    request.vendor=htobs(0x057e);
+    request.product=htobs(0x2009);
+    request.version=htobs(0x0001);
+
+    ssize_t written;
+    do {
+        written=write(fd,&request,sizeof(request));
+    } while(written<0 && errno==EINTR);
+
+    if(written<0) {
+        char detail[192];
+        snprintf(detail,sizeof(detail),
+            "Set Device ID write failed: %s (errno=%d)",
+            g_strerror(errno),errno);
+        log_event("device_id_error",detail);
+        close(fd);
+        return FALSE;
+    }
+
+    gint64 deadline=g_get_monotonic_time()+2000000;
+    gboolean success=FALSE;
+
+    while(g_get_monotonic_time()<deadline) {
+        gint64 left=deadline-g_get_monotonic_time();
+        struct pollfd pollfd={
+            .fd=fd,
+            .events=POLLIN
+        };
+
+        int poll_result=poll(
+            &pollfd,
+            1,
+            (int)MAX(1,left/1000));
+
+        if(poll_result<0) {
+            if(errno==EINTR)
+                continue;
+            break;
+        }
+
+        if(poll_result==0 ||
+           (pollfd.revents&(POLLERR|POLLHUP|POLLNVAL)))
+            break;
+
+        uint8_t buffer[1024];
+        ssize_t size;
+        do {
+            size=read(fd,buffer,sizeof(buffer));
+        } while(size<0 && errno==EINTR);
+
+        if(size<(ssize_t)(sizeof(PcMgmtHdr)+
+                          sizeof(PcMgmtCommandResult)))
+            continue;
+
+        const PcMgmtHdr *header=(const PcMgmtHdr *)buffer;
+        uint16_t event=btohs(header->opcode);
+        uint16_t index=btohs(header->index);
+
+        if(index!=(uint16_t)pairing_mgmt_index ||
+           (event!=PC_MGMT_EV_CMD_COMPLETE &&
+            event!=PC_MGMT_EV_CMD_STATUS))
+            continue;
+
+        const PcMgmtCommandResult *result=
+            (const PcMgmtCommandResult *)(buffer+sizeof(PcMgmtHdr));
+
+        if(btohs(result->opcode)!=PC_MGMT_OP_SET_DEVICE_ID)
+            continue;
+
+        if(result->status==0) {
+            success=TRUE;
+            log_event("device_id_set",
+                "EIR identity source=USB vendor=0x057e product=0x2009 version=0x0001");
+        } else {
+            char detail[96];
+            snprintf(detail,sizeof(detail),
+                "Set Device ID failed with MGMT status 0x%02x",
+                result->status);
+            log_event("device_id_error",detail);
+        }
+
+        break;
+    }
+
+    close(fd);
+
+    if(!success)
+        log_event("device_id_error",
+            "Kernel did not accept the Pro Controller Device ID");
+
+    return success;
 }
 
 static gboolean pairing_load_into_kernel(const char *remote) {
@@ -1558,6 +1676,16 @@ int main(int argc,char **argv) {
         if(!set_property("Powered",g_variant_new_boolean(TRUE)))goto cleanup;
         log_event("adapter_powered","Powered on temporarily for the Classic HID session");
     }
+
+    /*
+     * BlueZ normally advertises the Linux host Device ID in EIR. A Switch Pro
+     * Controller advertises Nintendo's USB VID/PID instead. Set this volatile
+     * kernel identity before inquiry becomes visible; restarting normal BlueZ
+     * in the runner restores the host identity after the session.
+     */
+    if(!pairing_set_controller_device_id())
+        goto cleanup;
+
     dd=hci_open_dev(pairing_mgmt_index);
     if(dd<0 || hci_read_class_of_dev(dd,old_class,2000)<0) {
         log_event("hci_error",strerror(errno));
