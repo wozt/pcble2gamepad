@@ -25,18 +25,14 @@ Validated on a real Switch 2:
 * Custom body, button, left-grip and right-grip colors
 * Clean backend shutdown and BlueZ restoration
 
-Persistent reconnect is currently adapter-dependent:
+Persistent reconnect depends on the Bluetooth adapter implementation. Some adapters can complete fresh pairing but fail when the PC later initiates an authenticated reconnect.
 
-| Adapter                     | Fresh pairing | Reconnect                                |
-| --------------------------- | ------------- | ---------------------------------------- |
-| CSR `00:1A:7D:DA:71:13`     | Works         | Works                                    |
-| Realtek `E0:AD:47:40:70:D9` | Works         | Switch disconnects before authentication |
+A USB adapter based on **CSR8510 A10** (`0a12:0001`) has been validated successfully: the saved BR/EDR Link Key is restored, authentication and encryption complete, both HID channels reconnect and Nintendo initialization repeats normally.
 
-The CSR path reloads the saved BR/EDR Link Key, completes authentication and encryption, reconnects both HID channels and repeats Nintendo initialization.
+Other adapters may disconnect before authentication even though first pairing works. Adapter compatibility should therefore be tested before relying on persistent reconnect.
 
-The Realtek adapter still receives remote disconnect reason `0x13` before Linux can request or present the stored key.
+See [docs/classic-pro-poc.md](docs/classic-pro-poc.md) for the detailed experiments and adapter comparison.
 
-See [docs/classic-pro-poc.md](docs/classic-pro-poc.md) for the detailed experiments.
 
 ### Joy-Con pair
 
