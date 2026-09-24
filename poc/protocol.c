@@ -141,13 +141,45 @@ static uint8_t spi(const ProState *s, uint32_t a) {
      * Do NOT extend this table into 0x6050: that is where the controller
      * body/button colors begin.
      */
+    /*
+     * This calibration must describe the exact raw stick coordinate
+     * space emitted by input-model.c.
+     *
+     * Left stick:
+     *   center:       X=2159 Y=1916
+     *   positive:     X=1466 Y=1583
+     *   negative:     X=1517 Y=1465
+     *
+     * Right stick:
+     *   center:       X=2070 Y=2013
+     *   positive:     X=1414 Y=1510
+     *   negative:     X=1522 Y=1531
+     *
+     * Previously the Pro profile advertised synthetic 2032/2032
+     * calibration values. The runtime never produced that range, so a
+     * full cardinal stick movement was interpreted by the Switch as only
+     * roughly 70-78% travel.
+     */
     static const uint8_t pro_sticks[] = {
-        0xf0,0x07,0x7f,
-        0xf0,0x07,0x7f,
-        0xf0,0x07,0x7f,
-        0xf0,0x07,0x7f,
-        0xf0,0x07,0x7f,
-        0xf0,0x07,0x7f,
+        /* Left positive excursion. */
+        0xba,0xf5,0x62,
+
+        /* Left center. */
+        0x6f,0xc8,0x77,
+
+        /* Left negative excursion. */
+        0xed,0x95,0x5b,
+
+        /* Right center. */
+        0x16,0xd8,0x7d,
+
+        /* Right negative excursion. */
+        0xf2,0xb5,0x5f,
+
+        /* Right positive excursion. */
+        0x86,0x65,0x5e,
+
+        /* Factory byte at 0x604F. */
         0x0f
     };
     static const uint8_t pro_config[] = {

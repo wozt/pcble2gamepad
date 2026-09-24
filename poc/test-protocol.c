@@ -60,9 +60,28 @@ static void reports(void) {
     g_assert_true(pro_reply(&s,in,17,7,out));
     g_assert_cmpint(out[14],==,0x90);
 
-    const uint8_t flat[]={0xf0,0x07,0x7f};
-    g_assert_cmpmem(out+21,3,flat,3);
-    g_assert_cmpmem(out+30,3,flat,3);
+    /*
+     * The SPI calibration must describe the same coordinate space used
+     * by src/input-model.c when it builds InputFrame.sticks.
+     *
+     * Lock the whole 0x603D..0x604F block down: changing only one center
+     * or excursion would otherwise bring back asymmetric stick travel.
+     */
+    const uint8_t pro_calibration[]={
+        0xba,0xf5,0x62,
+        0x6f,0xc8,0x77,
+        0xed,0x95,0x5b,
+        0x16,0xd8,0x7d,
+        0xf2,0xb5,0x5f,
+        0x86,0x65,0x5e,
+        0x0f
+    };
+
+    g_assert_cmpmem(
+        out+21,
+        sizeof(pro_calibration),
+        pro_calibration,
+        sizeof(pro_calibration));
 
     /*
      * 0x603D + 0x13 == 0x6050.
