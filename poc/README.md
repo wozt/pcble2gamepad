@@ -34,9 +34,10 @@ The root backend opens raw L2CAP sockets and changes the volatile device class;
 Controller Studio stays unprivileged and talks to it over a private Unix socket.
 No firmware/NVM is modified.
 The backend logs both local and remote SSP IO authentication values and the Link
-Key `store_hint`. Switch 2 currently requests No Bonding, so the working Pair / Sync
-session is temporary and persistent reconnect remains unresolved. Captures are
-local/private because they can contain Bluetooth link keys.
+Key `store_hint`. Switch 2 requests No Bonding, but persistent reconnect is validated
+on the CSR `00:1A:7D:DA:71:13` adapter after a complete backend restart. The Realtek
+`E0:AD:47:40:70:D9` adapter still receives remote reason `0x13` before authentication.
+Captures are local/private because they can contain Bluetooth link keys.
 
 ### Optional userspace-HCI bonding experiment
 

@@ -234,6 +234,12 @@ working Joy-Con pairing or input emulation.
 
 ## Second adapter: CSR comparison
 
+> **Later Classic HID result (2026-09-24):** this section concerns the earlier
+> Joy-Con 2 BLE/GATT experiment. The same CSR adapter later completed a persisted
+> Switch Pro Controller Classic HID reconnect after a full backend restart, while
+> the Realtek adapter failed before authentication. See the
+> [Classic HID adapter comparison](classic-pro-poc.md#persistent-reconnect-validated-on-csr-2026-09-24).
+
 On 2026-09-22 the user attached a USB `0a12:0001` dongle reporting product
 `CSR8510 A10`, HCI/LMP 4.0, revision/subversion `0x22bb`. It appeared as `hci1`
 at `00:1A:7D:DA:71:13`. Read-only diagnostics returned LE features

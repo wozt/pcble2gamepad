@@ -43,13 +43,13 @@ operations.
   reloads the stored Link Key into the kernel through the Bluetooth Management API,
   restores the Pro Controller identity and initiates L2CAP control PSM 17 followed
   by interrupt PSM 19 toward the stored Switch address.
-- Switch 2 asks for No Bonding during the working inbound pairing. It later rejects
-  the same Link Key when the PC restores it and initiates authentication. After the
-  bounded handoff attempts fail, the backend restores pairability and discoverability
-  while keeping the existing HID listeners open. This allows the console to start a
-  new temporary SSP session without restarting Controller Studio; real-console UI
-  validation of this fallback is pending. Reconnect remains a diagnostic because a
-  new application launch still requires Pair / Sync.
+- Switch 2 asks for No Bonding during the working inbound pairing, but the
+  persisted reconnect path is validated on the CSR `00:1A:7D:DA:71:13` adapter.
+  A new backend process reloads the key, authenticates and encrypts the ACL, opens
+  PSM 17/19 and completes Nintendo initialization. The Realtek
+  `E0:AD:47:40:70:D9` adapter is still terminated by the console before
+  authentication. Controller Studio therefore exposes the same reconnect operation
+  for both, while Diagnostics reports the measured adapter-specific outcome.
 
 Joy-Con-pair outbound reconnect is intentionally deferred until the two-adapter
 profile has been validated on real hardware.

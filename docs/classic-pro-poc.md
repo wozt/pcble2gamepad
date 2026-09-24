@@ -19,8 +19,9 @@ NXBT/NUXBT advertise Classic HID through a BlueZ ProfileManager SDP record, whil
 owning AF_BLUETOOTH/SOCK_SEQPACKET L2CAP listeners for control PSM 17 and interrupt
 PSM 19. Their controller loop emits input reports and replies to Nintendo
 subcommands (device info, SPI calibration reads, mode, IMU, vibration and LEDs).
-They can reconnect by initiating both L2CAP channels to a known console address.
-The POC currently accepts incoming reconnects; outbound reconnect is not implemented.
+They reconnect by initiating both L2CAP channels to a known console address. The C
+backend now implements that outbound path, including persisted Link Key reload through
+the Bluetooth Management API. It has been validated on the CSR adapter described below.
 
 NUXBT starts a separate default Agent1 with DisplayYesNo capability, accepting
 confirmation/authorization and providing legacy PIN/passkey fallbacks. It also
@@ -95,9 +96,11 @@ of unconditionally claiming success. The runner still restores normal BlueZ.
 
 ## Dedicated bonding experiment, 2026-09-24
 
-Fresh pairing from Change Grip/Order succeeds, but its SSP IO Capability exchange
-has the Switch request No Bonding (`0x00`). Linux follows that request in responder
-role, reports `store_hint=0`, and the Switch later rejects the locally restored key.
+Fresh pairing from Change Grip/Order succeeds on Realtek, but its SSP IO Capability
+exchange has the Switch request No Bonding (`0x00`). Linux follows that request in
+responder role, reports `store_hint=0`, and the Switch later rejects the locally
+restored key on that adapter. The later CSR comparison shows that these SSP values
+alone do not determine whether reconnect succeeds.
 
 A bounded `MGMT_OP_PAIR_DEVICE` experiment tested whether making Linux the pairing
 initiator could preserve `HCI_AT_DEDICATED_BONDING`. The management command issued a
@@ -234,4 +237,65 @@ reference ACKs for NFC/IR and vibration. The Switch completed initialization, th
 real A bit left Change Grip/Order, and the link remained healthy in normal cadence.
 After 30 seconds outside the menu and a clean backend stop, the next page was still
 terminated with `0x13` before authentication. Nintendo HID response fidelity is
-therefore not what prevents this console from retaining the BR/EDR Link Key.
+therefore not what prevents this console from retaining the BR/EDR Link Key
+on the Realtek adapter.
+
+## Persistent reconnect validated on CSR, 2026-09-24
+
+A same-machine adapter comparison changed the reconnect result without changing the
+backend, Switch 2, controller profile or persisted-key procedure.
+
+| Adapter | Identity | Fresh pairing | Outbound reconnect after full backend stop |
+| --- | --- | --- | --- |
+| Realtek combo | USB `0bda:c820`, `E0:AD:47:40:70:D9`, HCI manufacturer `0x005d` | Pro Controller initialization and input succeed | Switch accepts the ACL, then terminates it with `0x13` before `Authentication Requested` or `Link Key Request` |
+| CSR dongle | USB `0a12:0001`, `00:1A:7D:DA:71:13`, HCI manufacturer `0x000a` | Pro Controller initialization and input succeed | Authentication, encryption, both HID channels and Nintendo initialization succeed |
+
+The CSR fresh-pairing trace still reports remote and local
+`No Bonding / no MITM (0x00)`. It produces a type-4 Link Key with management
+`store_hint=0`, exactly the values that had appeared to explain the Realtek failure.
+The backend nevertheless saved the key, stopped completely, restored the key on a
+new process launch and initiated the connection successfully.
+
+The CSR reconnect trace contains the complete security sequence missing on Realtek:
+
+1. Outbound ACL connection completes and the PC becomes the peripheral role.
+2. Linux sends `Authentication Requested`.
+3. The controller raises `Link Key Request`; Linux replies with the restored key.
+4. `Authentication Complete` returns success.
+5. Encryption is enabled with E0 and a 16-byte key.
+6. L2CAP control PSM 17 and interrupt PSM 19 connect.
+7. The Switch repeats the Nintendo initialization exchange, enables vibration and
+   sets player light 1.
+
+The sequence succeeded on three separate backend restarts. On the final run, a B
+input was sent after reconnect and the session remained initialized for more than
+four minutes; its final status reported `tx=16834`, `rx=1506`,
+`initialized=true`. An earlier A input selected
+Change Grip/Order from the console's Controllers menu. The Switch then disconnected
+the controller as that screen normally does; the user confirmed the menu transition,
+so this event is not a reconnect failure.
+
+This validates the persisted reconnect implementation and shows that `No Bonding`
+and `store_hint=0` do not by themselves prevent this Switch 2 from accepting the
+restored key. It also narrows the Realtek failure to behavior before authentication:
+the console terminates the Realtek ACL before Linux can request or present the key.
+Nintendo HID report contents, Device ID, Link Key reload and the GTK reconnect flow
+are downstream of that divergence.
+
+### What remains unresolved
+
+The experiment correlates the failure with adapter identity, but does not yet prove
+which adapter property causes it. The console sees different public Bluetooth
+addresses, so a pre-existing console-side controller record for the CSR address is
+a remaining confounder alongside controller firmware and timing differences. The
+CSR adapter also differs in HCI/LMP implementation, USB topology and firmware from
+the Realtek Wi-Fi/Bluetooth combination device.
+
+The next investigation should compare the two HCI traces from `Create Connection`
+through the first 300 ms of the ACL, especially role change, remote-feature reads,
+link policy, packet type and the timing of `Authentication Requested`. A clean
+console-side removal and fresh pairing of the CSR address can separate address
+history from chipset behavior. If the result remains adapter-specific, capture
+`btusb`/USB timing and test whether issuing authentication immediately after
+Connection Complete avoids the Realtek pre-authentication `0x13`. No persistent
+adapter firmware or NVM change is needed for these tests.

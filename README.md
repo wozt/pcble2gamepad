@@ -92,13 +92,13 @@ generated Link Key and stores it privately under
 `/var/lib/pcble2gamepad/pairings/`; the record includes the console and adapter
 addresses, key type, PIN length, management `store_hint` and the 128-bit key.
 
-The Switch 2 requests `No Bonding` during this exchange. Linux therefore reports
-`store_hint=0`, and measured BlueZ and userspace-HCI reconnects show that the
-console rejects the locally restored key. For an active Pair / Sync session, the
-backend now falls back to discoverable/pairable mode after the rejected handoff so
-the console can initiate another temporary SSP session. This recovery still needs
-a real-console UI test. **Reconnect paired Switch** remains a diagnostic; Pair /
-Sync is the validated entry path.
+The Switch 2 requests `No Bonding` during this exchange and Linux reports
+`store_hint=0`. Persistent reconnect is nevertheless validated with the CSR
+`00:1A:7D:DA:71:13` adapter: after a complete backend stop, the restored Link Key is
+accepted, authentication and encryption complete, PSM 17/19 reopen and Nintendo HID
+initialization repeats. The Realtek `E0:AD:47:40:70:D9` adapter still fails before
+authentication with remote reason `0x13`. The adapter-dependent cause remains under
+investigation; see [the measured comparison](docs/classic-pro-poc.md#persistent-reconnect-validated-on-csr-2026-09-24).
 
 The
 application invokes its narrow backend with `pkexec`, temporarily restarts BlueZ
@@ -114,9 +114,9 @@ transition and subsequent D-pad navigation on HOME were validated on a real Swit
 
 A Pro Controller needs one Bluetooth adapter. A Joy-Con pair exposes two Classic
 Bluetooth identities and therefore needs two distinct adapters, selected as left
-and right in the UI. The current machine exposes only one adapter, so the pair
-transport has wire and simulated routing coverage but cannot yet be tested against
-the console as a complete pair.
+and right in the UI. The current machine now exposes the Realtek and CSR adapters,
+but the pair transport still has only wire and simulated routing coverage until a
+complete pair is tested against the console.
 
 Select **Keyboard** or **PC controller**, configure the corresponding bindings,
 then enable input. Escape immediately pauses keyboard input. The backend returns
