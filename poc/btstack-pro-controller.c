@@ -409,7 +409,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
 
     if (event == HCI_EVENT_IO_CAPABILITY_REQUEST) {
         log_line("pairing_local_io",
-                 "io=NoInputNoOutput(0x03) auth=dedicated-bonding/no-mitm(0x02)");
+                 "io=NoInputNoOutput(0x03) auth=general-bonding/no-mitm(0x04)");
         return;
     }
 

@@ -50,9 +50,12 @@ avoids resetting the complete Realtek Wi-Fi/Bluetooth USB device.
 sudo ./poc/run-btstack-classic.sh hci1 --reset-bond
 ```
 
-The isolated BTstack patch preserves a local Dedicated Bonding AuthReq (`0x02`)
-when a Switch-initiated SSP response requests No Bonding (`0x00`). Link Keys are
-stored with mode `0600` in `/var/lib/pcble2gamepad/btstack/hciN.tlv`. Run the
+The isolated BTstack patch preserves a local General Bonding AuthReq (`0x04`)
+when a Switch-initiated SSP response requests No Bonding (`0x00`). General Bonding
+is the GAP procedure for pairing during HID channel establishment; the earlier
+Dedicated Bonding (`0x02`) experiment produced a key locally but the console did
+not retain it. Link Keys are stored with mode `0600` in
+`/var/lib/pcble2gamepad/btstack/hciN.tlv`. Run the
 command again without `--reset-bond` to test a controller-initiated reconnect. Use
 `--passive` to test whether a console currently on Change Grip/Order resumes the
 stored bond from its side. Automatic reconnect is limited to four attempts. This

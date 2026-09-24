@@ -139,11 +139,18 @@ without making that licensing boundary explicit or obtaining compatible terms.
 The repository now contains an isolated implementation of that experiment under
 `poc/btstack-pro-controller.c`. Its build script fetches BTstack commit
 `e38553977a25fb0b55b383c72c289be0975f422c` outside the tracked source and applies
-`btstack-preserve-local-bonding.patch`. The patch changes only the responder AuthReq:
-it sends local Dedicated Bonding (`0x02`) while leaving BTstack's internal dedicated
-procedure flag clear, because that internal flag would disconnect after pairing.
-The first hardware test must verify the actual HCI IO Capability Reply before any
-claim about durable Switch pairing is made.
+`btstack-preserve-local-bonding.patch`. The first hardware test proved that a local
+Dedicated Bonding reply (`0x02`) is transmitted on air and creates a persistent TLV
+key, but the Switch starts fresh SSP and generates a different key on the next
+incoming connection. After clearing every controller on the console, leaving Change
+Grip/Order and restarting the backend, controller-initiated reconnect still ended
+before authentication with remote reason `0x13`.
+
+Dedicated Bonding is the GAP pairing-only procedure and requires the paging device
+to initiate authentication. This flow instead pairs while the Switch establishes
+HID, so the bounded follow-up changes only the responder AuthReq to General Bonding
+(`0x04`), as specified for bonding during channel establishment. No compatibility
+claim is made until the new value is verified on air and a restart reconnect succeeds.
 
 ## Change Grip/Order transition investigation
 
