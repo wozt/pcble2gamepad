@@ -109,7 +109,8 @@ pairing, open **Controllers -> Change Grip/Order** on the console.
 During Pro Controller pairing, the backend deliberately limits periodic input
 reports while the console is on Change Grip/Order. After initialization, press A
 once on the virtual controller to leave that screen. The backend keeps the reduced
-cadence for one additional second before returning to its normal report rate.
+cadence for one additional second before returning to its normal report rate. This
+transition and subsequent D-pad navigation on HOME were validated on a real Switch 2.
 
 A Pro Controller needs one Bluetooth adapter. A Joy-Con pair exposes two Classic
 Bluetooth identities and therefore needs two distinct adapters, selected as left

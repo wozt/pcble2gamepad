@@ -173,5 +173,12 @@ during this phase: 1 Hz before the first Switch response, then 15 Hz during pair
 remaining slow until A, B or HOME is used to leave Change Grip/Order.
 
 The current backend mirrors that transition for the Pro Controller experiment and
-no longer injects an automatic L+R press. This is an experimental compatibility
-change and requires real-console validation.
+no longer injects an automatic L+R press. This behavior was validated on the real
+Switch 2 on 2026-09-24: an A press left Change Grip/Order, the existing HID link
+remained initialized, and the user confirmed that a later right, right, left, down
+sequence moved the HOME cursor in that exact order. No reconnect or fresh SSP
+occurred during this transition.
+
+The inbound-pairing fallback added after rejected key-based handoff attempts was not
+reached in this successful run. It remains a separate recovery path awaiting a
+console-side trigger that actually closes the initial HID link.

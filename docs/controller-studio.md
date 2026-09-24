@@ -108,8 +108,10 @@ and lets the launcher restore normal BlueZ.
 
 On a real Switch 2, the C backend has appeared as a Pro Controller; A, X and Plus
 were confirmed on the button-test screen, and left-stick right/left/up movement and
-centering were confirmed on the calibration screen. Right-stick reports have wire
-tests but were not separately observed in the console UI. GTK keyboard routing has
+centering were confirmed on the calibration screen. On 2026-09-24, A successfully
+left Change Grip/Order and the user confirmed right, right, left and down navigation
+on HOME over the same HID link. Right-stick reports have wire tests but were not
+separately observed in the console UI. GTK keyboard routing has
 been checked end to end with the backend simulation. SDL direct forwarding has a
 virtual-gamepad test; a physical PC gamepad test is deferred until hardware is
 available. Joy-Con L/R identities, report masking and two-socket GTK routing are
