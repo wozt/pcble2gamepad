@@ -5,8 +5,10 @@ bluetooth = dependency('bluez')
 libexec_dir = get_option('libexecdir') / 'pcble2gamepad'
 runner_path = get_option('prefix') / libexec_dir / 'run-classic.sh'
 configuration = configuration_data()
+asset_dir = get_option('prefix') / get_option('datadir') / 'pcble2gamepad' / 'svg'
 configuration.set_quoted('PCBLE2GAMEPAD_PRO_RUNNER', runner_path)
 configuration.set('PCBLE2GAMEPAD_RUNNER_PATH', runner_path)
+configuration.set_quoted('PCBLE2GAMEPAD_ASSET_DIR', asset_dir)
 configure_file(output: 'config.h', configuration: configuration)
 polkit_policy = configure_file(
   input: 'data/io.github.wozt.pcble2gamepad.policy.in',
@@ -28,11 +30,19 @@ install_data('poc/run-classic.sh', install_dir: libexec_dir,
 install_data(polkit_policy, install_dir: '/usr/share/polkit-1/actions')
 gtk = dependency('gtk4', version: '>=4.8', required: get_option('gui'))
 adw = dependency('libadwaita-1', version: '>=1.2', required: get_option('gui'))
-if gtk.found() and adw.found()
+rsvg = dependency('librsvg-2.0', version: '>=2.46', required: get_option('gui'))
+if gtk.found() and adw.found() and rsvg.found()
   sdl = dependency('sdl2', version: '>=2.0.14')
   math = meson.get_compiler('c').find_library('m')
   executable('pcble2gamepad-ble-lab', 'src/gui-ble.c', link_with: client, dependencies: [gio, json, gtk, adw], install: true)
-  executable('pcble2gamepad', ['src/gui.c', 'src/input-model.c'], link_with: client, dependencies: [gio, json, gtk, adw, sdl, math], install: true)
+  executable('pcble2gamepad', ['src/gui.c', 'src/input-model.c'], link_with: client, dependencies: [gio, json, gtk, adw, rsvg, sdl, math], install: true)
+  install_data(
+    [
+      'assets/svg/pro-controller.svg',
+      'assets/svg/joycon-left.svg',
+      'assets/svg/joycon-right.svg',
+    ],
+    install_dir: asset_dir)
   test('input-model', executable('test-input-model', ['tests/test-input-model.c', 'src/input-model.c'],
     include_directories: inc, dependencies: [gio, sdl, math]))
   install_data('data/io.github.wozt.pcble2gamepad.desktop', install_dir: get_option('datadir') / 'applications')

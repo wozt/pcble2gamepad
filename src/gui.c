@@ -2,6 +2,7 @@
 #include "input-model.h"
 #include "config.h"
 #include <adwaita.h>
+#include <librsvg/rsvg.h>
 #include <math.h>
 #include <signal.h>
 #include <unistd.h>
@@ -26,6 +27,7 @@ typedef struct {
     guint timer,ticks,saved_source;
     gboolean saved_arm,saved_auto_select,saved_traffic;
     GSubprocess *launcher;
+    RsvgHandle *pro_svg,*joycon_left_svg,*joycon_right_svg;
 } Ui;
 typedef struct {char *path,*path2;JsonObject *request;} Request;
 static void refresh_bindings(Ui *u);
@@ -71,7 +73,11 @@ static void ui_unref(Ui *u) {
     g_ptr_array_unref(u->adapter_ids);g_ptr_array_unref(u->adapter_addresses);g_ptr_array_unref(u->secondary_ids);g_ptr_array_unref(u->device_ids);
     g_free(u->socket);g_free(u->socket2);g_free(u->config_dir);g_free(u->profile_name);g_free(u->pending);
     g_free(u->settings_path);g_free(u->preferred_gamepad_guid);
-    g_free(u->paired_switch_address);g_free(u->paired_adapter_address);g_free(u);
+    g_free(u->paired_switch_address);g_free(u->paired_adapter_address);
+    g_clear_object(&u->pro_svg);
+    g_clear_object(&u->joycon_left_svg);
+    g_clear_object(&u->joycon_right_svg);
+    g_free(u);
 }
 static void margin(GtkWidget *w,int m) {gtk_widget_set_margin_start(w,m);gtk_widget_set_margin_end(w,m);gtk_widget_set_margin_top(w,m);gtk_widget_set_margin_bottom(w,m);}
 static GtkWidget *label(const char *s,const char *css) {GtkWidget *w=gtk_label_new(s);gtk_label_set_xalign(GTK_LABEL(w),0);gtk_label_set_wrap(GTK_LABEL(w),TRUE);if(css)gtk_widget_add_css_class(w,css);return w;}
@@ -329,24 +335,181 @@ static void devices_scan(Ui *u) {
     if(had_pad && !u->pad)
         toast(u,"Controller disconnected; inputs released");
 }
-static void draw(GtkDrawingArea *area,cairo_t *cr,int width,int height,gpointer data) {
-    (void)area;Ui *u=data;double scale=MIN(width/640.,height/270.);cairo_translate(cr,(width-640*scale)/2,(height-270*scale)/2);cairo_scale(cr,scale,scale);
-    if(pair_mode(u)) {
-        const double body_x[]={150,390};
-        for(int i=0;i<2;i++) {
-            cairo_set_source_rgb(cr,i?1.0:.04,i?.24:.73,i?.16:.90);cairo_new_sub_path(cr);cairo_arc(cr,body_x[i]+50,60,50,G_PI,2*G_PI);cairo_line_to(cr,body_x[i]+100,205);cairo_arc(cr,body_x[i]+50,205,50,0,G_PI);cairo_close_path(cr);cairo_fill(cr);
-            double sx=body_x[i]+50,sy=i?155:105;cairo_set_source_rgb(cr,.08,.10,.12);cairo_arc(cr,sx,sy,28,0,2*G_PI);cairo_fill(cr);cairo_set_source_rgb(cr,.35,.40,.43);cairo_arc(cr,sx+u->frame.axes[i*2]*15,sy-u->frame.axes[i*2+1]*15,15,0,2*G_PI);cairo_fill(cr);
-        }
-        return;
+static char *controller_asset_path(const char *name) {
+    const char *override=g_getenv("PCBLE2GAMEPAD_ASSET_DIR");
+
+    if(override && *override) {
+        char *path=g_build_filename(override,name,NULL);
+
+        if(g_file_test(path,G_FILE_TEST_IS_REGULAR))
+            return path;
+
+        g_free(path);
     }
-    cairo_set_source_rgb(cr,.12,.15,.18);cairo_move_to(cr,155,45);cairo_curve_to(cr,70,40,48,205,100,234);cairo_curve_to(cr,140,260,178,180,210,178);cairo_line_to(cr,430,178);cairo_curve_to(cr,465,180,505,260,545,234);cairo_curve_to(cr,595,205,570,40,485,45);cairo_close_path(cr);cairo_fill_preserve(cr);cairo_set_source_rgb(cr,.24,.29,.32);cairo_set_line_width(cr,2);cairo_stroke(cr);
-    for(int i=0;i<2;i++){double x=i?396:183,y=i?170:103;cairo_set_source_rgb(cr,.07,.09,.11);cairo_arc(cr,x,y,39,0,2*G_PI);cairo_fill(cr);cairo_set_source_rgb(cr,.25,.32,.36);cairo_arc(cr,x+u->frame.axes[2*i]*22,y-u->frame.axes[2*i+1]*22,22,0,2*G_PI);cairo_fill(cr);cairo_set_source_rgb(cr,.32,.88,.68);cairo_arc(cr,x+u->frame.axes[2*i]*22,y-u->frame.axes[2*i+1]*22,3,0,2*G_PI);cairo_fill(cr);}
-    const double x[]={518,490,490,462},y[]={106,134,78,106};const char *names[]={"A","B","X","Y"};
-    for(int i=0;i<4;i++){if(u->frame.active[i])cairo_set_source_rgb(cr,.28,.85,.65);else cairo_set_source_rgb(cr,.23,.28,.32);cairo_arc(cr,x[i],y[i],17,0,2*G_PI);cairo_fill(cr);cairo_set_source_rgb(cr,.9,.94,.97);cairo_set_font_size(cr,14);cairo_move_to(cr,x[i]-5,y[i]+5);cairo_show_text(cr,names[i]);}
-    for(int i=0;i<4;i++){double dx[]={0,0,-20,20},dy[]={-20,20,0,0};if(u->frame.active[14+i])cairo_set_source_rgb(cr,.28,.85,.65);else cairo_set_source_rgb(cr,.23,.28,.32);cairo_rectangle(cr,260+dx[i],154+dy[i],16,16);cairo_fill(cr);}
-    cairo_set_source_rgb(cr,.44,.53,.59);cairo_set_font_size(cr,12);cairo_move_to(cr,276,77);cairo_show_text(cr,"pcble2gamepad");
-    for(int i=0;i<4;i++){cairo_set_source_rgb(cr,.28,.85,.65);cairo_rectangle(cr,298+i*13,116,7,3);cairo_fill(cr);}
+
+    /*
+     * Development build:
+     *
+     *   repository/
+     *     build/pcble2gamepad
+     *     assets/svg/...
+     */
+    g_autofree char *exe=g_file_read_link("/proc/self/exe",NULL);
+
+    if(exe) {
+        g_autofree char *binary_dir=g_path_get_dirname(exe);
+        g_autofree char *root=g_path_get_dirname(binary_dir);
+        char *path=g_build_filename(
+            root,
+            "assets",
+            "svg",
+            name,
+            NULL);
+
+        if(g_file_test(path,G_FILE_TEST_IS_REGULAR))
+            return path;
+
+        g_free(path);
+    }
+
+    /*
+     * Installed build.
+     */
+    return g_build_filename(
+        PCBLE2GAMEPAD_ASSET_DIR,
+        name,
+        NULL);
 }
+
+static RsvgHandle *load_controller_svg(const char *name) {
+    g_autofree char *path=controller_asset_path(name);
+    g_autoptr(GError) error=NULL;
+
+    RsvgHandle *handle=rsvg_handle_new_from_file(path,&error);
+
+    if(!handle) {
+        g_warning(
+            "Could not load controller SVG %s: %s",
+            path,
+            error?error->message:"unknown error");
+    }
+
+    return handle;
+}
+
+static void render_controller_svg(RsvgHandle *handle,
+                                  cairo_t *cr,
+                                  double x,
+                                  double y,
+                                  double width,
+                                  double height) {
+    if(!handle)
+        return;
+
+    RsvgRectangle viewport={
+        .x=x,
+        .y=y,
+        .width=width,
+        .height=height
+    };
+
+    g_autoptr(GError) error=NULL;
+
+    if(!rsvg_handle_render_document(
+            handle,
+            cr,
+            &viewport,
+            &error)) {
+        g_warning(
+            "Could not render controller SVG: %s",
+            error?error->message:"unknown error");
+    }
+}
+
+static void draw_missing_controller(cairo_t *cr) {
+    cairo_save(cr);
+
+    cairo_set_source_rgba(cr,1.0,1.0,1.0,0.45);
+    cairo_select_font_face(
+        cr,
+        "Sans",
+        CAIRO_FONT_SLANT_NORMAL,
+        CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size(cr,16);
+    cairo_move_to(cr,225,140);
+    cairo_show_text(cr,"Controller SVG unavailable");
+
+    cairo_restore(cr);
+}
+
+static void draw(GtkDrawingArea *area,
+                 cairo_t *cr,
+                 int width,
+                 int height,
+                 gpointer data) {
+    (void)area;
+
+    Ui *u=data;
+
+    /*
+     * Keep a stable logical 640x270 canvas. SVG rendering stays sharp at
+     * every GTK scale factor because librsvg paints directly into Cairo.
+     */
+    double scale=MIN(width/640.0,height/270.0);
+
+    cairo_save(cr);
+    cairo_translate(
+        cr,
+        (width-640.0*scale)/2.0,
+        (height-270.0*scale)/2.0);
+    cairo_scale(cr,scale,scale);
+
+    if(pair_mode(u)) {
+        /*
+         * Original SVG ratio:
+         *   85.9 x 246.1
+         *
+         * Render the Joy-Con pair separately rather than stretching a
+         * pre-composed bitmap. This also gives us independent layers for
+         * input highlighting later.
+         */
+        if(u->joycon_left_svg && u->joycon_right_svg) {
+            render_controller_svg(
+                u->joycon_left_svg,
+                cr,
+                220,12,
+                84,241);
+
+            render_controller_svg(
+                u->joycon_right_svg,
+                cr,
+                336,12,
+                84,241);
+        } else {
+            draw_missing_controller(cr);
+        }
+    } else {
+        /*
+         * Original SVG ratio:
+         *   419.1 x 304.5
+         *
+         * 344 x 250 keeps that aspect ratio almost exactly and leaves some
+         * breathing room around the controller in the hero card.
+         */
+        if(u->pro_svg) {
+            render_controller_svg(
+                u->pro_svg,
+                cr,
+                148,10,
+                344,250);
+        } else {
+            draw_missing_controller(cr);
+        }
+    }
+
+    cairo_restore(cr);
+}
+
 static void adapters_scan(GtkButton *b,Ui *u) {
     (void)b;g_autoptr(GError)e=NULL;g_autoptr(GDBusConnection)bus=g_bus_get_sync(G_BUS_TYPE_SYSTEM,NULL,&e);if(!bus){toast(u,e->message);return;}
     g_autoptr(GVariant)reply=g_dbus_connection_call_sync(bus,"org.bluez","/","org.freedesktop.DBus.ObjectManager","GetManagedObjects",NULL,G_VARIANT_TYPE("(a{oa{sa{sv}}})"),0,1500,NULL,&e);
@@ -688,6 +851,10 @@ static void activate(GtkApplication *app,gpointer unused) {
     u->settings_path=g_build_filename(config_root,"settings.ini",NULL);
     u->profile_name=g_strdup("Default");
     app_state_load(u);
+
+    u->pro_svg=load_controller_svg("pro-controller.svg");
+    u->joycon_left_svg=load_controller_svg("joycon-left.svg");
+    u->joycon_right_svg=load_controller_svg("joycon-right.svg");
 
     input_profile_defaults(&u->profile,FALSE);
     g_autofree char *path=profile_path(u,u->profile_name);
