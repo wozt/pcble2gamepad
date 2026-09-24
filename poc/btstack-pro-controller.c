@@ -375,6 +375,29 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
         return;
     }
 
+    if (event == HCI_EVENT_CONNECTION_COMPLETE) {
+        uint8_t status = hci_event_connection_complete_get_status(packet);
+        uint8_t link_type = hci_event_connection_complete_get_link_type(packet);
+        hci_con_handle_t handle =
+            hci_event_connection_complete_get_connection_handle(packet);
+
+        if (status == ERROR_CODE_SUCCESS && link_type == 1) {
+            /*
+             * Initiate authentication from the controller side as soon as the
+             * inbound ACL exists. Waiting for the Switch to request SSP makes
+             * its remote No-Bonding requirement control the exchange, and the
+             * console then discards the key after this session.
+             */
+            gap_request_security_level(handle, LEVEL_2);
+
+            char detail[96];
+            snprintf(detail, sizeof(detail),
+                     "handle=%u level=2 initiator=controller", handle);
+            log_line("authentication_requested_local", detail);
+        }
+        return;
+    }
+
     if (event == HCI_EVENT_HID_META) {
         hid_event(packet);
         return;
