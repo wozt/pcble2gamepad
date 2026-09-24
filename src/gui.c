@@ -2098,10 +2098,16 @@ static GtkColorDialogButton *make_color_button(const char *title,
                                                 Ui *u) {
     (void)title;
 
+    /*
+     * gtk_color_dialog_button_new() takes ownership of the dialog reference.
+     * Keep one reference in Ui and transfer one additional reference to each
+     * of the four buttons.
+     */
     GtkColorDialogButton *button=
         GTK_COLOR_DIALOG_BUTTON(
             gtk_color_dialog_button_new(
-                u->color_dialog));
+                GTK_COLOR_DIALOG(
+                    g_object_ref(u->color_dialog))));
 
     gtk_color_dialog_button_set_rgba(
         button,

@@ -168,7 +168,7 @@ static uint8_t spi(const ProState *s, uint32_t a) {
     if (a == 0x6013)
         return 0xa0;
     if (a == 0x601b)
-        return 0x01;
+        return s->type == CONTROLLER_PRO ? 0x02 : 0x01;
 
     if (s->type == CONTROLLER_PRO) {
         if (a >= 0x603d && a < 0x603d + sizeof(pro_sticks)) return pro_sticks[a - 0x603d];

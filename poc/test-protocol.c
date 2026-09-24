@@ -32,7 +32,7 @@ static void reports(void) {
     g_assert_cmpint(
         out[21],
         ==,
-        1);
+        2);
 
     const uint8_t body[]={0x12,0x34,0x56};
     const uint8_t buttons[]={0x65,0x43,0x21};
