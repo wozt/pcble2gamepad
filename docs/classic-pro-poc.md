@@ -98,16 +98,43 @@ of unconditionally claiming success. The runner still restores normal BlueZ.
 Fresh pairing from Change Grip/Order succeeds, but its SSP IO Capability exchange
 has the Switch request No Bonding (`0x00`). Linux follows that request in responder
 role, reports `store_hint=0`, and the Switch later rejects the locally restored key.
-The backend now has one bounded alternative for a previously learned console
-address: `MGMT_OP_PAIR_DEVICE` with `NoInputNoOutput`. Linux 6.12 starts that path
-with `BT_SECURITY_MEDIUM` and `HCI_AT_DEDICATED_BONDING`.
 
-The HCI monitor logs `pairing_local_io` as well as `pairing_peer_io`, so the hardware
-test can distinguish the intended local `0x02` reply from the responder path that
-falls back to `0x00`. Success requires a management Link Key event with
-`store_hint=1` followed by a reconnect that reaches Authentication Complete without
-a second SSP exchange. This path is implemented but is not yet claimed as validated
-on the Switch 2.
+A bounded `MGMT_OP_PAIR_DEVICE` experiment tested whether making Linux the pairing
+initiator could preserve `HCI_AT_DEDICATED_BONDING`. The management command issued a
+successful HCI Create Connection to `38:C6:CE:1F:B5:31`; the ACL completed with
+handle 1. The Switch then terminated the ACL with `Remote User Terminated Connection
+(0x13)` about 265 ms later, while Linux was reading remote features. No
+Authentication Requested, IO Capability event or SSP packet occurred. The management
+command completed with status `0x0e` (Disconnected).
+
+This rules out Management Pair Device for this console flow: the Switch accepts the
+page but refuses controller-initiated fresh pairing before Linux can send the
+Dedicated Bonding authentication requirement. The automatic GTK path was removed;
+the working Switch-initiated Pair / Sync behavior remains unchanged.
+
+## Userspace HCI fallback assessment
+
+A viable next experiment must retain the working direction: Switch-initiated ACL,
+then answer the local HCI IO Capability Request with bonding (`0x02` or `0x04`) even
+though the remote response is No Bonding. Linux cannot express that policy through
+BlueZ or MGMT because `hci_get_auth_req()` deliberately follows the remote
+No-Bonding value.
+
+BTstack can run on Linux through `HCI_CHANNEL_USER`: BlueZ is stopped, the selected
+HCI device is brought down, and BTstack takes exclusive protocol ownership while
+the existing `btusb` transport remains loaded. This is preferable on the current
+Realtek `0bda:c820` Wi-Fi/Bluetooth combination device to the libusb port, which
+resets the whole USB device before claiming its Bluetooth interface and could also
+disrupt the Wi-Fi interface on the same device.
+
+Unmodified BTstack is not sufficient. In responder role its current SSP code drops
+the local bonding flag after receiving a remote No-Bonding response, matching the
+Linux behavior under investigation. The Switch experiment therefore needs a narrow
+BTstack policy change that preserves a local Dedicated Bonding reply for this
+controller profile, plus persistent TLV link-key storage. The existing Nintendo HID
+report code and GTK IPC can remain above that transport. BTstack also carries a
+non-commercial license, so it cannot simply be vendored into this MIT repository
+without making that licensing boundary explicit or obtaining compatible terms.
 
 ## Change Grip/Order transition investigation
 

@@ -24,7 +24,6 @@ On 2026-09-23 Realtek `E0:AD:47:40:70:D9` is `hci1`.
 
 ```sh
 sudo ./poc/run-classic.sh hci1
-sudo ./poc/run-classic.sh hci1 --initiate-pair 38:C6:CE:1F:B5:31
 # Add --verbose only when raw HID packet logs are needed.
 ```
 
@@ -34,11 +33,10 @@ on exit. Other Bluetooth services are unavailable during this bounded test.
 The root backend opens raw L2CAP sockets and changes the volatile device class;
 Controller Studio stays unprivileged and talks to it over a private Unix socket.
 No firmware/NVM is modified.
-The `--initiate-pair` form uses `MGMT_OP_PAIR_DEVICE` so Linux starts SSP with
-Dedicated Bonding. The logs expose both local and remote IO authentication values,
-the command result and the Link Key `store_hint`; persistent Switch-side retention
-must be confirmed by a reconnect test. Captures are local/private because they can
-contain Bluetooth link keys.
+The backend logs both local and remote SSP IO authentication values and the Link
+Key `store_hint`. Switch 2 currently requests No Bonding, so the working Pair / Sync
+session is temporary and persistent reconnect remains unresolved. Captures are
+local/private because they can contain Bluetooth link keys.
 
 The POC saves/restores adapter alias, pairability, discoverability, their timeouts,
 power state and device class. It powers the selected adapter temporarily when the

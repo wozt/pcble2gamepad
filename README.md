@@ -86,19 +86,16 @@ Choose the emulated controller and Bluetooth adapter by address. Controller
 Studio deliberately separates **Pair / Sync new Switch** from **Reconnect paired
 Switch**.
 
-Pairing requires **Controllers -> Change Grip/Order**. Open that screen before
-clicking **Pair / Sync new Switch**. When Controller Studio already knows the console
-address, the backend asks the Linux Management API to initiate SSP with Dedicated
-Bonding and `NoInputNoOutput`; this is the targeted path for making both peers retain
-the BR/EDR Link Key. With an unknown console address it remains passively
-discoverable for one session so the address can be learned.
+Pairing requires **Controllers -> Change Grip/Order**. The Switch initiates the
+Classic connection, completes SSP and opens HID PSM 17/19. The backend captures the
+generated Link Key and stores it privately under
+`/var/lib/pcble2gamepad/pairings/`; the record includes the console and adapter
+addresses, key type, PIN length, management `store_hint` and the 128-bit key.
 
-The backend captures every generated Link Key and stores it privately under
-`/var/lib/pcble2gamepad/pairings/`. The record contains the Switch address, local
-adapter identity, key type, PIN length, management `store_hint` and the 128-bit key
-encoded as Base64. Normal sessions restore that key before initiating HID control
-PSM 17 and interrupt PSM 19. Persistent reconnect after PC or console restart still
-requires real-console validation of the new Dedicated Bonding path.
+The Switch 2 requests `No Bonding` during this exchange. Linux therefore reports
+`store_hint=0`, and a measured reconnect shows that the console rejects the locally
+restored key. **Reconnect paired Switch** remains an experimental diagnostic while
+a userspace HCI pairing path is evaluated; Pair / Sync remains the validated path.
 
 The
 application invokes its narrow backend with `pkexec`, temporarily restarts BlueZ

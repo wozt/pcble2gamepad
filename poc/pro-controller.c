@@ -31,7 +31,6 @@ static gboolean shared_profile;
 static gboolean verbose_traffic;
 static gboolean reconnect_mode;
 static char reconnect_peer[18];
-static char initiated_pair_peer[18];
 static bdaddr_t selected_local_address;
 static gboolean have_selected_local_address;
 
@@ -60,8 +59,6 @@ static char pairing_local_address[18];
 #define PC_MGMT_EV_CMD_STATUS     0x0002
 #define PC_MGMT_EV_NEW_LINK_KEY   0x0009
 #define PC_MGMT_OP_LOAD_LINK_KEYS 0x0012
-#define PC_MGMT_OP_PAIR_DEVICE    0x0019
-#define PC_MGMT_IO_NO_INPUT_OUTPUT 0x03
 
 #ifndef HCI_CHANNEL_MONITOR
 #define HCI_CHANNEL_MONITOR 2
@@ -108,15 +105,6 @@ typedef struct __attribute__((packed)) {
     uint16_t key_count;
     PcMgmtLinkKey key;
 } PcMgmtLoadOneKey;
-
-typedef struct __attribute__((packed)) {
-    PcMgmtHdr hdr;
-    PcMgmtAddrInfo addr;
-    uint8_t io_capability;
-} PcMgmtPairDevice;
-
-_Static_assert(sizeof(PcMgmtPairDevice)==sizeof(PcMgmtHdr)+8,
-    "MGMT Pair Device must have an eight-byte payload");
 
 typedef struct __attribute__((packed)) {
     uint16_t opcode;
@@ -559,33 +547,6 @@ static gboolean pairing_mgmt_event(gint fd,GIOCondition condition,gpointer unuse
     if(index!=(uint16_t)pairing_mgmt_index)
         return G_SOURCE_CONTINUE;
 
-    if(opcode==PC_MGMT_EV_CMD_COMPLETE ||
-       opcode==PC_MGMT_EV_CMD_STATUS) {
-        if(payload_size<sizeof(PcMgmtCommandResult) ||
-           size<(ssize_t)(sizeof(PcMgmtHdr)+sizeof(PcMgmtCommandResult)))
-            return G_SOURCE_CONTINUE;
-
-        const PcMgmtCommandResult *result=
-            (const PcMgmtCommandResult *)(buffer+sizeof(PcMgmtHdr));
-
-        if(btohs(result->opcode)!=PC_MGMT_OP_PAIR_DEVICE)
-            return G_SOURCE_CONTINUE;
-
-        char detail[192];
-        snprintf(
-            detail,
-            sizeof(detail),
-            "peer=%s status=0x%02x event=%s",
-            initiated_pair_peer,
-            result->status,
-            opcode==PC_MGMT_EV_CMD_COMPLETE?"complete":"status");
-
-        log_event(
-            result->status==0?"pairing_pair_device_complete":"pairing_pair_device_error",
-            detail);
-        return G_SOURCE_CONTINUE;
-    }
-
     if(opcode!=PC_MGMT_EV_NEW_LINK_KEY ||
        payload_size<sizeof(PcMgmtNewLinkKey) ||
        size<(ssize_t)(sizeof(PcMgmtHdr)+sizeof(PcMgmtNewLinkKey)))
@@ -628,52 +589,6 @@ static gboolean pairing_capture_start(void) {
     log_event("pairing_key_capture",
         "MGMT and HCI monitor BR/EDR Link Key capture armed");
 
-    return TRUE;
-}
-
-static gboolean pairing_initiate_bond(const char *remote) {
-    if(pairing_mgmt_fd<0) {
-        log_event("pairing_pair_device_error",
-            "Bluetooth management channel is unavailable");
-        return FALSE;
-    }
-
-    PcMgmtPairDevice request={0};
-    request.hdr.opcode=htobs(PC_MGMT_OP_PAIR_DEVICE);
-    request.hdr.index=htobs((uint16_t)pairing_mgmt_index);
-    request.hdr.len=htobs(sizeof(request)-sizeof(request.hdr));
-    str2ba(remote,&request.addr.bdaddr);
-    request.addr.type=0;
-    request.io_capability=PC_MGMT_IO_NO_INPUT_OUTPUT;
-
-    ssize_t written;
-    do {
-        written=write(pairing_mgmt_fd,&request,sizeof(request));
-    } while(written<0 && errno==EINTR);
-
-    if(written<0) {
-        char detail[256];
-        snprintf(
-            detail,
-            sizeof(detail),
-            "peer=%s write failed: %s (errno=%d)",
-            remote,
-            g_strerror(errno),
-            errno);
-        log_event("pairing_pair_device_error",detail);
-        return FALSE;
-    }
-
-    char detail[256];
-    snprintf(
-        detail,
-        sizeof(detail),
-        "peer=%s index=%d io=NoInputNoOutput "
-        "requested_auth=dedicated-bonding write_return=%zd",
-        remote,
-        pairing_mgmt_index,
-        written);
-    log_event("pairing_pair_device_request",detail);
     return TRUE;
 }
 
@@ -1555,18 +1470,12 @@ int main(int argc,char **argv) {
                 g_regex_match_simple("^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$",argv[i+1],0,0)) {
             g_strlcpy(reconnect_peer,argv[++i],sizeof(reconnect_peer));
             reconnect_mode=TRUE;
-        } else if(!strcmp(argv[i],"--initiate-pair") && i+1<argc &&
-                g_regex_match_simple("^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$",argv[i+1],0,0)) {
-            g_strlcpy(initiated_pair_peer,argv[++i],sizeof(initiated_pair_peer));
         }
         else {fprintf(stderr,"Unknown or incomplete option: %s\n",argv[i]);return 2;}
     }
     desktop_requested=desktop_mode;
-    if(argc<3 || !g_regex_match_simple("^hci[0-9]+$",argv[1],0,0) ||
-       (desktop_mode && getuid()!=0) ||
-       (reconnect_mode && initiated_pair_peer[0]) ||
-       (initiated_pair_peer[0] && controller_type!=CONTROLLER_PRO)) {
-        fprintf(stderr,"Usage: %s hciN SDP_XML [--desktop UID] [--type pro|joycon-l|joycon-r] [--allow-adapter hciN] [--shared-profile] [--verbose] [--reconnect MAC | --initiate-pair MAC]\n",argv[0]);return 2;
+    if(argc<3 || !g_regex_match_simple("^hci[0-9]+$",argv[1],0,0) || (desktop_mode && getuid()!=0)) {
+        fprintf(stderr,"Usage: %s hciN SDP_XML [--desktop UID] [--type pro|joycon-l|joycon-r] [--allow-adapter hciN] [--shared-profile] [--verbose] [--reconnect MAC]\n",argv[0]);return 2;
     }
     int result=1,dd=-1;uint8_t old_class[3]={0};gboolean have_class=FALSE;
     GVariant *saved[6]={0};const char *keys[]={"Powered","Alias","Pairable","Discoverable","PairableTimeout","DiscoverableTimeout"};
@@ -1724,10 +1633,8 @@ int main(int argc,char **argv) {
             goto cleanup;
     } else {
         /*
-         * First pairing / new console: retain passive HID listeners. When a
-         * known console address is available, MGMT Pair Device initiates SSP
-         * so Linux can answer with Dedicated Bonding while remote auth is still
-         * unknown.
+         * First pairing / new console: the Switch initiates the HID
+         * connection while Change Grip/Order is open.
          */
         for(int i=0;i<2;i++) {
             listeners[i]=socket(
@@ -1774,9 +1681,8 @@ int main(int argc,char **argv) {
             snprintf(
                 security_detail,
                 sizeof(security_detail),
-                "psm=%d level=BT_SECURITY_LOW pairing_initiator=%s",
-                i?19:17,
-                initiated_pair_peer[0]?"pc":"switch");
+                "psm=%d level=BT_SECURITY_LOW host-driven-ssp=true",
+                i?19:17);
 
             log_event("pairing_security",security_detail);
 
@@ -1806,31 +1712,17 @@ int main(int argc,char **argv) {
            !set_property("PairableTimeout",g_variant_new_uint32(180)) ||
            !set_property("DiscoverableTimeout",g_variant_new_uint32(180)) ||
            !set_property("Pairable",g_variant_new_boolean(TRUE)) ||
-           !set_property("Discoverable",
-               g_variant_new_boolean(!initiated_pair_peer[0]))) goto cleanup;
+           !set_property("Discoverable",g_variant_new_boolean(TRUE))) goto cleanup;
 
         if(hci_write_class_of_dev(dd,0x002508,2000)<0) {
             log_event("class_error",strerror(errno));goto cleanup;
         }
 
-        char ready[256];
-        if(initiated_pair_peer[0]) {
-            snprintf(ready,sizeof(ready),
-                "Name=%s class=0x002508 pairable=true PSM=17/19; "
-                "initiating dedicated bond to %s",
-                controller_alias,
-                initiated_pair_peer);
-            log_event("ready",ready);
-
-            if(!pairing_initiate_bond(initiated_pair_peer))
-                goto cleanup;
-        } else {
-            snprintf(ready,sizeof(ready),
-                "Name=%s class=0x002508 discoverable=true pairable=true "
-                "PSM=17/19; open Change Grip/Order",
-                controller_alias);
-            log_event("ready",ready);
-        }
+        char ready[180];
+        snprintf(ready,sizeof(ready),
+            "Name=%s class=0x002508 discoverable=true pairable=true PSM=17/19; open Change Grip/Order",
+            controller_alias);
+        log_event("ready",ready);
     }
     g_dbus_connection_signal_subscribe(bus,"org.bluez","org.freedesktop.DBus.Properties","PropertiesChanged",NULL,NULL,0,changed,NULL,NULL);
     loop=g_main_loop_new(NULL,FALSE);g_unix_signal_add(SIGINT,quit,NULL);g_unix_signal_add(SIGTERM,quit,NULL);
