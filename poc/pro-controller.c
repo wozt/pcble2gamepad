@@ -1056,9 +1056,9 @@ static void reset_link(void) {
     }
 }
 static uint8_t timer_byte(void) {return (uint8_t)(g_get_monotonic_time()/5000);}
-static gboolean send_report(const uint8_t out[50]) {
-    ssize_t n=send(channels[1],out,50,MSG_DONTWAIT|MSG_NOSIGNAL);
-    if(n==50) {sent++; return TRUE;}
+static gboolean send_report(const uint8_t out[50],size_t length) {
+    ssize_t n=send(channels[1],out,length,MSG_DONTWAIT|MSG_NOSIGNAL);
+    if(n==(ssize_t)length) {sent++; return TRUE;}
     if(n<0 && (errno==EAGAIN || errno==EWOULDBLOCK)) return TRUE;
     log_event("hid_send_error",strerror(errno));return FALSE;
 }
@@ -1088,7 +1088,7 @@ static gboolean receive_packet(gint fd,GIOCondition cond,gpointer user) {
         return G_SOURCE_CONTINUE;
     }
     if(pro_reply(&state,in,(size_t)n,timer_byte(),out)) {
-        if(!send_report(out)) {watches[index]=0;reset_link();return G_SOURCE_REMOVE;}
+        if(!send_report(out,50)) {watches[index]=0;reset_link();return G_SOURCE_REMOVE;}
         char detail[96];snprintf(detail,sizeof(detail),"subcommand=0x%02x mode=0x%02x lights=0x%02x",in[11],state.mode,state.lights);
         log_event("hid_reply",detail);
         if(state.lights && state.vibration && !initialized) {
@@ -1258,9 +1258,9 @@ static gboolean connect_outbound(const bdaddr_t *local,
     slow_exit_until=0;
 
     uint8_t out[50];
-    pro_input(&state,timer_byte(),out);
+    size_t length=pro_stream_input(&state,timer_byte(),out);
 
-    if(!send_report(out))
+    if(!send_report(out,length))
         goto failed;
 
     log_event(
@@ -1523,15 +1523,16 @@ static gboolean tick(gpointer unused) {
 
         if(!next_report_at || now>=next_report_at) {
             uint8_t out[50];
-            pro_input(&state,timer_byte(),out);
+            size_t length=pro_stream_input(&state,timer_byte(),out);
 
-            if(!send_report(out)) {
+            if(!send_report(out,length)) {
                 reset_link();
             } else {
                 gint64 interval;
 
                 if(slow_input_frequency)
-                    interval=saw_interrupt_output ? 66667 : 1000000;
+                    interval=saw_interrupt_output ? 66667 :
+                        controller_type==CONTROLLER_PRO ? 100000 : 1000000;
                 else
                     interval=15000;
 
@@ -1546,7 +1547,7 @@ static gboolean tick(gpointer unused) {
 }
 static void status_event(void) {
     const char *phase=!peer[0]?(reconnect_mode?"reconnect":"waiting"):
-        !saw_interrupt_output?(reconnect_mode?"reconnect-handshake":"pairing-1hz"):
+        !saw_interrupt_output?(reconnect_mode?"reconnect-handshake":"pairing-10hz"):
         slow_input_frequency?(reconnect_mode?"reconnect-15hz":"grip-order-15hz"):"normal";
     char msg[180];
     snprintf(msg,sizeof(msg),

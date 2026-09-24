@@ -226,3 +226,12 @@ Switch subsequently initiated fresh SSP and generated a new key. The reference
 project documents automatic reconnect for hosts that retain a bond, but it also
 states that a host advertising No Bonding keeps no key. Our capture shows that
 No-Bonding case consistently on this Switch 2.
+
+A second alignment covered the Nintendo wire profile itself: initial `0x3F`
+reports at 10 Hz, transition to `0x30` only after subcommand `0x03`, firmware
+`03 48` in Device Info, reference battery/vibrator fields, elapsed-time data, and
+reference ACKs for NFC/IR and vibration. The Switch completed initialization, the
+real A bit left Change Grip/Order, and the link remained healthy in normal cadence.
+After 30 seconds outside the menu and a clean backend stop, the next page was still
+terminated with `0x13` before authentication. Nintendo HID response fidelity is
+therefore not what prevents this console from retaining the BR/EDR Link Key.

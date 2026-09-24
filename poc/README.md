@@ -69,6 +69,11 @@ BTstack is fetched into the ignored build directory and is not vendored under th
 project's MIT license. Its personal, non-commercial license is reproduced in
 `BTSTACK-LICENSE`; commercial distribution requires separate terms from BlueKitchen.
 
+The Pro wire profile follows the validated reference sequence: simple `0x3F`
+input before negotiation, full `0x30` input only after subcommand `0x03`, and the
+Switch 2 Device Info and initialization replies. This improves controller fidelity
+but does not change the console's No-Bonding decision.
+
 The POC saves/restores adapter alias, pairability, discoverability, their timeouts,
 power state and device class. It powers the selected adapter temporarily when the
 compatibility-mode BlueZ restart leaves it off. For Pro Controller sessions it

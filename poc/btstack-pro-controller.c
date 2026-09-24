@@ -40,7 +40,7 @@
 #define REPLY_QUEUE_LENGTH 8
 #define PRO_REPORT_LENGTH 50
 #define STREAM_TICK_MS 15
-#define PAIRING_INITIAL_MS 1000
+#define PAIRING_INITIAL_MS 100
 #define PAIRING_ACTIVE_MS 67
 #define RECONNECT_DELAY_MS 1500
 #define RECONNECT_MAX_ATTEMPTS 4
@@ -137,8 +137,8 @@ static void handle_can_send_now(void) {
     } else if (regular_report_due) {
         uint8_t report[PRO_REPORT_LENGTH];
         regular_report_due = false;
-        pro_input(&controller, report_timer(), report);
-        hid_device_send_interrupt_message(hid_cid, report, sizeof(report));
+        size_t length=pro_stream_input(&controller,report_timer(),report);
+        hid_device_send_interrupt_message(hid_cid,report,(uint16_t)length);
         sent_reports++;
     }
 

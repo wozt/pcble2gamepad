@@ -13,6 +13,7 @@ typedef struct {
 void controller_init(ProState *s, ControllerType type, const uint8_t address[6]);
 void pro_init(ProState *s, const uint8_t address[6]);
 void pro_input(const ProState *s, uint8_t timer, uint8_t out[50]);
+size_t pro_stream_input(const ProState *s, uint8_t timer, uint8_t out[50]);
 /* Returns false for malformed/unsupported output reports; never reads past len. */
 bool pro_reply(ProState *s, const uint8_t *in, size_t len, uint8_t timer, uint8_t out[50]);
 #endif
