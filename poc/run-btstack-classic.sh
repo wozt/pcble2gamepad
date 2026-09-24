@@ -4,7 +4,7 @@ set -euo pipefail
 
 [[ $EUID == 0 ]] || { echo 'Run through pkexec or sudo.' >&2; exit 1; }
 [[ $# -ge 1 && $1 =~ ^hci[0-9]+$ ]] || {
-    echo "Usage: $0 hciN [--reset-bond]" >&2
+    echo "Usage: $0 hciN [--reset-bond] [--passive]" >&2
     exit 2
 }
 
@@ -13,10 +13,12 @@ project_dir=$(cd -- "$script_dir/.." && pwd)
 adapter=$1
 shift
 reset_bond=false
+passive=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --reset-bond) reset_bond=true; shift ;;
+        --passive) passive=true; shift ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -42,6 +44,9 @@ chmod 700 /var/lib/pcble2gamepad "$state_dir"
 tlv="$state_dir/${adapter}.tlv"
 arguments=(--device-id "${adapter#hci}" --tlv "$tlv" --logfile "$capture/hci.pklg")
 $reset_bond && arguments+=(--reset-bond)
+$passive && arguments+=(--passive)
+[[ ! -e $tlv ]] || chmod 600 "$tlv"
+umask 077
 
 restored=false
 cleanup() {
@@ -50,6 +55,7 @@ cleanup() {
         systemctl restart bluetooth
         restored=true
     fi
+    [[ ! -e $tlv ]] || chmod 600 "$tlv"
     find "$capture" -type f -exec chmod 600 {} +
     if [[ $owner != 0 ]]; then chown -R "$owner" "$capture"; fi
     echo "Normal BlueZ restored. Private capture: $capture"

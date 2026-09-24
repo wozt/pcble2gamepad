@@ -52,9 +52,11 @@ sudo ./poc/run-btstack-classic.sh hci1 --reset-bond
 
 The isolated BTstack patch preserves a local Dedicated Bonding AuthReq (`0x02`)
 when a Switch-initiated SSP response requests No Bonding (`0x00`). Link Keys are
-stored in `/var/lib/pcble2gamepad/btstack/hciN.tlv`. Run the command again without
-`--reset-bond` to test a controller-initiated reconnect. This path is experimental
-until the on-air AuthReq, console retention and restart reconnect are all observed.
+stored with mode `0600` in `/var/lib/pcble2gamepad/btstack/hciN.tlv`. Run the
+command again without `--reset-bond` to test a controller-initiated reconnect. Use
+`--passive` to test whether a console currently on Change Grip/Order resumes the
+stored bond from its side. Automatic reconnect is limited to four attempts. This
+path is experimental until console retention and restart reconnect are observed.
 
 BTstack is fetched into the ignored build directory and is not vendored under this
 project's MIT license. Its personal, non-commercial license is reproduced in

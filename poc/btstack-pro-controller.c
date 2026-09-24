@@ -43,6 +43,7 @@
 #define PAIRING_INITIAL_MS 1000
 #define PAIRING_ACTIVE_MS 67
 #define RECONNECT_DELAY_MS 1500
+#define RECONNECT_MAX_ATTEMPTS 4
 
 static const uint8_t report_descriptor[] = {
     0x05,0x01,0x09,0x05,0xa1,0x01,
@@ -70,6 +71,7 @@ static bd_addr_t peer_address;
 static bool have_peer;
 static bool have_bond;
 static bool shutting_down;
+static bool reconnect_enabled = true;
 static bool saw_output;
 static bool initialized;
 static bool can_send_requested;
@@ -78,6 +80,7 @@ static uint16_t hid_cid;
 static uint32_t next_report_ms;
 static unsigned sent_reports;
 static unsigned received_reports;
+static unsigned reconnect_attempts;
 static uint8_t reply_queue[REPLY_QUEUE_LENGTH][PRO_REPORT_LENGTH];
 static unsigned reply_head;
 static unsigned reply_count;
@@ -237,21 +240,28 @@ static void enter_pairable(void) {
 
 static void reconnect_timer_handler(btstack_timer_source_t *timer) {
     (void)timer;
-    if (!have_bond || !have_peer || hid_cid || shutting_down)
+    if (!reconnect_enabled || !have_bond || !have_peer || hid_cid || shutting_down)
         return;
+    if (reconnect_attempts >= RECONNECT_MAX_ATTEMPTS) {
+        log_line("reconnect_exhausted",
+                 "Four controller-initiated attempts failed; remaining passive");
+        return;
+    }
 
+    reconnect_attempts++;
     gap_set_security_level(LEVEL_2);
     uint16_t pending_cid = 0;
     uint8_t status = hid_device_connect(peer_address, &pending_cid);
     char address[18];
     char detail[128];
     format_address(peer_address, address);
-    snprintf(detail, sizeof(detail), "peer=%s status=0x%02x", address, status);
+    snprintf(detail, sizeof(detail), "peer=%s attempt=%u/%u status=0x%02x",
+             address, reconnect_attempts, RECONNECT_MAX_ATTEMPTS, status);
     log_line("reconnect_attempt", detail);
 }
 
 static void schedule_reconnect(void) {
-    if (!have_bond || !have_peer || shutting_down)
+    if (!reconnect_enabled || !have_bond || !have_peer || shutting_down)
         return;
     btstack_run_loop_remove_timer(&reconnect_timer);
     btstack_run_loop_set_timer_handler(&reconnect_timer, reconnect_timer_handler);
@@ -305,6 +315,7 @@ static void hid_event(const uint8_t *packet) {
         }
 
         hid_cid = hid_subevent_connection_opened_get_hid_cid(packet);
+        reconnect_attempts = 0;
         hid_subevent_connection_opened_get_bd_addr(packet, peer_address);
         have_peer = true;
         gap_discoverable_control(0);
@@ -472,7 +483,7 @@ void hal_led_toggle(void) {
 
 static void usage(const char *program) {
     fprintf(stderr,
-            "Usage: %s --device-id N --tlv PATH --logfile PATH [--reset-bond]\n",
+            "Usage: %s --device-id N --tlv PATH --logfile PATH [--reset-bond] [--passive]\n",
             program);
 }
 
@@ -485,12 +496,13 @@ int main(int argc, char **argv) {
         {"tlv", required_argument, NULL, 't'},
         {"logfile", required_argument, NULL, 'l'},
         {"reset-bond", no_argument, NULL, 'r'},
+        {"passive", no_argument, NULL, 'p'},
         {"help", no_argument, NULL, 'h'},
         {NULL, 0, NULL, 0}
     };
 
     for (;;) {
-        int option = getopt_long(argc, argv, "u:t:l:rh", options, NULL);
+        int option = getopt_long(argc, argv, "u:t:l:rph", options, NULL);
         if (option < 0)
             break;
         switch (option) {
@@ -507,6 +519,7 @@ int main(int argc, char **argv) {
         case 't': tlv_path = optarg; break;
         case 'l': log_path = optarg; break;
         case 'r': reset_bond = true; break;
+        case 'p': reconnect_enabled = false; break;
         default:
             usage(argv[0]);
             return option == 'h' ? EXIT_SUCCESS : EXIT_FAILURE;
