@@ -48,6 +48,11 @@ if gtk.found() and adw.found() and rsvg.found()
   install_data('data/io.github.wozt.pcble2gamepad.desktop', install_dir: get_option('datadir') / 'applications')
 endif
 test('protocol', executable('test-protocol', 'tests/test-protocol.c', include_directories: inc, link_with: protocol, dependencies: gio))
+test('controller-backend-protocol',
+  executable(
+    'test-controller-backend-protocol',
+    ['poc/test-protocol.c', 'poc/protocol.c'],
+    dependencies: gio))
 test('ipc', find_program('tests/test-ipc.sh'), args: [meson.current_build_dir()], depends: [daemon, ctl], timeout: 30)
 test('core', executable('test-core', ['tests/test-core.c', 'src/core.c', 'src/bluez.c'], include_directories: inc, link_with: protocol, dependencies: [gio, json]))
 fake_bluez = executable('fake-bluez', 'tests/fake-bluez.c', dependencies: gio)

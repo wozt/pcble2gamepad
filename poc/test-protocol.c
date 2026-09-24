@@ -14,7 +14,7 @@ static void reports(void) {
     g_assert_cmpint(out[1],==,0x21);g_assert_cmpint(out[17],==,0x48);
     g_assert_cmpint(out[18],==,3);g_assert_cmpmem(out+20,6,mac,6);
     g_assert_cmpint(out[26],==,1);
-    g_assert_cmpint(out[27],==,1);
+    g_assert_cmpint(out[27],==,2);
 
     /*
      * Factory configuration says that controller colors are present.
@@ -40,17 +40,37 @@ static void reports(void) {
     const uint8_t right_grip[]={0x11,0x22,0x33};
     controller_set_colors(&s,body,buttons,left_grip,right_grip);
 
-    in[11]=0x10;in[12]=0x50;in[13]=0x60;in[14]=0;in[15]=0;in[16]=12;
+    in[11]=0x10;in[12]=0x50;in[13]=0x60;in[14]=0;in[15]=0;in[16]=13;
     g_assert_true(pro_reply(&s,in,17,7,out));
     g_assert_cmpmem(out+21,3,body,3);
     g_assert_cmpmem(out+24,3,buttons,3);
     g_assert_cmpmem(out+27,3,left_grip,3);
     g_assert_cmpmem(out+30,3,right_grip,3);
 
-    in[11]=0x10;in[12]=0x3d;in[13]=0x60;in[16]=18;
-    g_assert_true(pro_reply(&s,in,17,7,out));g_assert_cmpint(out[14],==,0x90);
+    /* 0x605C: standard design variation. */
+    g_assert_cmpint(out[33],==,0);
+
+    in[11]=0x10;
+    in[12]=0x3d;
+    in[13]=0x60;
+    in[14]=0;
+    in[15]=0;
+    in[16]=25;
+
+    g_assert_true(pro_reply(&s,in,17,7,out));
+    g_assert_cmpint(out[14],==,0x90);
+
     const uint8_t flat[]={0xf0,0x07,0x7f};
-    g_assert_cmpmem(out+21,3,flat,3);g_assert_cmpmem(out+30,3,flat,3);
+    g_assert_cmpmem(out+21,3,flat,3);
+    g_assert_cmpmem(out+30,3,flat,3);
+
+    /*
+     * 0x603D + 0x13 == 0x6050.
+     * The tail of this same Switch read must expose the configured
+     * body/buttons, not stale stick-table bytes.
+     */
+    g_assert_cmpmem(out+40,3,body,3);
+    g_assert_cmpmem(out+43,3,buttons,3);
     in[12]=0x10;in[13]=0x80;in[16]=24;
     g_assert_true(pro_reply(&s,in,17,7,out));for(int i=21;i<45;i++)g_assert_cmpint(out[i],==,0xff);
     in[16]=30;g_assert_false(pro_reply(&s,in,17,7,out));

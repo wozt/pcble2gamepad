@@ -134,9 +134,21 @@ size_t pro_stream_input(const ProState *s, uint8_t timer, uint8_t out[50]) {
 }
 
 static uint8_t spi(const ProState *s, uint32_t a) {
+    /*
+     * Factory stick calibration occupies 0x603D..0x604E.
+     * 0x604F is an additional factory byte seen on a real Pro Controller.
+     *
+     * Do NOT extend this table into 0x6050: that is where the controller
+     * body/button colors begin.
+     */
     static const uint8_t pro_sticks[] = {
-        0xf0,0x07,0x7f,0xf0,0x07,0x7f,0xf0,0x07,0x7f,
-        0xf0,0x07,0x7f,0xf0,0x07,0x7f,0xf0,0x07,0x7f,0x0f,0x0f,0,0,0,0,0
+        0xf0,0x07,0x7f,
+        0xf0,0x07,0x7f,
+        0xf0,0x07,0x7f,
+        0xf0,0x07,0x7f,
+        0xf0,0x07,0x7f,
+        0xf0,0x07,0x7f,
+        0x0f
     };
     static const uint8_t pro_config[] = {
         0x5e,0x01,0,0,0xf1,0x0f,0x19,0xd0,0x4c,0xae,0x40,0xe1,
@@ -160,8 +172,8 @@ static uint8_t spi(const ProState *s, uint32_t a) {
     /*
      * Factory identity fields used by Nintendo during controller setup.
      *
-     * 0x601B == 1 explicitly tells the console that custom color
-     * information exists in SPI.
+     * 0x601B controls SPI colors:
+     * 0 = disabled, 1 = body/buttons, 2 = body/buttons plus grips.
      */
     if (a == 0x6012)
         return (uint8_t)s->type;
@@ -171,7 +183,8 @@ static uint8_t spi(const ProState *s, uint32_t a) {
         return s->type == CONTROLLER_PRO ? 0x02 : 0x01;
 
     if (s->type == CONTROLLER_PRO) {
-        if (a >= 0x603d && a < 0x603d + sizeof(pro_sticks)) return pro_sticks[a - 0x603d];
+        if (a >= 0x603d && a < 0x603d + sizeof(pro_sticks))
+            return pro_sticks[a - 0x603d];
         if (a >= 0x6080 && a < 0x6080 + sizeof(pro_config)) return pro_config[a - 0x6080];
         if (a >= 0x6098 && a < 0x6098 + sizeof(pro_params)) return pro_params[a - 0x6098];
         if (a >= 0x6050 && a < 0x6053)
@@ -234,11 +247,12 @@ bool pro_reply(ProState *s, const uint8_t *in, size_t len, uint8_t timer, uint8_
         out[26] = 1;
 
         /*
-         * Color information exists in SPI.
-         * Nintendo expects 0x01 here; any other value falls back to default
-         * controller colors.
+         * This mirrors SPI 0x601B:
+         *   0 = no custom colors
+         *   1 = body/buttons
+         *   2 = body/buttons plus independent grip colors
          */
-        out[27] = 1;
+        out[27] = s->type == CONTROLLER_PRO ? 2 : 1;
         break;
     case 3:
         s->mode = in[12];
