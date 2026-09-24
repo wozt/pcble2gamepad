@@ -1246,9 +1246,42 @@ static gboolean pairing_handoff_reconnect(gpointer unused) {
             "pairing_handoff_retry",
             "Switch not ready yet; retrying persistent reconnect");
     } else {
+        /*
+         * Switch 2 advertises No Bonding during Change Grip/Order and rejects
+         * the locally retained key. Keep the already-open listeners usable and
+         * return to inbound SSP instead of leaving the adapter hidden. The
+         * console can then establish a fresh temporary session without asking
+         * the user to restart Controller Studio.
+         */
+        gboolean inbound_ready=TRUE;
+
+        if(!set_property(
+                "PairableTimeout",
+                g_variant_new_uint32(180)))
+            inbound_ready=FALSE;
+
+        if(!set_property(
+                "DiscoverableTimeout",
+                g_variant_new_uint32(180)))
+            inbound_ready=FALSE;
+
+        if(!set_property(
+                "Pairable",
+                g_variant_new_boolean(TRUE)))
+            inbound_ready=FALSE;
+
+        if(!set_property(
+                "Discoverable",
+                g_variant_new_boolean(TRUE)))
+            inbound_ready=FALSE;
+
         log_event(
-            "pairing_handoff_error",
-            "Automatic persistent reconnect failed");
+            inbound_ready
+                ?"pairing_handoff_fallback"
+                :"pairing_handoff_error",
+            inbound_ready
+                ?"Stored key rejected; waiting for a fresh inbound Switch pairing"
+                :"Stored key rejected and inbound pairing could not be restored");
     }
 
     return G_SOURCE_REMOVE;

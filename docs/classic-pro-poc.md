@@ -148,9 +148,21 @@ before authentication with remote reason `0x13`.
 
 Dedicated Bonding is the GAP pairing-only procedure and requires the paging device
 to initiate authentication. This flow instead pairs while the Switch establishes
-HID, so the bounded follow-up changes only the responder AuthReq to General Bonding
-(`0x04`), as specified for bonding during channel establishment. No compatibility
-claim is made until the new value is verified on air and a restart reconnect succeeds.
+HID, so the bounded follow-up changed only the responder AuthReq to General Bonding
+(`0x04`), as specified for bonding during channel establishment.
+
+The General Bonding value was then verified on air. SSP completed and BTstack stored a new local Link Key. When Change Grip/Order
+closed, the Switch disconnected with reason `0x13` and rejected four
+controller-initiated pages before authentication. While the backend remained
+discoverable and pairable, the Switch initiated a new SSP exchange about 23 seconds
+later and generated a different Link Key. The complete HID initialization then
+succeeded again. Raw keys remain only in the private capture.
+
+This disproves the proposed userspace workaround: forcing local General Bonding
+does not make the Switch retain its half of the key when its own AuthReq remains
+No Bonding. The reference BTstack firmware documents the same protocol outcome.
+The useful measured behavior is narrower: after a failed key-based handoff, keeping
+the controller visible lets the console establish another temporary session.
 
 ## Change Grip/Order transition investigation
 

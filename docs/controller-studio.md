@@ -44,9 +44,12 @@ operations.
   restores the Pro Controller identity and initiates L2CAP control PSM 17 followed
   by interrupt PSM 19 toward the stored Switch address.
 - Switch 2 asks for No Bonding during the working inbound pairing. It later rejects
-  the same Link Key when the PC restores it and initiates authentication. Reconnect
-  therefore remains available only as an experimental diagnostic; persistent use
-  currently requires Pair / Sync again.
+  the same Link Key when the PC restores it and initiates authentication. After the
+  bounded handoff attempts fail, the backend restores pairability and discoverability
+  while keeping the existing HID listeners open. This allows the console to start a
+  new temporary SSP session without restarting Controller Studio; real-console UI
+  validation of this fallback is pending. Reconnect remains a diagnostic because a
+  new application launch still requires Pair / Sync.
 
 Joy-Con-pair outbound reconnect is intentionally deferred until the two-adapter
 profile has been validated on real hardware.

@@ -93,9 +93,12 @@ generated Link Key and stores it privately under
 addresses, key type, PIN length, management `store_hint` and the 128-bit key.
 
 The Switch 2 requests `No Bonding` during this exchange. Linux therefore reports
-`store_hint=0`, and a measured reconnect shows that the console rejects the locally
-restored key. **Reconnect paired Switch** remains an experimental diagnostic while
-a userspace HCI pairing path is evaluated; Pair / Sync remains the validated path.
+`store_hint=0`, and measured BlueZ and userspace-HCI reconnects show that the
+console rejects the locally restored key. For an active Pair / Sync session, the
+backend now falls back to discoverable/pairable mode after the rejected handoff so
+the console can initiate another temporary SSP session. This recovery still needs
+a real-console UI test. **Reconnect paired Switch** remains a diagnostic; Pair /
+Sync is the validated entry path.
 
 The
 application invokes its narrow backend with `pkexec`, temporarily restarts BlueZ
