@@ -38,6 +38,28 @@ Key `store_hint`. Switch 2 currently requests No Bonding, so the working Pair / 
 session is temporary and persistent reconnect remains unresolved. Captures are
 local/private because they can contain Bluetooth link keys.
 
+### Optional userspace-HCI bonding experiment
+
+`build-btstack.sh` builds a separate C backend against a pinned BTstack revision.
+It uses BTstack's Linux `HCI_CHANNEL_USER` transport, so the kernel `btusb` driver
+continues to own the USB interface while BlueZ is stopped for the session. This
+avoids resetting the complete Realtek Wi-Fi/Bluetooth USB device.
+
+```sh
+./poc/build-btstack.sh
+sudo ./poc/run-btstack-classic.sh hci1 --reset-bond
+```
+
+The isolated BTstack patch preserves a local Dedicated Bonding AuthReq (`0x02`)
+when a Switch-initiated SSP response requests No Bonding (`0x00`). Link Keys are
+stored in `/var/lib/pcble2gamepad/btstack/hciN.tlv`. Run the command again without
+`--reset-bond` to test a controller-initiated reconnect. This path is experimental
+until the on-air AuthReq, console retention and restart reconnect are all observed.
+
+BTstack is fetched into the ignored build directory and is not vendored under this
+project's MIT license. Its personal, non-commercial license is reproduced in
+`BTSTACK-LICENSE`; commercial distribution requires separate terms from BlueKitchen.
+
 The POC saves/restores adapter alias, pairability, discoverability, their timeouts,
 power state and device class. It powers the selected adapter temporarily when the
 compatibility-mode BlueZ restart leaves it off. It publishes the HID SDP record and

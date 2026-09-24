@@ -136,6 +136,15 @@ report code and GTK IPC can remain above that transport. BTstack also carries a
 non-commercial license, so it cannot simply be vendored into this MIT repository
 without making that licensing boundary explicit or obtaining compatible terms.
 
+The repository now contains an isolated implementation of that experiment under
+`poc/btstack-pro-controller.c`. Its build script fetches BTstack commit
+`e38553977a25fb0b55b383c72c289be0975f422c` outside the tracked source and applies
+`btstack-preserve-local-bonding.patch`. The patch changes only the responder AuthReq:
+it sends local Dedicated Bonding (`0x02`) while leaving BTstack's internal dedicated
+procedure flag clear, because that internal flag would disconnect after pairing.
+The first hardware test must verify the actual HCI IO Capability Reply before any
+claim about durable Switch pairing is made.
+
 ## Change Grip/Order transition investigation
 
 The initial real-console validation kept the Switch 2 on Change Grip/Order, so the
