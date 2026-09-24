@@ -12,12 +12,15 @@ typedef struct {
     int refs;gboolean closed,closing,busy,online,connected,loading;
     GtkApplication *app;GtkWindow *window;AdwToastOverlay *toast;
     GtkStack *stack;GtkLabel *status,*peer,*error,*metrics,*source_hint,*controller_hint,*hero_title,*paired_console;
-    GtkWidget *drawing,*start,*sync,*stop,*arm,*capture_hint,*secondary_row;
+    GtkWidget *drawing,*start,*sync,*stop,*arm,*capture_hint,*secondary_row,*pro_color_panel;
     GtkDropDown *controllers,*adapters,*secondary,*devices,*source,*profiles;
     GtkStringList *adapter_names,*secondary_names,*device_names,*profile_names;
     GPtrArray *adapter_ids,*adapter_addresses,*secondary_ids,*device_ids;
     GtkButton *key_buttons[INPUT_ACTIONS],*pad_buttons[INPUT_BUTTONS];
     GtkScale *deadzone,*sensitivity;GtkSwitch *invert[4],*swap,*background,*traffic_logs,*swap_face,*auto_select;
+    GtkColorDialogButton *pro_body_color_button,*pro_button_color_button;
+    GtkColorDialogButton *pro_left_grip_color_button,*pro_right_grip_color_button;
+    GdkRGBA pro_body_color,pro_button_color,pro_left_grip_color,pro_right_grip_color;
     GtkTextBuffer *logs;GHashTable *keys;
     InputProfile profile;InputFrame frame;
     SDL_GameController *pad;int joystick_count,learn_key,learn_pad;
@@ -64,6 +67,20 @@ static void update_controls(Ui *u) {
     gtk_widget_set_sensitive(GTK_WIDGET(u->controllers),!u->online && !u->launcher);
     gtk_widget_set_sensitive(GTK_WIDGET(u->adapters),!u->online && !u->launcher);
     gtk_widget_set_sensitive(GTK_WIDGET(u->secondary),!u->online && !u->launcher);
+
+    gboolean colors_enabled=
+        !pair_mode(u) &&
+        !u->online &&
+        !u->launcher;
+
+    if(u->pro_body_color_button)
+        gtk_widget_set_sensitive(GTK_WIDGET(u->pro_body_color_button),colors_enabled);
+    if(u->pro_button_color_button)
+        gtk_widget_set_sensitive(GTK_WIDGET(u->pro_button_color_button),colors_enabled);
+    if(u->pro_left_grip_color_button)
+        gtk_widget_set_sensitive(GTK_WIDGET(u->pro_left_grip_color_button),colors_enabled);
+    if(u->pro_right_grip_color_button)
+        gtk_widget_set_sensitive(GTK_WIDGET(u->pro_right_grip_color_button),colors_enabled);
 }
 static void toast(Ui *u,const char *message) {adw_toast_overlay_add_toast(u->toast,adw_toast_new(message));}
 static void ui_unref(Ui *u) {
@@ -119,6 +136,28 @@ static void save_profile_quiet(Ui *u) {
         g_warning("Could not save input profile: %s",error->message);
 }
 
+static char *rgba_hex(const GdkRGBA *color) {
+    int r=CLAMP((int)lrint(color->red*255.0),0,255);
+    int g=CLAMP((int)lrint(color->green*255.0),0,255);
+    int b=CLAMP((int)lrint(color->blue*255.0),0,255);
+
+    return g_strdup_printf("%02X%02X%02X",r,g,b);
+}
+
+static void load_color_setting(GKeyFile *file,
+                               const char *key,
+                               GdkRGBA *color) {
+    if(!g_key_file_has_key(file,"Appearance",key,NULL))
+        return;
+
+    g_autofree char *value=
+        g_key_file_get_string(file,"Appearance",key,NULL);
+
+    GdkRGBA parsed;
+    if(value && gdk_rgba_parse(&parsed,value))
+        *color=parsed;
+}
+
 static void app_state_load(Ui *u) {
     u->saved_source=0;
     u->saved_arm=FALSE;
@@ -155,6 +194,11 @@ static void app_state_load(Ui *u) {
         u->paired_switch_address=g_key_file_get_string(k,"Console","switch_address",NULL);
     if(g_key_file_has_key(k,"Console","adapter_address",NULL))
         u->paired_adapter_address=g_key_file_get_string(k,"Console","adapter_address",NULL);
+
+    load_color_setting(k,"pro_body",&u->pro_body_color);
+    load_color_setting(k,"pro_buttons",&u->pro_button_color);
+    load_color_setting(k,"pro_left_grip",&u->pro_left_grip_color);
+    load_color_setting(k,"pro_right_grip",&u->pro_right_grip_color);
 }
 
 static void app_state_save(Ui *u) {
@@ -172,6 +216,21 @@ static void app_state_save(Ui *u) {
         g_key_file_set_string(k,"Console","switch_address",u->paired_switch_address);
     if(u->paired_adapter_address && *u->paired_adapter_address)
         g_key_file_set_string(k,"Console","adapter_address",u->paired_adapter_address);
+
+    g_autofree char *body=rgba_hex(&u->pro_body_color);
+    g_autofree char *buttons=rgba_hex(&u->pro_button_color);
+    g_autofree char *left_grip=rgba_hex(&u->pro_left_grip_color);
+    g_autofree char *right_grip=rgba_hex(&u->pro_right_grip_color);
+
+    g_autofree char *body_css=g_strconcat("#",body,NULL);
+    g_autofree char *buttons_css=g_strconcat("#",buttons,NULL);
+    g_autofree char *left_css=g_strconcat("#",left_grip,NULL);
+    g_autofree char *right_css=g_strconcat("#",right_grip,NULL);
+
+    g_key_file_set_string(k,"Appearance","pro_body",body_css);
+    g_key_file_set_string(k,"Appearance","pro_buttons",buttons_css);
+    g_key_file_set_string(k,"Appearance","pro_left_grip",left_css);
+    g_key_file_set_string(k,"Appearance","pro_right_grip",right_css);
 
     g_autoptr(GError) error=NULL;
     if(!g_key_file_save_to_file(k,u->settings_path,&error))
@@ -682,7 +741,20 @@ static void controller_selected(GObject *o,GParamSpec *p,Ui *u) {
         const char *override=g_getenv("PCBLE2GAMEPAD_PRO_SOCKET");u->socket=override?g_strdup(override):g_strdup_printf("/run/pcble2gamepad/%u/pro.sock",(unsigned)getuid());
         gtk_widget_set_visible(u->secondary_row,FALSE);gtk_label_set_text(u->hero_title,"Nintendo Switch Pro Controller");gtk_label_set_text(u->controller_hint,"One Bluetooth adapter exposes one Classic HID controller. After pairing, press A once on the virtual controller to leave Change Grip/Order.");
     }
-    gtk_label_set_text(u->status,"OFFLINE");gtk_label_set_text(u->peer,"Start a Bluetooth session to connect your console.");gtk_label_set_text(u->error,"");gtk_widget_queue_draw(u->drawing);update_controls(u);request(u,"status");
+    if(u->pro_color_panel)
+        gtk_widget_set_visible(
+            u->pro_color_panel,
+            !pair_mode(u));
+
+    gtk_label_set_text(u->status,"OFFLINE");
+    gtk_label_set_text(
+        u->peer,
+        "Start a Bluetooth session to connect your console.");
+    gtk_label_set_text(u->error,"");
+
+    gtk_widget_queue_draw(u->drawing);
+    update_controls(u);
+    request(u,"status");
 }
 static void traffic_logs_changed(GObject *o,GParamSpec *p,Ui *u) {
     (void)o;(void)p;if(u->loading)return;
@@ -690,6 +762,83 @@ static void traffic_logs_changed(GObject *o,GParamSpec *p,Ui *u) {
     app_state_save(u);
     if(u->online)request(u,"logging");
 }
+
+static void pro_colors_changed(GObject *object,GParamSpec *pspec,Ui *u) {
+    (void)pspec;
+
+    if(u->loading)
+        return;
+
+    GtkColorDialogButton *button=GTK_COLOR_DIALOG_BUTTON(object);
+    const GdkRGBA *color=
+        gtk_color_dialog_button_get_rgba(button);
+
+    if(!color)
+        return;
+
+    if(button==u->pro_body_color_button)
+        u->pro_body_color=*color;
+    else if(button==u->pro_button_color_button)
+        u->pro_button_color=*color;
+    else if(button==u->pro_left_grip_color_button)
+        u->pro_left_grip_color=*color;
+    else if(button==u->pro_right_grip_color_button)
+        u->pro_right_grip_color=*color;
+    else
+        return;
+
+    app_state_save(u);
+}
+
+static GtkColorDialogButton *make_color_button(const char *title,
+                                                const GdkRGBA *color,
+                                                Ui *u) {
+    GtkColorDialog *dialog=gtk_color_dialog_new();
+
+    gtk_color_dialog_set_title(dialog,title);
+    gtk_color_dialog_set_with_alpha(dialog,FALSE);
+
+    GtkColorDialogButton *button=
+        GTK_COLOR_DIALOG_BUTTON(
+            gtk_color_dialog_button_new(dialog));
+
+    gtk_color_dialog_button_set_rgba(button,color);
+
+    /*
+     * GtkColorDialogButton does not take ownership of the dialog.
+     * Keep it alive for exactly as long as the button.
+     */
+    g_object_set_data_full(
+        G_OBJECT(button),
+        "pcble2gamepad-color-dialog",
+        dialog,
+        g_object_unref);
+
+    g_signal_connect(
+        button,
+        "notify::rgba",
+        G_CALLBACK(pro_colors_changed),
+        u);
+
+    return button;
+}
+
+static GtkWidget *color_control(const char *title,
+                                GtkColorDialogButton *button) {
+    GtkWidget *box=
+        gtk_box_new(GTK_ORIENTATION_VERTICAL,4);
+
+    GtkWidget *text=label(title,"dim-label");
+
+    gtk_label_set_xalign(GTK_LABEL(text),0.5);
+    gtk_widget_set_halign(GTK_WIDGET(button),GTK_ALIGN_CENTER);
+
+    gtk_box_append(GTK_BOX(box),text);
+    gtk_box_append(GTK_BOX(box),GTK_WIDGET(button));
+
+    return box;
+}
+
 static void launch_switch_session(Ui *u,gboolean reconnect) {
     if(u->launcher || u->online)return;
 
@@ -768,7 +917,17 @@ static void launch_switch_session(Ui *u,gboolean reconnect) {
     }
 
     g_autoptr(GError)e=NULL;
-    const char *args[16];
+
+    g_autofree char *body_color=
+        rgba_hex(&u->pro_body_color);
+    g_autofree char *button_color=
+        rgba_hex(&u->pro_button_color);
+    g_autofree char *left_grip_color=
+        rgba_hex(&u->pro_left_grip_color);
+    g_autofree char *right_grip_color=
+        rgba_hex(&u->pro_right_grip_color);
+
+    const char *args[28];
     guint n=0;
     args[n++]="pkexec";
     args[n++]=runner;
@@ -782,6 +941,18 @@ static void launch_switch_session(Ui *u,gboolean reconnect) {
         args[n++]=g_ptr_array_index(u->secondary_ids,j);
     } else {
         args[n++]="pro";
+
+        args[n++]="--body-color";
+        args[n++]=body_color;
+
+        args[n++]="--button-color";
+        args[n++]=button_color;
+
+        args[n++]="--left-grip-color";
+        args[n++]=left_grip_color;
+
+        args[n++]="--right-grip-color";
+        args[n++]=right_grip_color;
     }
 
     if(reconnect) {
@@ -850,6 +1021,12 @@ static void activate(GtkApplication *app,gpointer unused) {
     u->config_dir=g_build_filename(config_root,"profiles",NULL);g_mkdir_with_parents(u->config_dir,0700);
     u->settings_path=g_build_filename(config_root,"settings.ini",NULL);
     u->profile_name=g_strdup("Default");
+
+    gdk_rgba_parse(&u->pro_body_color,"#828282");
+    gdk_rgba_parse(&u->pro_button_color,"#0f0f0f");
+    gdk_rgba_parse(&u->pro_left_grip_color,"#828282");
+    gdk_rgba_parse(&u->pro_right_grip_color,"#828282");
+
     app_state_load(u);
 
     u->pro_svg=load_controller_svg("pro-controller.svg");
@@ -883,8 +1060,85 @@ static void activate(GtkApplication *app,gpointer unused) {
     GtkWidget *hero=gtk_box_new(GTK_ORIENTATION_VERTICAL,6);gtk_widget_add_css_class(hero,"hero");
     u->status=GTK_LABEL(label("OFFLINE","connection-badge"));gtk_box_append(GTK_BOX(hero),GTK_WIDGET(u->status));u->hero_title=GTK_LABEL(label("Nintendo Switch Pro Controller","title-2"));gtk_box_append(GTK_BOX(hero),GTK_WIDGET(u->hero_title));
     u->peer=GTK_LABEL(label("Start a Bluetooth session to connect your console.","dim-label"));gtk_box_append(GTK_BOX(hero),GTK_WIDGET(u->peer));
-    u->drawing=gtk_drawing_area_new();gtk_widget_set_size_request(u->drawing,-1,260);gtk_widget_set_focusable(u->drawing,TRUE);gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(u->drawing),draw,u,NULL);gtk_box_append(GTK_BOX(hero),u->drawing);
-    u->metrics=GTK_LABEL(label("Live input preview · no physical controller required","dim-label"));gtk_box_append(GTK_BOX(hero),GTK_WIDGET(u->metrics));gtk_box_append(GTK_BOX(box),hero);
+    u->drawing=gtk_drawing_area_new();
+    gtk_widget_set_size_request(u->drawing,-1,260);
+    gtk_widget_set_focusable(u->drawing,TRUE);
+    gtk_drawing_area_set_draw_func(
+        GTK_DRAWING_AREA(u->drawing),
+        draw,
+        u,
+        NULL);
+    gtk_box_append(GTK_BOX(hero),u->drawing);
+
+    u->pro_color_panel=
+        gtk_box_new(GTK_ORIENTATION_HORIZONTAL,24);
+
+    gtk_widget_set_halign(
+        u->pro_color_panel,
+        GTK_ALIGN_CENTER);
+
+    u->pro_body_color_button=
+        make_color_button(
+            "Pro Controller body color",
+            &u->pro_body_color,
+            u);
+
+    u->pro_button_color_button=
+        make_color_button(
+            "Pro Controller button color",
+            &u->pro_button_color,
+            u);
+
+    u->pro_left_grip_color_button=
+        make_color_button(
+            "Pro Controller left grip color",
+            &u->pro_left_grip_color,
+            u);
+
+    u->pro_right_grip_color_button=
+        make_color_button(
+            "Pro Controller right grip color",
+            &u->pro_right_grip_color,
+            u);
+
+    gtk_box_append(
+        GTK_BOX(u->pro_color_panel),
+        color_control(
+            "Body",
+            u->pro_body_color_button));
+
+    gtk_box_append(
+        GTK_BOX(u->pro_color_panel),
+        color_control(
+            "Buttons",
+            u->pro_button_color_button));
+
+    gtk_box_append(
+        GTK_BOX(u->pro_color_panel),
+        color_control(
+            "Left grip",
+            u->pro_left_grip_color_button));
+
+    gtk_box_append(
+        GTK_BOX(u->pro_color_panel),
+        color_control(
+            "Right grip",
+            u->pro_right_grip_color_button));
+
+    gtk_box_append(
+        GTK_BOX(hero),
+        u->pro_color_panel);
+
+    u->metrics=GTK_LABEL(
+        label(
+            "Live input preview · no physical controller required",
+            "dim-label"));
+
+    gtk_box_append(
+        GTK_BOX(hero),
+        GTK_WIDGET(u->metrics));
+
+    gtk_box_append(GTK_BOX(box),hero);
     AdwPreferencesGroup *g=group(box,"Bluetooth session","Starting a session requests administrator authentication and temporarily pauses other Bluetooth services.");
     const char *controllers[]={"Nintendo Switch Pro Controller","Nintendo Joy-Con Pair",NULL};u->controllers=GTK_DROP_DOWN(gtk_drop_down_new_from_strings(controllers));row(g,"Emulated controller","Sony and Microsoft profiles can be added to the same controller catalog later.",GTK_WIDGET(u->controllers));
     u->adapter_names=gtk_string_list_new(NULL);u->adapters=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->adapter_names),NULL));gtk_widget_set_size_request(GTK_WIDGET(u->adapters),280,-1);
@@ -924,7 +1178,7 @@ static void activate(GtkApplication *app,gpointer unused) {
     u->device_names=gtk_string_list_new(NULL);u->devices=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->device_names),NULL));row(g,"Connected controller","Devices update automatically when plugged in or removed.",GTK_WIDGET(u->devices));
     g=group(box,"Button mapping","Default mapping follows button labels. Click a binding and press the source button or trigger to change it.");
     for(int i=0;i<INPUT_BUTTONS;i++){GtkWidget *b=button("",G_CALLBACK(bind_pad),u);u->pad_buttons[i]=GTK_BUTTON(b);g_object_set_data(G_OBJECT(b),"index",GINT_TO_POINTER(i));gtk_widget_add_css_class(b,"binding");row(g,input_action_names[i],NULL,b);}
-    box=page(u,"settings","Input settings","Fine-tune stick response and choose how controller input behaves when the window loses focus.");
+    box=page(u,"settings","Settings","Fine-tune input response and configure the emulated controller.");
     g=group(box,"Stick response","A radial dead zone avoids drift while preserving direction.");
     u->deadzone=GTK_SCALE(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,0,50,1));gtk_widget_set_size_request(GTK_WIDGET(u->deadzone),230,-1);gtk_scale_set_digits(u->deadzone,0);row(g,"Dead zone (%)",NULL,GTK_WIDGET(u->deadzone));
     u->sensitivity=GTK_SCALE(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,25,200,5));gtk_widget_set_size_request(GTK_WIDGET(u->sensitivity),230,-1);gtk_scale_set_digits(u->sensitivity,0);row(g,"Sensitivity (%)",NULL,GTK_WIDGET(u->sensitivity));
