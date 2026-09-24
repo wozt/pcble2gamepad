@@ -2,307 +2,317 @@
 
 Experimental **C11** software for emulating console controllers from a Linux PC.
 
-The current application emulates Nintendo controllers over Classic Bluetooth HID.
-Its GTK Controller Studio maps a keyboard or a PC gamepad to either a **Switch 1
-Pro Controller** or a **pair of Switch 1 Joy-Con**. No physical Nintendo controller
-is required in the chain. The Pro Controller is tested against a real Switch 2;
-detailed console evidence and limitations are in
-[the experiment report](docs/classic-pro-poc.md).
+The current focus is Nintendo Classic Bluetooth HID. The GTK Controller Studio can emulate a **Switch Pro Controller** or a **Joy-Con pair** and route keyboard or SDL gamepad input to a real Nintendo Switch.
 
-Controller Studio includes remappable keyboard and SDL gamepad bindings, saved
-profiles, radial stick dead zones, sensitivity, axis inversion, stick swapping,
-live input preview, emulated-controller selection and session diagnostics. The
-Bluetooth backend stays in C and is controlled through a private Unix socket.
-Keyboard input has been exercised
-end to end against the backend simulation. A physical source gamepad remains to
-be tested when one is available.
+No physical Nintendo controller is required in the chain.
 
-## Earlier Joy-Con 2 BLE work
+The Pro Controller path is validated on a real **Switch 2**, including pairing, input, persistent reconnect on compatible Bluetooth hardware and custom controller colors.
 
-The daemon, CLI and `pcble2gamepad-ble-lab` retain the earlier Joy-Con 2 discovery
-experiment. This path is separate from Controller Studio.
+## Current status
 
-The first milestone is deliberately small: advertise one **Joy-Con 2 R** and
-observe whether a real Switch 2 attempts to connect. **This milestone was observed
-on the user's console on 2026-09-22: an incoming BLE connection completed successfully.**
-This is not a working controller or a completed pairing implementation; the console
-does not yet display a usable Joy-Con.
+### Pro Controller
 
-## Earlier BLE status
+Validated on a real Switch 2:
 
-Implemented:
+* Classic Bluetooth HID over L2CAP PSM 17/19
+* Pairing from **Controllers -> Change Grip/Order**
+* Nintendo initialization and report mode `0x30`
+* Buttons and D-pad
+* Analog stick input
+* Input from Controller Studio
+* Persistent Link Key storage
+* Outbound reconnect after a complete backend restart using the CSR adapter
+* Custom body, button, left-grip and right-grip colors
+* Clean backend shutdown and BlueZ restoration
 
-- BlueZ D-Bus peripheral advertisement using the observed Nintendo manufacturer
-  data, right-controller PID `0x2066`, and general-discoverable flags.
-- Two vendor GATT services, 14 characteristics and six vendor descriptors for
-  observation. BlueZ creates the six CCCDs. This is an approximation of the real
-  controller's database, with different handles and BlueZ's standard services.
-- Connection/property observation, raw GATT reads/writes, notification subscription
-  logs and basic Nintendo command-header diagnostics.
-- Headless daemon, documented Unix socket JSON API, C CLI, GTK4/libadwaita GUI,
-  peer addresses and explicit targeted disconnection for repeatable tests.
-- An explicit mock backend for local lifecycle/UI tests without radio activity.
+Persistent reconnect is currently adapter-dependent:
 
-Locally checked on Debian 13 / BlueZ 5.82 / Realtek `hci0`: GATT registration,
-connectable advertising, and clean removal work. HCI monitoring confirms a public
-address and the expected manufacturer payload and flags. **BlueZ reorders the AD
-structures**; the tested console nevertheless completed a connection. See
-[local validation](docs/validation.md). Nintendo pairing, buttons, sticks, mouse
-reports, IMU, rumble and the proprietary reconnect procedure remain unimplemented.
+| Adapter                     | Fresh pairing | Reconnect                                |
+| --------------------------- | ------------- | ---------------------------------------- |
+| CSR `00:1A:7D:DA:71:13`     | Works         | Works                                    |
+| Realtek `E0:AD:47:40:70:D9` | Works         | Switch disconnects before authentication |
+
+The CSR path reloads the saved BR/EDR Link Key, completes authentication and encryption, reconnects both HID channels and repeats Nintendo initialization.
+
+The Realtek adapter still receives remote disconnect reason `0x13` before Linux can request or present the stored key.
+
+See [docs/classic-pro-poc.md](docs/classic-pro-poc.md) for the detailed experiments.
+
+### Joy-Con pair
+
+The protocol and Controller Studio support separate Joy-Con L/R identities and two Bluetooth adapters.
+
+Wire behavior and dual-backend routing are implemented, but a complete Joy-Con pair session has not yet been validated on a real console.
+
+### Earlier Joy-Con 2 BLE experiment
+
+The repository also keeps the earlier Joy-Con 2 BLE discovery prototype.
+
+A real Switch 2 successfully established an incoming BLE connection to the emulated Joy-Con 2 advertisement on 2026-09-22, but proprietary pairing and usable Joy-Con 2 input are not implemented.
+
+This BLE path is separate from the working Classic HID Pro Controller path.
+
+## Controller Studio
+
+`pcble2gamepad` provides a GTK4/libadwaita interface with:
+
+* Pro Controller or Joy-Con-pair selection
+* Bluetooth adapter selection by stable MAC address
+* Pair / Sync and Reconnect actions
+* Keyboard bindings
+* SDL gamepad bindings
+* WASD and ZQSD presets
+* Dead zone and sensitivity settings
+* Axis inversion
+* Stick swapping
+* Nintendo face-button layout option
+* Background gamepad input
+* Live controller preview
+* Detailed HID diagnostics
+* Saved profiles
+* Pro Controller color customization
+
+The Pro Controller preview uses SVG artwork and supports independent RGB values for:
+
+* body
+* buttons
+* left grip
+* right grip
+
+These colors are also sent to the Switch through the emulated controller SPI data.
+
+## Profiles
+
+All non-secret persistent Controller Studio state is stored in readable INI profiles:
+
+```text
+~/.config/pcble2gamepad/profiles/
+```
+
+Profiles include:
+
+* bindings
+* stick/input settings
+* input source
+* Enable input state
+* preferred gamepad
+* automatic gamepad selection
+* Bluetooth adapter selection
+* paired Switch association
+* diagnostics preference
+* Pro Controller colors
+
+One profile is marked active and restored on the next launch.
+
+The old:
+
+```text
+~/.config/pcble2gamepad/settings.ini
+```
+
+is migration-only and is removed after its values have been imported.
+
+Bluetooth Link Keys are never stored in user profiles. They remain root-private under:
+
+```text
+/var/lib/pcble2gamepad/pairings/
+```
+
+## Pro Controller colors
+
+Switch 2 was observed reading:
+
+```text
+0x6050 size 13
+```
+
+during controller initialization.
+
+The relevant SPI layout is:
+
+```text
+0x6050..0x6052  body RGB
+0x6053..0x6055  button RGB
+0x6056..0x6058  left grip RGB
+0x6059..0x605B  right grip RGB
+0x605C          design variation
+```
+
+A later Switch 2 request reads 25 bytes starting at `0x603D`.
+
+An earlier implementation accidentally allowed the factory-stick table starting at `0x603D` to extend through `0x6055`. This shadowed the body and button color bytes while leaving the grip colors intact.
+
+That overlap is now fixed and all four configurable colors have been confirmed on the real Switch 2.
+
+A regression test covers both the `0x6050` color read and the `0x603D` boundary.
 
 ## Build
+
+Dependencies on Debian:
 
 ```sh
 sudo apt install build-essential pkg-config meson ninja-build \
   libglib2.0-dev libjson-glib-dev libgtk-4-dev libadwaita-1-dev \
-  libsdl2-dev libbluetooth-dev bluez dbus-daemon pkexec
+  librsvg2-dev libsdl2-dev libbluetooth-dev bluez dbus-daemon pkexec
+```
+
+Build:
+
+```sh
 meson setup build -Dgui=enabled
 meson compile -C build
 meson test -C build --print-errorlogs
 ```
 
-For a headless-only build, omit the GTK development packages and use
-`meson setup build-headless -Dgui=disabled`. The daemon and CLI never link GTK.
-There is no Python application code or runtime dependency; Meson is a build tool.
-Install Controller Studio system-wide once so its narrowly scoped Polkit policy and
-root-owned Bluetooth launcher are available:
+Install:
 
 ```sh
 meson configure build --prefix=/usr/local
 sudo meson install -C build
 ```
 
-After installation, an active local desktop session can start this exact launcher
-without entering an administrator password. The policy does not authorize other
-commands. A user-local installation cannot provide this privileged integration.
+The system installation provides the privileged Classic Bluetooth launcher and its narrowly scoped Polkit policy.
 
-## Run Controller Studio
+## Run
 
 ```sh
 ./build/pcble2gamepad
 ```
 
-Choose the emulated controller and Bluetooth adapter by address. Controller
-Studio deliberately separates **Pair / Sync new Switch** from **Reconnect paired
-Switch**.
+For first pairing:
 
-Pairing requires **Controllers -> Change Grip/Order**. The Switch initiates the
-Classic connection, completes SSP and opens HID PSM 17/19. The backend captures the
-generated Link Key and stores it privately under
-`/var/lib/pcble2gamepad/pairings/`; the record includes the console and adapter
-addresses, key type, PIN length, management `store_hint` and the 128-bit key.
+1. Select **Nintendo Switch Pro Controller**.
+2. Select the Bluetooth adapter.
+3. Click **Pair / Sync new Switch**.
+4. Open **Controllers -> Change Grip/Order** on the Switch.
+5. Wait for initialization.
+6. Enable input.
 
-The Switch 2 requests `No Bonding` during this exchange and Linux reports
-`store_hint=0`. Persistent reconnect is nevertheless validated with the CSR
-`00:1A:7D:DA:71:13` adapter: after a complete backend stop, the restored Link Key is
-accepted, authentication and encryption complete, PSM 17/19 reopen and Nintendo HID
-initialization repeats. The Realtek `E0:AD:47:40:70:D9` adapter still fails before
-authentication with remote reason `0x13`. The adapter-dependent cause remains under
-investigation; see [the measured comparison](docs/classic-pro-poc.md#persistent-reconnect-validated-on-csr-2026-09-24).
+The Switch initiates SSP and opens HID PSM 17 and 19.
 
-The
-application invokes its narrow backend with `pkexec`, temporarily restarts BlueZ
-in Classic HID compatibility mode, and restores the normal service when the
-session stops. The installed Polkit policy permits this launcher without another
-password prompt for the active local session. This pauses other Bluetooth services for the duration. On first
-pairing, open **Controllers -> Change Grip/Order** on the console.
-During Pro Controller pairing, the backend deliberately limits periodic input
-reports while the console is on Change Grip/Order. After initialization, press A
-once on the virtual controller to leave that screen. The backend keeps the reduced
-cadence for one additional second before returning to its normal report rate. This
-transition and subsequent D-pad navigation on HOME were validated on a real Switch 2.
+During Change Grip/Order, the backend deliberately reduces report frequency. After initialization, pressing A, B or HOME marks the transition out of that screen and normal input cadence resumes shortly afterward.
 
-A Pro Controller needs one Bluetooth adapter. A Joy-Con pair exposes two Classic
-Bluetooth identities and therefore needs two distinct adapters, selected as left
-and right in the UI. The current machine now exposes the Realtek and CSR adapters,
-but the pair transport still has only wire and simulated routing coverage until a
-complete pair is tested against the console.
+## Reconnect
 
-Select **Keyboard** or **PC controller**, configure the corresponding bindings,
-then enable input. Escape immediately pauses keyboard input. The backend returns
-buttons and sticks to neutral if updates stop for 500 ms. PC-controller input can
-use the Nintendo face-button layout option, which swaps A/B and X/Y without
-changing explicit keyboard bindings.
+After successful pairing, Controller Studio records the Switch address and adapter identity in the active profile.
 
-Controller Studio remembers the last profile, input source, Enable input state,
-preferred physical gamepad, automatic gamepad selection and diagnostics preference
-in `~/.config/pcble2gamepad/settings.ini`. Input-profile settings are saved under
-`~/.config/pcble2gamepad/profiles`. Closing Controller Studio stops the session and
-restores BlueZ.
+The privileged backend separately saves the generated BR/EDR Link Key.
 
-Repetitive HID receive packets and periodic status lines are hidden by default.
-Enable **Detailed HID traffic** on the Diagnostics page when protocol-level output
-is needed; the switch also works during an active session.
+**Reconnect paired Switch** then:
 
-Each session stores its private HCI capture and backend log in a temporary
-directory such as `/tmp/pcble2gamepad-UID-XXXXXXXX`. The directory is mode `0700`
-and is handed back to the desktop user when the session ends. These files can
-contain Bluetooth addresses and pairing material and are intentionally temporary.
-See [Controller Studio](docs/controller-studio.md) for the UI and architecture.
+1. starts the isolated Classic Bluetooth environment;
+2. restores the Pro Controller identity;
+3. reloads the stored Link Key;
+4. creates an outbound ACL connection;
+5. authenticates and enables encryption;
+6. opens PSM 17 and 19;
+7. repeats Nintendo initialization.
 
-## Run the earlier BLE lab
+This complete sequence is validated with the CSR adapter.
 
-Start the daemon as your regular desktop user, in one terminal:
+## Bluetooth isolation
 
-```sh
-./build/pcble2gamepadd --adapter hci0 --verbose 2>&1 | tee daemon.log
-```
+Controller Studio itself runs unprivileged.
 
-In a second terminal, open the BLE lab or use the CLI:
+For a Classic HID session it invokes the installed launcher through `pkexec`. The launcher temporarily runs BlueZ in the compatibility configuration required by the controller backend.
 
-```sh
-./build/pcble2gamepad-ble-lab
-# Or:
-./build/pcble2gamepadctl status
-./build/pcble2gamepadctl sync
-./build/pcble2gamepadctl status
-./build/pcble2gamepadctl logs
-./build/pcble2gamepadctl stop
-```
+During the session the backend owns:
 
-The BLE lab is a client of the running daemon. Closing it does not stop the daemon.
-`start` and `sync` currently both request standard discovery advertising; `sync`
-**does not perform Nintendo pairing**. Start/stop are asynchronous: an initial
-`transitioning` response means the request was accepted, not that registration has
-succeeded. Query `status` again and inspect `error`.
+* Agent1
+* HID SDP registration
+* L2CAP PSM 17
+* L2CAP PSM 19
+* Link Key handling
+* Nintendo HID reports
 
-The adapter must already be powered and its global discoverability must be off.
-The daemon checks this and does not change these settings automatically. Inspect
-with `bluetoothctl show`; if needed, explicitly use `bluetoothctl power on` and
-`bluetoothctl discoverable off`. Do not use `bluetoothctl pair` for this protocol.
+Normal BlueZ is restored when the session stops.
 
-No automatic advertising, adapter address rewriting, firmware/NVM writes, bond
-creation, Bluetooth service restart, or raw HCI control is performed. Stop removes
-this application's advertisement and GATT registration. Exiting the daemon closes
-its private D-Bus connection, allowing BlueZ to release its registrations, including
-after abnormal process termination. Other adapter connections are not disconnected.
+Other Bluetooth services are temporarily unavailable while the isolated session is active.
 
-The separate C diagnostic reads adapter capabilities using only two fixed HCI
-read commands; it does not advertise, disconnect peers or change adapter settings:
+## Safety and recovery
 
-```sh
-sudo ./build/pcble2gamepaddiag hci0
-```
+The backend automatically returns input to neutral if updates stop for 500 ms.
 
-It emits JSON with the raw LE feature/state bytes, LE 2M and data-length support,
-and the connection/advertising combinations checked by Linux 6.12. The local
-Realtek adapter lacks LE 2M. The reference Joy-Con pairing capture switches to 2M
-before ATT, but this does not establish that the console requires 2M. See the
-[passive GATT experiment](docs/validation.md#passive-gatt-and-radio-capabilities).
+If Controller Studio disappears completely, a backend lease also terminates the session so normal BlueZ can be restored.
 
-For mock mode:
-
-```sh
-./build/pcble2gamepadd --mock
-```
-
-The default socket is `$XDG_RUNTIME_DIR/pcble2gamepad/control.sock`. Use
-`PCBLE2GAMEPAD_SOCKET` for all three programs or `--socket PATH` for daemon/CLI.
-A custom socket's parent must be a private directory owned by you (mode `0700`).
-The socket is `0600`, checks peer credentials, and accepts only the daemon's UID.
-
-## First console test and debugging
-
-1. Start a passive HCI capture **before** starting advertising:
-
-   ```sh
-   sudo btmon -i hci0 -w switch2-discovery.btsnoop | tee btmon.log
-   ```
-
-2. Start the daemon with `--verbose`, then open the Switch 2 controller pairing
-   screen and run `pcble2gamepadctl sync` (or click **Sync**).
-3. Leave discovery active for about 30 seconds. Save CLI `status`, `logs`, the daemon
-   log, and the HCI capture. Record the exact console screen and visible behavior.
-4. Run `pcble2gamepadctl stop`, then stop the daemon and `btmon` with Ctrl+C.
-
-A successful registration is only a Linux-side check. A peer connection event is
-not proof that the peer is a Switch; correlate its address and timing with the
-console test. Failed attempts before BlueZ creates a `Device1` object, ATT discovery,
-connection interval, encryption transitions and HCI disconnect reasons require
-`btmon`. They are **not available through all of the D-Bus callbacks**. Raw ATT
-traffic is especially important because the console may use fixed handles that
-land in BlueZ's existing database instead of our exported characteristics.
-
-`journalctl -u bluetooth --since '5 minutes ago'` can add BlueZ errors. If D-Bus
-returns `AccessDenied`, check the distribution's Bluetooth access policy and user
-groups rather than running the GUI as root. Captures and verbose command logs may
-contain peer addresses and, in future pairing tests, key material: redact those
-before publishing. Use `btmon -r switch2-discovery.btsnoop` to decode a saved capture.
-
-### Advertising fails after a previous connection
-
-An existing BLE link can prevent this Realtek adapter from advertising another
-connectable instance. Locally, this produced BlueZ's generic `Failed to register
-advertisement` with management `Invalid Parameters (0x0d)`. Five advertising
-instances do not guarantee simultaneous connection/advertising support.
-
-Use `status` or GTK's peer address display to identify the link. A
-`peer_already_connected` event is a snapshot, not a new console connection.
-Switching the console fully off and observing the peer disappear can identify it;
-a Nintendo address prefix alone cannot. After identifying the intended test peer:
-
-```sh
-./build/pcble2gamepadctl stop
-# Wait until status is no longer transitioning, then select the exact test peer:
-./build/pcble2gamepadctl disconnect AA:BB:CC:DD:EE:FF
-# Wait for completion, then restart discovery:
-./build/pcble2gamepadctl sync
-```
-
-GTK offers **Disconnect peer** when exactly one peer address is available. For
-multiple peers, use the CLI with an explicit address. Nothing automatically
-disconnects another Bluetooth device. A failed advertising registration now rolls
-back the probe GATT application and preserves the diagnostic. Detailed evidence:
-[connection coexistence investigation](docs/validation.md#connection-coexistence-and-first-console-link).
-
-## Architecture and API
+Session logs and HCI captures are stored in a private temporary directory such as:
 
 ```text
-keyboard / gamepad -> Controller Studio -> private input API -> controller backend(s)
-
-BLE lab / C CLI -----------------------> discovery API -> Joy-Con 2 BLE daemon
+/tmp/pcble2gamepad-UID-XXXXXXXX
 ```
 
-- `poc/protocol.*`: Switch 1 Pro Controller and Joy-Con report identities,
-  input masking, calibration reads and subcommand responses.
-- `poc/pro-controller.c`: Agent1, SDP, L2CAP transport and input watchdog for
-  Pro Controller, Joy-Con (L) and Joy-Con (R).
-- `src/gui.c` and `src/input-model.*`: Controller Studio and input composition.
-- `src/protocol.*`: observed Joy-Con 2 bytes and vendor GATT schema.
-- `src/core.*`: lifecycle, status, bounded structured event history and API dispatch.
-- `src/bluez.*`: D-Bus objects, advertisement/GATT registration, adapter events.
-- `src/ipc.*`: bounded asynchronous local control transport.
-- `src/client.*`: shared unprivileged client code.
+These captures may contain Bluetooth addresses or pairing material and should not be published without inspection.
 
-[Controller Studio](docs/controller-studio.md) · [API specification](docs/api.md) · [Protocol research](docs/protocol.md) ·
-[BlueZ feasibility](docs/bluez.md) · [Validation](docs/validation.md).
+## Diagnostics
 
-## Joy-Con 2 roadmap
+High-frequency HID traffic is hidden by default.
 
-1. Discovery and an incoming connection on a real Switch 2: **observed 2026-09-22**.
-2. Measure ATT/handle behavior; retain BlueZ where it works, document any blocker.
-3. Implement exact GATT behavior and Nintendo proprietary pairing, then initialization.
-4. Add buttons, both sticks, Home/Capture/C, stick clicks and side buttons as applicable.
-5. **Keep Joy-Con 2 R mouse data and buttons/stick in the same report. Mouse support
-   is a required goal**, not an optional replacement for controller input.
-6. Add reconnect, persisted host pairing, then Joy-Con 2 L and dual controllers.
-   Two adapters are acceptable; five advertising instances do not imply five identities.
-7. Add input test controls, IMU/gyro and rumble where understood, then capture2cloud.
-   Replacing capture2cloud's Titan One is a future integration, not this milestone.
+Enable **Detailed HID traffic** in Controller Studio when investigating protocol behavior.
 
-## References
+Useful events include:
 
-- [ndeadly/switch2_controller_research](https://github.com/ndeadly/switch2_controller_research):
-  primary community research, wire formats and captures.
-- [Misaka10571/joycon2-connector](https://github.com/Misaka10571/joycon2-connector)
-  and [FingerlessCoder/joycon2pc](https://github.com/FingerlessCoder/joycon2pc):
-  real-controller-to-PC implementations; their direction is the opposite of this project.
-- [BlueZ source and API documentation](https://github.com/bluez/bluez/tree/master/doc).
-- [Independent nRF52 prototype report](https://www.reddit.com/r/switch2/comments/1w69red/connecting_a_bluetooth_mouse_to_the_switch_2_w/):
-  contextual evidence only; no dependency on private firmware or an author's reply.
+```text
+pairing_ssp_complete
+pairing_key_saved
+l2cap_connected
+hid_rx
+hid_reply
+initialization_observed
+reconnect_initialized
+```
 
-Community reverse-engineering findings are provisional until reproduced locally.
-The code is original; reference repositories are not vendored. Project source,
-comments, diagnostics, UI and documentation are written in English.
+## Architecture
 
-License: [MIT](LICENSE).
+```text
+keyboard / SDL gamepad
+          |
+          v
+ GTK Controller Studio
+          |
+          | private Unix socket
+          v
+ Classic HID backend
+          |
+          | Bluetooth L2CAP PSM 17/19
+          v
+      Nintendo Switch
+```
+
+Main components:
+
+* `src/gui.c` — Controller Studio
+* `src/input-model.c` — input composition and profiles
+* `poc/pro-controller.c` — Classic Bluetooth transport and lifecycle
+* `poc/protocol.c` — Nintendo Classic HID protocol
+* `poc/run-classic.sh` — isolated privileged launcher
+* `src/protocol.c` — earlier Joy-Con 2 BLE experiment
+* `src/core.c` / `src/bluez.c` — BLE daemon lifecycle
+* `src/ipc.c` / `src/client.c` — local IPC
+
+## Documentation
+
+* [Controller Studio](docs/controller-studio.md)
+* [Classic Pro Controller experiments](docs/classic-pro-poc.md)
+* [Protocol research](docs/protocol.md)
+* [BlueZ notes](docs/bluez.md)
+* [Validation](docs/validation.md)
+* [Local API](docs/api.md)
+* [Classic HID backend](poc/README.md)
+
+## Project direction
+
+Current priorities:
+
+1. Keep the Pro Controller path stable.
+2. Investigate the Realtek reconnect difference.
+3. Validate a complete two-adapter Joy-Con pair.
+4. Extend Controller Studio with additional console/controller profiles.
+5. Integrate the controller backend with projects such as capture2cloud.
+
+The earlier Joy-Con 2 BLE work remains available for future research.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+Third-party protocol references and imported assets retain their respective attribution and licenses.
