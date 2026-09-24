@@ -1603,7 +1603,6 @@ static gboolean shutdown_error_is_expected(const GError *error) {
     case G_IO_ERROR_CONNECTION_CLOSED:
     case G_IO_ERROR_NOT_CONNECTED:
     case G_IO_ERROR_CLOSED:
-    case G_IO_ERROR_BROKEN_PIPE:
         return TRUE;
     default:
         return FALSE;
