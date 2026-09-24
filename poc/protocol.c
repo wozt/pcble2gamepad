@@ -157,6 +157,19 @@ static uint8_t spi(const ProState *s, uint32_t a) {
         0x0f,0x30,0x61,0x96,0x30,0xf3,0xd4,0x14,0x54,
         0x41,0x15,0x54,0xc7,0x79,0x9c,0x33,0x36,0x63
     };
+    /*
+     * Factory identity fields used by Nintendo during controller setup.
+     *
+     * 0x601B == 1 explicitly tells the console that custom color
+     * information exists in SPI.
+     */
+    if (a == 0x6012)
+        return (uint8_t)s->type;
+    if (a == 0x6013)
+        return 0xa0;
+    if (a == 0x601b)
+        return 0x01;
+
     if (s->type == CONTROLLER_PRO) {
         if (a >= 0x603d && a < 0x603d + sizeof(pro_sticks)) return pro_sticks[a - 0x603d];
         if (a >= 0x6080 && a < 0x6080 + sizeof(pro_config)) return pro_config[a - 0x6080];
@@ -219,7 +232,13 @@ bool pro_reply(ProState *s, const uint8_t *in, size_t len, uint8_t timer, uint8_
         out[19] = 2;
         memcpy(out + 20, s->address, 6);
         out[26] = 1;
-        out[27] = s->type == CONTROLLER_PRO ? 2 : 1;
+
+        /*
+         * Color information exists in SPI.
+         * Nintendo expects 0x01 here; any other value falls back to default
+         * controller colors.
+         */
+        out[27] = 1;
         break;
     case 3:
         s->mode = in[12];

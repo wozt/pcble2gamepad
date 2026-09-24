@@ -9,7 +9,7 @@
 #include <glib/gstdio.h>
 
 typedef struct {
-    int refs;gboolean closed,closing,busy,online,connected,loading;
+    int refs;gboolean closed,closing,stopping,busy,online,connected,loading;
     GtkApplication *app;GtkWindow *window;AdwToastOverlay *toast;
     GtkStack *stack;GtkLabel *status,*peer,*error,*metrics,*source_hint,*controller_hint,*hero_title,*paired_console;
     GtkWidget *drawing,*start,*sync,*stop,*arm,*capture_hint,*secondary_row,*pro_color_panel;
@@ -67,9 +67,21 @@ static void update_controls(Ui *u) {
         !u->online && !u->launcher && can_reconnect;
 
     gtk_widget_set_sensitive(u->start,
-        adapters_ok && (reconnect_existing || reconnect_new));
-    gtk_widget_set_sensitive(u->sync,!u->online && !u->launcher && adapters_ok);
-    gtk_widget_set_sensitive(u->stop,u->online);
+        !u->stopping &&
+        adapters_ok &&
+        (reconnect_existing || reconnect_new));
+
+    gtk_widget_set_sensitive(
+        u->sync,
+        !u->stopping &&
+        !u->online &&
+        !u->launcher &&
+        adapters_ok);
+
+    gtk_widget_set_sensitive(
+        u->stop,
+        u->online &&
+        !u->stopping);
     gtk_widget_set_sensitive(GTK_WIDGET(u->controllers),!u->online && !u->launcher);
     gtk_widget_set_sensitive(GTK_WIDGET(u->adapters),!u->online && !u->launcher);
     gtk_widget_set_sensitive(GTK_WIDGET(u->secondary),!u->online && !u->launcher);
@@ -1581,6 +1593,23 @@ static void worker(GTask *task,gpointer source,gpointer data,GCancellable *cance
     if(r->path2){GError *second_error=NULL;JsonObject *second=jc_client_request_object(r->path2,r->request,&second_error);if(!second){json_object_unref(o);g_task_return_error(task,second_error);return;}JsonObject *merged=merge_pair(o,second);json_object_unref(o);json_object_unref(second);o=merged;}
     g_task_return_pointer(task,o,(GDestroyNotify)json_object_unref);
 }
+static gboolean shutdown_error_is_expected(const GError *error) {
+    if(!error || error->domain!=G_IO_ERROR)
+        return FALSE;
+
+    switch(error->code) {
+    case G_IO_ERROR_NOT_FOUND:
+    case G_IO_ERROR_CONNECTION_REFUSED:
+    case G_IO_ERROR_CONNECTION_CLOSED:
+    case G_IO_ERROR_NOT_CONNECTED:
+    case G_IO_ERROR_CLOSED:
+    case G_IO_ERROR_BROKEN_PIPE:
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+
 static void finish_close(Ui *u) {
     /*
      * Both the IPC completion callback and the launcher completion callback
@@ -1604,74 +1633,298 @@ static void finish_close(Ui *u) {
     /* Release the Ui owner's lifetime reference exactly once. */
     ui_unref(u);
 }
-static void complete(GObject *source,GAsyncResult *result,gpointer data) {
-    (void)source;Ui *u=data;g_autoptr(GError)e=NULL;g_autoptr(JsonObject)o=g_task_propagate_pointer(G_TASK(result),&e);u->busy=FALSE;
-    Request *r=g_task_get_task_data(G_TASK(result));const char *method=json_object_get_string_member(r->request,"method");
-    if(u->closed){ui_unref(u);return;}
-    if(u->closing && (!u->launcher && (!strcmp(method,"stop") || e))){finish_close(u);ui_unref(u);return;}
-    u->online=o && json_object_get_boolean_member_with_default(o,"ok",FALSE);
-    if(u->online) {
-        JsonObject *s=json_object_get_object_member(o,"result");const char *state=json_object_get_string_member_with_default(s,"state","waiting");
-        u->connected=!strcmp(state,"connected");
-        gboolean simulated=json_object_get_boolean_member_with_default(s,"simulated",FALSE);
-        gtk_label_set_text(u->status,simulated?"SIMULATION":!strcmp(state,"connected")?"CONNECTED":"WAITING FOR CONSOLE");
-        const char *peer_address=json_object_get_string_member_with_default(s,"peer","");
-        gtk_label_set_text(u->peer,peer_address);
+static void complete(GObject *source,
+                     GAsyncResult *result,
+                     gpointer data) {
+    (void)source;
 
-        if(!simulated && !pair_mode(u) && !strcmp(state,"connected") &&
-           g_regex_match_simple("^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$",peer_address,0,0)) {
-            guint adapter_index=gtk_drop_down_get_selected(u->adapters);
-            if(adapter_index<u->adapter_addresses->len) {
-                const char *adapter_address=g_ptr_array_index(u->adapter_addresses,adapter_index);
-                gboolean changed=
-                    !u->paired_switch_address ||
-                    g_ascii_strcasecmp(
-                        u->paired_switch_address,
-                        peer_address) ||
-                    !u->paired_adapter_address ||
-                    g_ascii_strcasecmp(
-                        u->paired_adapter_address,
-                        adapter_address) ||
-                    !u->preferred_adapter_address ||
-                    g_ascii_strcasecmp(
-                        u->preferred_adapter_address,
-                        adapter_address);
+    Ui *u=data;
 
-                if(changed) {
-                    g_free(u->paired_switch_address);
-                    g_free(u->paired_adapter_address);
-                    g_free(u->preferred_adapter_address);
+    g_autoptr(GError) error=NULL;
+    g_autoptr(JsonObject) object=
+        g_task_propagate_pointer(
+            G_TASK(result),
+            &error);
 
-                    u->paired_switch_address=
-                        g_strdup(peer_address);
+    u->busy=FALSE;
 
-                    u->paired_adapter_address=
-                        g_strdup(adapter_address);
+    Request *request_data=
+        g_task_get_task_data(
+            G_TASK(result));
 
-                    u->preferred_adapter_address=
-                        g_strdup(adapter_address);
+    const char *method=
+        json_object_get_string_member(
+            request_data->request,
+            "method");
 
-                    app_state_save(u);
-                    update_paired_console(u);
+    if(u->closed) {
+        ui_unref(u);
+        return;
+    }
+
+    gboolean expected_shutdown_error=
+        error &&
+        shutdown_error_is_expected(error) &&
+        (u->stopping ||
+         u->closing ||
+         !strcmp(method,"stop"));
+
+    /*
+     * If the privileged launcher has already exited, this async request is
+     * the final outstanding operation needed before destroying the UI.
+     */
+    if(u->closing &&
+       !u->launcher &&
+       (!strcmp(method,"stop") ||
+        expected_shutdown_error ||
+        error)) {
+        finish_close(u);
+        ui_unref(u);
+        return;
+    }
+
+    /*
+     * A successful "stop" reply is sent shortly before the backend removes
+     * its Unix socket and exits. Treat that as offline immediately rather
+     * than temporarily marking the backend online again.
+     */
+    if(!strcmp(method,"stop")) {
+        u->online=FALSE;
+        u->connected=FALSE;
+
+        gtk_label_set_text(
+            u->status,
+            u->closing?"CLOSING":"OFFLINE");
+
+        gtk_label_set_text(
+            u->peer,
+            "Start a Bluetooth session to connect your console.");
+
+        if(!error || expected_shutdown_error)
+            gtk_label_set_text(u->error,"");
+        else
+            gtk_label_set_text(
+                u->error,
+                error->message);
+
+    } else {
+        u->online=
+            object &&
+            json_object_get_boolean_member_with_default(
+                object,
+                "ok",
+                FALSE);
+
+        if(u->online) {
+            JsonObject *state=
+                json_object_get_object_member(
+                    object,
+                    "result");
+
+            const char *session_state=
+                json_object_get_string_member_with_default(
+                    state,
+                    "state",
+                    "waiting");
+
+            u->connected=
+                !strcmp(
+                    session_state,
+                    "connected");
+
+            gboolean simulated=
+                json_object_get_boolean_member_with_default(
+                    state,
+                    "simulated",
+                    FALSE);
+
+            gtk_label_set_text(
+                u->status,
+                simulated
+                    ?"SIMULATION"
+                    :!strcmp(session_state,"connected")
+                        ?"CONNECTED"
+                        :"WAITING FOR CONSOLE");
+
+            const char *peer_address=
+                json_object_get_string_member_with_default(
+                    state,
+                    "peer",
+                    "");
+
+            gtk_label_set_text(
+                u->peer,
+                peer_address);
+
+            if(!simulated &&
+               !pair_mode(u) &&
+               !strcmp(session_state,"connected") &&
+               g_regex_match_simple(
+                    "^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$",
+                    peer_address,
+                    0,
+                    0)) {
+                guint adapter_index=
+                    gtk_drop_down_get_selected(
+                        u->adapters);
+
+                if(adapter_index<u->adapter_addresses->len) {
+                    const char *adapter_address=
+                        g_ptr_array_index(
+                            u->adapter_addresses,
+                            adapter_index);
+
+                    gboolean changed=
+                        !u->paired_switch_address ||
+                        g_ascii_strcasecmp(
+                            u->paired_switch_address,
+                            peer_address) ||
+                        !u->paired_adapter_address ||
+                        g_ascii_strcasecmp(
+                            u->paired_adapter_address,
+                            adapter_address) ||
+                        !u->preferred_adapter_address ||
+                        g_ascii_strcasecmp(
+                            u->preferred_adapter_address,
+                            adapter_address);
+
+                    if(changed) {
+                        g_free(u->paired_switch_address);
+                        g_free(u->paired_adapter_address);
+                        g_free(u->preferred_adapter_address);
+
+                        u->paired_switch_address=
+                            g_strdup(peer_address);
+
+                        u->paired_adapter_address=
+                            g_strdup(adapter_address);
+
+                        u->preferred_adapter_address=
+                            g_strdup(adapter_address);
+
+                        app_state_save(u);
+                        update_paired_console(u);
+                    }
                 }
             }
-        }
 
-        char *metrics=g_strdup_printf("%"G_GINT64_FORMAT" reports sent  ·  %"G_GINT64_FORMAT" received",json_object_get_int_member_with_default(s,"tx",0),json_object_get_int_member_with_default(s,"rx",0));gtk_label_set_text(u->metrics,metrics);g_free(metrics);
-        gtk_label_set_text(u->error,"");
-        JsonArray *logs=json_object_get_array_member(s,"logs");GString *text=g_string_new(NULL);
-        if(logs)for(guint i=0;i<json_array_get_length(logs);i++)g_string_append_printf(text,"%s\n",json_array_get_string_element(logs,i));
-        gtk_text_buffer_set_text(u->logs,text->str,-1);g_string_free(text,TRUE);
-    } else {
-        u->connected=FALSE;
-        gtk_label_set_text(u->status,"OFFLINE");gtk_label_set_text(u->peer,"Start a Bluetooth session to connect your console.");
-        if(o)gtk_label_set_text(u->error,json_object_get_string_member_with_default(o,"error","Request failed"));
-        else if(strcmp(method,"status"))gtk_label_set_text(u->error,e?e->message:"Backend unavailable");
+            g_autofree char *metrics=
+                g_strdup_printf(
+                    "%"G_GINT64_FORMAT
+                    " reports sent  ·  %"
+                    G_GINT64_FORMAT
+                    " received",
+                    json_object_get_int_member_with_default(
+                        state,
+                        "tx",
+                        0),
+                    json_object_get_int_member_with_default(
+                        state,
+                        "rx",
+                        0));
+
+            gtk_label_set_text(
+                u->metrics,
+                metrics);
+
+            gtk_label_set_text(
+                u->error,
+                "");
+
+            JsonArray *logs=
+                json_object_get_array_member(
+                    state,
+                    "logs");
+
+            GString *text=
+                g_string_new(NULL);
+
+            if(logs) {
+                for(guint i=0;
+                    i<json_array_get_length(logs);
+                    i++)
+                    g_string_append_printf(
+                        text,
+                        "%s\n",
+                        json_array_get_string_element(
+                            logs,
+                            i));
+            }
+
+            gtk_text_buffer_set_text(
+                u->logs,
+                text->str,
+                -1);
+
+            g_string_free(text,TRUE);
+
+        } else {
+            u->connected=FALSE;
+
+            gtk_label_set_text(
+                u->status,
+                "OFFLINE");
+
+            gtk_label_set_text(
+                u->peer,
+                "Start a Bluetooth session to connect your console.");
+
+            /*
+             * The socket disappearing while Stop/CLOSE is in progress is the
+             * expected end of a session, not an application error.
+             */
+            if(expected_shutdown_error ||
+               (!strcmp(method,"status") &&
+                !u->launcher)) {
+                gtk_label_set_text(
+                    u->error,
+                    "");
+            } else if(object) {
+                gtk_label_set_text(
+                    u->error,
+                    json_object_get_string_member_with_default(
+                        object,
+                        "error",
+                        "Request failed"));
+            } else if(strcmp(method,"status")) {
+                gtk_label_set_text(
+                    u->error,
+                    error
+                        ?error->message
+                        :"Backend unavailable");
+            }
+        }
     }
+
     update_controls(u);
-    if(u->closing){request(u,"stop");}else if(u->pending){char *pending=g_steal_pointer(&u->pending);request(u,pending);g_free(pending);}
+
+    /*
+     * Never recursively send another stop from a stop completion.
+     * close_window() sends it exactly once.
+     */
+    if(!u->closing && u->pending) {
+        char *pending=
+            g_steal_pointer(
+                &u->pending);
+
+        request(u,pending);
+        g_free(pending);
+    }
+
+    /*
+     * If the process is already gone and no more IPC request is pending, a
+     * user-initiated Stop is complete.
+     */
+    if(u->stopping &&
+       !u->closing &&
+       !u->launcher &&
+       !u->busy &&
+       !u->pending)
+        u->stopping=FALSE;
+
     ui_unref(u);
 }
+
 static void request(Ui *u,const char *method) {
     if(u->closed)return;
     if(u->busy){if(strcmp(method,"status") && strcmp(method,"input")){g_free(u->pending);u->pending=g_strdup(method);}return;}
@@ -1711,11 +1964,44 @@ static void launcher_done(GObject *source,GAsyncResult *result,gpointer data) {
     gboolean ok=g_subprocess_wait_check_finish(process,result,&e);
     g_clear_object(&u->launcher);
 
-    if(u->closing){finish_close(u);ui_unref(u);return;}
+    if(u->closing) {
+        finish_close(u);
+        ui_unref(u);
+        return;
+    }
+
+    if(u->stopping) {
+        /*
+         * Normal Stop session path. The socket disappearing is expected.
+         * Do not probe it again with a status request.
+         */
+        u->online=FALSE;
+        u->connected=FALSE;
+
+        gtk_label_set_text(
+            u->status,
+            "OFFLINE");
+
+        gtk_label_set_text(
+            u->peer,
+            "Start a Bluetooth session to connect your console.");
+
+        gtk_label_set_text(
+            u->error,
+            "");
+
+        if(!u->busy && !u->pending)
+            u->stopping=FALSE;
+
+        update_controls(u);
+        ui_unref(u);
+        return;
+    }
 
     if(!u->closed) {
         if(!ok) {
             g_autofree char *message=NULL;
+
             if(g_subprocess_get_if_exited(process))
                 message=g_strdup_printf(
                     "Bluetooth session process exited with code %d.",
@@ -1725,13 +2011,18 @@ static void launcher_done(GObject *source,GAsyncResult *result,gpointer data) {
                     "Bluetooth session process was terminated by signal %d.",
                     g_subprocess_get_term_sig(process));
             else
-                message=g_strdup("Bluetooth session process failed.");
+                message=g_strdup(
+                    "Bluetooth session process failed.");
 
-            gtk_label_set_text(u->error,message);
+            gtk_label_set_text(
+                u->error,
+                message);
         }
+
         update_controls(u);
         request(u,"status");
     }
+
     ui_unref(u);
 }
 static void controller_selected(GObject *o,GParamSpec *p,Ui *u) {
@@ -2005,12 +2296,64 @@ static void sync_clicked(GtkButton *b,Ui *u) {
     (void)b;
     launch_switch_session(u,FALSE);
 }
-static void stop_clicked(GtkButton *b,Ui *u){(void)b;neutral(u);request(u,"stop");}
+static void stop_clicked(GtkButton *b,Ui *u) {
+    (void)b;
+
+    if(u->stopping)
+        return;
+
+    /*
+     * The backend is going away, so there is no need to send a separate
+     * release request first.
+     */
+    g_hash_table_remove_all(u->keys);
+    g_clear_pointer(&u->pending,g_free);
+
+    u->stopping=TRUE;
+
+    gtk_label_set_text(
+        u->status,
+        "STOPPING");
+
+    gtk_label_set_text(
+        u->error,
+        "");
+
+    update_controls(u);
+    request(u,"stop");
+}
+
 static gboolean close_window(GtkWindow *w,Ui *u) {
-    if(u->closing)return TRUE;
-    app_state_save(u);u->closing=TRUE;g_source_remove(u->timer);gtk_widget_set_visible(GTK_WIDGET(w),FALSE);
-    if(u->launcher && !u->online)g_subprocess_send_signal(u->launcher,SIGTERM);
-    request(u,"stop");return TRUE;
+    if(u->closing)
+        return TRUE;
+
+    app_state_save(u);
+
+    u->closing=TRUE;
+    u->stopping=TRUE;
+
+    if(u->timer) {
+        g_source_remove(u->timer);
+        u->timer=0;
+    }
+
+    g_clear_pointer(&u->pending,g_free);
+
+    gtk_widget_set_visible(
+        GTK_WIDGET(w),
+        FALSE);
+
+    /*
+     * If the privileged process has not created its control socket yet,
+     * terminate it directly. Otherwise ask the backend for a clean stop.
+     */
+    if(u->launcher && !u->online)
+        g_subprocess_send_signal(
+            u->launcher,
+            SIGTERM);
+
+    request(u,"stop");
+    return TRUE;
 }
 static void copy_logs(GtkButton *b,Ui *u){(void)b;GtkTextIter a,z;gtk_text_buffer_get_bounds(u->logs,&a,&z);char *text=gtk_text_buffer_get_text(u->logs,&a,&z,FALSE);gdk_clipboard_set_text(gtk_widget_get_clipboard(GTK_WIDGET(u->window)),text);g_free(text);toast(u,"Diagnostics copied");}
 static void defaults(GtkButton *b,Ui *u){neutral(u);int controller=u->profile.emulated_controller;input_profile_defaults(&u->profile,GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b),"azerty")));u->profile.emulated_controller=controller;refresh_bindings(u);toast(u,"Defaults restored; save to keep them");}

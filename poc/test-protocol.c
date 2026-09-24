@@ -13,7 +13,26 @@ static void reports(void) {
     in[11]=2;g_assert_true(pro_reply(&s,in,12,6,out));
     g_assert_cmpint(out[1],==,0x21);g_assert_cmpint(out[17],==,0x48);
     g_assert_cmpint(out[18],==,3);g_assert_cmpmem(out+20,6,mac,6);
-    g_assert_cmpint(out[26],==,1);g_assert_cmpint(out[27],==,2);
+    g_assert_cmpint(out[26],==,1);
+    g_assert_cmpint(out[27],==,1);
+
+    /*
+     * Factory configuration says that controller colors are present.
+     */
+    in[11]=0x10;
+    in[12]=0x1b;
+    in[13]=0x60;
+    in[14]=0;
+    in[15]=0;
+    in[16]=1;
+
+    g_assert_true(
+        pro_reply(&s,in,17,7,out));
+
+    g_assert_cmpint(
+        out[21],
+        ==,
+        1);
 
     const uint8_t body[]={0x12,0x34,0x56};
     const uint8_t buttons[]={0x65,0x43,0x21};
