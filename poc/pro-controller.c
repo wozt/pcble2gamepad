@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
+#include <ctype.h>
 #include <poll.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -225,6 +226,7 @@ static char *pairing_store_path(const char *remote,gboolean create) {
         if(g_mkdir_with_parents(base,0700)<0)
             return NULL;
 
+        g_chmod("/var/lib/pcble2gamepad",0700);
         g_chmod("/var/lib/pcble2gamepad",0700);
         g_chmod("/var/lib/pcble2gamepad/pairings",0700);
         g_chmod(base,0700);
@@ -1924,6 +1926,1218 @@ static gboolean input(GIOChannel *io,GIOCondition cond,gpointer unused) {
     } else log_event("input_help","buttons HEX HEX HEX | sticks LX LY RX RY | release | status | quit; inputs release after 500 ms");
     g_free(line);return G_SOURCE_CONTINUE;
 }
+
+#define WAKE_PROBE_OCF_SET_RANDOM_ADDRESS          0x0005
+#define WAKE_PROBE_OCF_SET_ADV_PARAMETERS          0x0006
+#define WAKE_PROBE_OCF_SET_ADV_DATA                0x0008
+#define WAKE_PROBE_OCF_SET_ADV_ENABLE              0x000A
+#define WAKE_PROBE_OCF_SET_SCAN_PARAMETERS         0x000B
+#define WAKE_PROBE_OCF_SET_SCAN_ENABLE             0x000C
+
+static int wake_probe_adapter_index(const char *id)
+{
+    if (!id ||
+        strncmp(id, "hci", 3) != 0 ||
+        !isdigit((unsigned char)id[3])) {
+        return -1;
+    }
+
+    char *end = NULL;
+    long value =
+        strtol(id + 3, &end, 10);
+
+    if (!end ||
+        *end ||
+        value < 0 ||
+        value > 65535) {
+        return -1;
+    }
+
+    return (int)value;
+}
+
+static int wake_probe_command(
+    int dd,
+    uint16_t ocf,
+    const void *parameters,
+    int parameter_size,
+    const char *name,
+    int quiet)
+{
+    uint8_t status = 0xff;
+
+    struct hci_request request;
+    memset(&request, 0, sizeof(request));
+
+    request.ogf = OGF_LE_CTL;
+    request.ocf = ocf;
+    request.event = EVT_CMD_COMPLETE;
+    request.cparam = (void *)parameters;
+    request.clen = parameter_size;
+    request.rparam = &status;
+    request.rlen = sizeof(status);
+
+    if (hci_send_req(
+            dd,
+            &request,
+            2000) < 0) {
+        if (!quiet) {
+            fprintf(
+                stderr,
+                "%s failed: %s\n",
+                name,
+                strerror(errno));
+        }
+        return 0;
+    }
+
+    if (status != 0x00) {
+        if (!quiet) {
+            fprintf(
+                stderr,
+                "%s failed: controller status 0x%02X\n",
+                name,
+                status);
+        }
+        return 0;
+    }
+
+    if (!quiet) {
+        printf(
+            "OK  %s\n",
+            name);
+        fflush(stdout);
+    }
+
+    return 1;
+}
+
+static int wake_probe_run(const char *adapter_id)
+{
+    int dev_id =
+        wake_probe_adapter_index(
+            adapter_id);
+
+    if (dev_id < 0) {
+        fprintf(
+            stderr,
+            "Invalid wake-probe adapter: %s\n",
+            adapter_id ? adapter_id : "(null)");
+        return 2;
+    }
+
+    /*
+     * BlueZ is stopped by the privileged runner before entering here.
+     * Bring the kernel HCI controller up so raw LE commands can be
+     * exercised directly.
+     */
+    int control =
+        socket(
+            AF_BLUETOOTH,
+            SOCK_RAW | SOCK_CLOEXEC,
+            BTPROTO_HCI);
+
+    if (control < 0) {
+        fprintf(
+            stderr,
+            "Could not open HCI control socket: %s\n",
+            strerror(errno));
+        return 1;
+    }
+
+    if (ioctl(
+            control,
+            HCIDEVUP,
+            dev_id) < 0 &&
+        errno != EALREADY) {
+        fprintf(
+            stderr,
+            "Could not bring %s up: %s\n",
+            adapter_id,
+            strerror(errno));
+
+        close(control);
+        return 1;
+    }
+
+    close(control);
+
+    int dd =
+        hci_open_dev(dev_id);
+
+    if (dd < 0) {
+        fprintf(
+            stderr,
+            "Could not open %s: %s\n",
+            adapter_id,
+            strerror(errno));
+        return 1;
+    }
+
+    /*
+     * Safe capture-side probe.
+     *
+     * Passive LE scan, short interval/window, no duplicate filtering.
+     */
+    const uint8_t scan_parameters[] = {
+        0x00,       /* passive scan */
+        0x10, 0x00, /* interval */
+        0x10, 0x00, /* window */
+        0x00,       /* public own address */
+        0x00        /* accept all */
+    };
+
+    const uint8_t scan_on[] = {
+        0x01,
+        0x00
+    };
+
+    const uint8_t scan_off[] = {
+        0x00,
+        0x00
+    };
+
+    /*
+     * Static random address:
+     *
+     *   C0:00:00:00:00:01
+     *
+     * HCI transports BD_ADDR least-significant byte first.
+     */
+    const uint8_t random_address[] = {
+        0x01, 0x00, 0x00,
+        0x00, 0x00, 0xC0
+    };
+
+    /*
+     * Same advertising mode that successfully woke the user's Switch 2:
+     *
+     *   ADV_NONCONN_IND
+     *   own address = random
+     *   channels 37/38/39
+     */
+    const uint8_t advertising_parameters[] = {
+        0x20, 0x00, /* minimum interval */
+        0x40, 0x00, /* maximum interval */
+        0x03,       /* ADV_NONCONN_IND */
+        0x01,       /* random own address */
+        0x00,       /* direct address type */
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x07,       /* all advertising channels */
+        0x00        /* no filter */
+    };
+
+    uint8_t advertising_data[32];
+    memset(
+        advertising_data,
+        0,
+        sizeof(advertising_data));
+
+    advertising_data[0] = 3;
+    advertising_data[1] = 0x02;
+    advertising_data[2] = 0x01;
+    advertising_data[3] = 0x06;
+
+    const uint8_t advertise_on = 0x01;
+    const uint8_t advertise_off = 0x00;
+
+    int ok = 1;
+
+#define WAKE_PROBE_STEP(ocf, data, name)                     \
+    do {                                                      \
+        if (!wake_probe_command(                              \
+                dd,                                           \
+                (ocf),                                        \
+                (data),                                       \
+                sizeof(data),                                 \
+                (name),                                       \
+                0)) {                                         \
+            ok = 0;                                           \
+            goto wake_probe_cleanup;                          \
+        }                                                     \
+    } while (0)
+
+    WAKE_PROBE_STEP(
+        WAKE_PROBE_OCF_SET_SCAN_PARAMETERS,
+        scan_parameters,
+        "LE Set Scan Parameters");
+
+    WAKE_PROBE_STEP(
+        WAKE_PROBE_OCF_SET_SCAN_ENABLE,
+        scan_on,
+        "LE Scan Enable");
+
+    usleep(20000);
+
+    WAKE_PROBE_STEP(
+        WAKE_PROBE_OCF_SET_SCAN_ENABLE,
+        scan_off,
+        "LE Scan Disable");
+
+    WAKE_PROBE_STEP(
+        WAKE_PROBE_OCF_SET_RANDOM_ADDRESS,
+        random_address,
+        "LE Set Random Address");
+
+    WAKE_PROBE_STEP(
+        WAKE_PROBE_OCF_SET_ADV_PARAMETERS,
+        advertising_parameters,
+        "LE Set Advertising Parameters");
+
+    WAKE_PROBE_STEP(
+        WAKE_PROBE_OCF_SET_ADV_DATA,
+        advertising_data,
+        "LE Set Advertising Data");
+
+    WAKE_PROBE_STEP(
+        WAKE_PROBE_OCF_SET_ADV_ENABLE,
+        &advertise_on,
+        "LE Advertising Enable");
+
+    usleep(20000);
+
+    WAKE_PROBE_STEP(
+        WAKE_PROBE_OCF_SET_ADV_ENABLE,
+        &advertise_off,
+        "LE Advertising Disable");
+
+wake_probe_cleanup:
+
+    /*
+     * Best-effort cleanup even when one of the tested commands fails.
+     * BlueZ is restarted by the runner immediately afterwards as the
+     * final authoritative restoration step.
+     */
+    wake_probe_command(
+        dd,
+        WAKE_PROBE_OCF_SET_SCAN_ENABLE,
+        scan_off,
+        sizeof(scan_off),
+        "cleanup scan disable",
+        1);
+
+    wake_probe_command(
+        dd,
+        WAKE_PROBE_OCF_SET_ADV_ENABLE,
+        &advertise_off,
+        sizeof(advertise_off),
+        "cleanup advertising disable",
+        1);
+
+    close(dd);
+
+#undef WAKE_PROBE_STEP
+
+    if (ok) {
+        printf(
+            "WAKE_PROBE_OK %s\n",
+            adapter_id);
+        fflush(stdout);
+        return 0;
+    }
+
+    return 1;
+}
+
+
+static int wake_capture_find_switch2(
+    const uint8_t *data,
+    size_t length,
+    size_t *switch_offset)
+{
+    static const uint8_t magic[] = {
+        0x01, 0x00, 0x03, 0x7E, 0x05
+    };
+
+    size_t offset = 0;
+
+    while (offset < length) {
+        uint8_t field_length =
+            data[offset];
+
+        if (field_length == 0) {
+            break;
+        }
+
+        if (offset + 1u +
+                field_length >
+            length) {
+            break;
+        }
+
+        /*
+         * AD type FF = manufacturer specific.
+         *
+         * Nintendo company id 0x0553 appears on the wire little-endian:
+         *
+         *     53 05
+         *
+         * The Switch 2 wake payload begins:
+         *
+         *     01 00 03 7E 05
+         */
+        if (field_length >= 19 &&
+            data[offset + 1] == 0xFF &&
+            data[offset + 2] == 0x53 &&
+            data[offset + 3] == 0x05 &&
+            memcmp(
+                data + offset + 4,
+                magic,
+                sizeof(magic)) == 0) {
+
+            /*
+             * Manufacturer payload byte 10 is the first byte of the
+             * target Switch MAC in little-endian order.
+             */
+            if (switch_offset) {
+                *switch_offset =
+                    offset + 14;
+            }
+
+            return 1;
+        }
+
+        offset +=
+            (size_t)field_length + 1;
+    }
+
+    return 0;
+}
+
+static void wake_capture_hex(
+    const uint8_t *data,
+    size_t length,
+    char *out,
+    size_t out_size)
+{
+    static const char hex[] =
+        "0123456789ABCDEF";
+
+    if (!out || out_size == 0) {
+        return;
+    }
+
+    out[0] = '\0';
+
+    if (!data ||
+        out_size < length * 2 + 1) {
+        return;
+    }
+
+    for (size_t i = 0; i < length; i++) {
+        out[i * 2] =
+            hex[data[i] >> 4];
+
+        out[i * 2 + 1] =
+            hex[data[i] & 0x0F];
+    }
+
+    out[length * 2] = '\0';
+}
+
+static int wake_capture_run(
+    const char *adapter_id)
+{
+    int dev_id =
+        wake_probe_adapter_index(
+            adapter_id);
+
+    if (dev_id < 0) {
+        fprintf(
+            stderr,
+            "Invalid wake-capture adapter: %s\n",
+            adapter_id
+                ? adapter_id
+                : "(null)");
+        return 2;
+    }
+
+    /*
+     * run-classic.sh stopped bluetoothd before entering here.
+     * Make sure the selected controller itself is UP.
+     */
+    int control =
+        socket(
+            AF_BLUETOOTH,
+            SOCK_RAW | SOCK_CLOEXEC,
+            BTPROTO_HCI);
+
+    if (control < 0) {
+        fprintf(
+            stderr,
+            "Could not open HCI control socket: %s\n",
+            strerror(errno));
+        return 1;
+    }
+
+    if (ioctl(
+            control,
+            HCIDEVUP,
+            dev_id) < 0 &&
+        errno != EALREADY) {
+        fprintf(
+            stderr,
+            "Could not bring %s up: %s\n",
+            adapter_id,
+            strerror(errno));
+
+        close(control);
+        return 1;
+    }
+
+    close(control);
+
+    int dd =
+        hci_open_dev(
+            dev_id);
+
+    if (dd < 0) {
+        fprintf(
+            stderr,
+            "Could not open %s: %s\n",
+            adapter_id,
+            strerror(errno));
+        return 1;
+    }
+
+    /*
+     * Install the LE Meta Event filter before scanning so even a very
+     * short wake advertisement cannot fall into a gap between enabling
+     * the controller scan and installing our userspace filter.
+     *
+     * hci_send_req(), used internally by the libbluetooth helpers below,
+     * temporarily installs its own command-complete filter and restores
+     * this one afterwards.
+     */
+    struct hci_filter old_filter;
+    socklen_t old_filter_size =
+        sizeof(old_filter);
+
+    int have_old_filter =
+        getsockopt(
+            dd,
+            SOL_HCI,
+            HCI_FILTER,
+            &old_filter,
+            &old_filter_size) == 0;
+
+    struct hci_filter filter;
+
+    hci_filter_clear(
+        &filter);
+
+    hci_filter_set_ptype(
+        HCI_EVENT_PKT,
+        &filter);
+
+    hci_filter_set_event(
+        EVT_LE_META_EVENT,
+        &filter);
+
+    if (setsockopt(
+            dd,
+            SOL_HCI,
+            HCI_FILTER,
+            &filter,
+            sizeof(filter)) < 0) {
+        fprintf(
+            stderr,
+            "Could not install LE event filter: %s\n",
+            strerror(errno));
+
+        close(dd);
+        return 1;
+    }
+
+    /*
+     * Match BlueZ hcitool lescan:
+     *
+     *   active scan
+     *   public own address
+     *   full-duty 0x0010 / 0x0010 scan
+     *   accept all advertisers
+     *   duplicate filtering disabled
+     *
+     * Active scanning is useful here because it also lets us see a scan
+     * response if a controller places part of its manufacturer payload
+     * there.
+     */
+    const uint8_t scan_type =
+        0x01;
+
+    const uint8_t own_type =
+        LE_PUBLIC_ADDRESS;
+
+    const uint8_t filter_policy =
+        0x00;
+
+    const uint8_t filter_duplicates =
+        0x00;
+
+    const uint16_t interval =
+        htobs(0x0010);
+
+    const uint16_t window =
+        htobs(0x0010);
+
+    if (hci_le_set_scan_parameters(
+            dd,
+            scan_type,
+            interval,
+            window,
+            own_type,
+            filter_policy,
+            2000) < 0) {
+        fprintf(
+            stderr,
+            "LE Set Scan Parameters failed: %s\n",
+            strerror(errno));
+
+        if (have_old_filter) {
+            setsockopt(
+                dd,
+                SOL_HCI,
+                HCI_FILTER,
+                &old_filter,
+                old_filter_size);
+        }
+
+        close(dd);
+        return 1;
+    }
+
+    if (hci_le_set_scan_enable(
+            dd,
+            0x01,
+            filter_duplicates,
+            2000) < 0) {
+        fprintf(
+            stderr,
+            "LE Scan Enable failed: %s\n",
+            strerror(errno));
+
+        if (have_old_filter) {
+            setsockopt(
+                dd,
+                SOL_HCI,
+                HCI_FILTER,
+                &old_filter,
+                old_filter_size);
+        }
+
+        close(dd);
+        return 1;
+    }
+
+    fprintf(
+        stderr,
+        "Listening up to 20 seconds for a Nintendo Switch 2 wake beacon...\n");
+
+    const gint64 deadline =
+        g_get_monotonic_time() +
+        20 * G_USEC_PER_SEC;
+
+    unsigned meta_events_seen = 0;
+    unsigned advertising_reports_seen = 0;
+    unsigned other_subevents_seen = 0;
+
+    int found = 0;
+
+    while (!found) {
+        gint64 now =
+            g_get_monotonic_time();
+
+        if (now >= deadline) {
+            break;
+        }
+
+        gint64 remaining_us =
+            deadline - now;
+
+        int remaining_ms =
+            (int)((remaining_us + 999) / 1000);
+
+        struct pollfd poll_fd = {
+            .fd = dd,
+            .events = POLLIN,
+        };
+
+        int poll_result =
+            poll(
+                &poll_fd,
+                1,
+                remaining_ms);
+
+        if (poll_result < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+
+            fprintf(
+                stderr,
+                "Bluetooth capture poll failed: %s\n",
+                strerror(errno));
+            break;
+        }
+
+        if (poll_result == 0) {
+            break;
+        }
+
+        if (!(poll_fd.revents & POLLIN)) {
+            continue;
+        }
+
+        uint8_t buffer[
+            HCI_MAX_EVENT_SIZE];
+
+        ssize_t received =
+            read(
+                dd,
+                buffer,
+                sizeof(buffer));
+
+        if (received < 0) {
+            if (errno == EINTR ||
+                errno == EAGAIN) {
+                continue;
+            }
+
+            fprintf(
+                stderr,
+                "Bluetooth capture read failed: %s\n",
+                strerror(errno));
+            break;
+        }
+
+        if ((size_t)received <
+            1 +
+            HCI_EVENT_HDR_SIZE +
+            EVT_LE_META_EVENT_SIZE) {
+            continue;
+        }
+
+        if (buffer[0] !=
+            HCI_EVENT_PKT) {
+            continue;
+        }
+
+        evt_le_meta_event *meta =
+            (evt_le_meta_event *)(
+                buffer +
+                1 +
+                HCI_EVENT_HDR_SIZE);
+
+        meta_events_seen++;
+
+        if (meta->subevent !=
+            EVT_LE_ADVERTISING_REPORT) {
+
+            other_subevents_seen++;
+
+            if (other_subevents_seen <= 8) {
+                fprintf(
+                    stderr,
+                    "LE meta event subevent=0x%02X ignored\n",
+                    meta->subevent);
+            }
+
+            continue;
+        }
+
+        uint8_t *cursor =
+            meta->data;
+
+        uint8_t *packet_end =
+            buffer + received;
+
+        if (cursor >= packet_end) {
+            continue;
+        }
+
+        unsigned report_count =
+            *cursor++;
+
+        for (unsigned report = 0;
+             report < report_count;
+             report++) {
+
+            if (cursor +
+                    LE_ADVERTISING_INFO_SIZE >
+                packet_end) {
+                break;
+            }
+
+            le_advertising_info *info =
+                (le_advertising_info *)cursor;
+
+            size_t report_size =
+                LE_ADVERTISING_INFO_SIZE +
+                info->length +
+                1; /* RSSI */
+
+            if (cursor +
+                    report_size >
+                packet_end) {
+                break;
+            }
+
+            advertising_reports_seen++;
+
+            /*
+             * Print the first reports while debugging this capture path.
+             * This makes it immediately obvious whether the radio hears
+             * BLE traffic but our Nintendo matcher rejects it.
+             */
+            if (advertising_reports_seen <= 12) {
+                char address[18];
+
+                ba2str(
+                    &info->bdaddr,
+                    address);
+
+                char hex[
+                    31 * 2 + 1];
+
+                if (info->length <= 31) {
+                    wake_capture_hex(
+                        info->data,
+                        info->length,
+                        hex,
+                        sizeof(hex));
+                } else {
+                    snprintf(
+                        hex,
+                        sizeof(hex),
+                        "<too-long>");
+                }
+
+                fprintf(
+                    stderr,
+                    "LE adv #%u type=0x%02X addr=%s len=%u data=%s\n",
+                    advertising_reports_seen,
+                    info->evt_type,
+                    address,
+                    info->length,
+                    hex);
+            }
+
+            size_t switch_offset = 0;
+
+            if (info->length <= 31 &&
+                wake_capture_find_switch2(
+                    info->data,
+                    info->length,
+                    &switch_offset)) {
+
+                char controller[18];
+
+                ba2str(
+                    &info->bdaddr,
+                    controller);
+
+                const uint8_t *target =
+                    info->data +
+                    switch_offset;
+
+                char target_switch[18];
+
+                snprintf(
+                    target_switch,
+                    sizeof(target_switch),
+                    "%02X:%02X:%02X:%02X:%02X:%02X",
+                    target[5],
+                    target[4],
+                    target[3],
+                    target[2],
+                    target[1],
+                    target[0]);
+
+                char hex[
+                    31 * 2 + 1];
+
+                wake_capture_hex(
+                    info->data,
+                    info->length,
+                    hex,
+                    sizeof(hex));
+
+                printf(
+                    "WAKE_CAPTURE_OK controller=%s switch=%s data=%s\n",
+                    controller,
+                    target_switch,
+                    hex);
+
+                fflush(stdout);
+
+                found = 1;
+                break;
+            }
+
+            cursor +=
+                report_size;
+        }
+    }
+
+    hci_le_set_scan_enable(
+        dd,
+        0x00,
+        filter_duplicates,
+        2000);
+
+    if (have_old_filter) {
+        setsockopt(
+            dd,
+            SOL_HCI,
+            HCI_FILTER,
+            &old_filter,
+            old_filter_size);
+    }
+
+    close(dd);
+
+    if (!found) {
+        if (advertising_reports_seen == 0) {
+            fprintf(
+                stderr,
+                "No LE advertising reports received in 20 seconds "
+                "(meta=%u other-subevents=%u).\n",
+                meta_events_seen,
+                other_subevents_seen);
+        } else {
+            fprintf(
+                stderr,
+                "Saw %u LE advertising reports, but none matched "
+                "the Switch 2 Nintendo wake beacon.\n",
+                advertising_reports_seen);
+        }
+
+        return 1;
+    }
+
+    return 0;
+}
+
+
+static int wake_send_hex_value(
+    char c)
+{
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+
+    if (c >= 'a' && c <= 'f') {
+        return 10 + c - 'a';
+    }
+
+    if (c >= 'A' && c <= 'F') {
+        return 10 + c - 'A';
+    }
+
+    return -1;
+}
+
+static int wake_send_decode_hex(
+    const char *text,
+    uint8_t *out,
+    size_t out_size,
+    size_t *decoded_size)
+{
+    if (decoded_size) {
+        *decoded_size = 0;
+    }
+
+    if (!text ||
+        !out) {
+        return 0;
+    }
+
+    size_t length =
+        strlen(text);
+
+    if (length == 0 ||
+        (length & 1u) != 0 ||
+        length / 2 > out_size) {
+        return 0;
+    }
+
+    for (size_t i = 0;
+         i < length / 2;
+         i++) {
+
+        int high =
+            wake_send_hex_value(
+                text[i * 2]);
+
+        int low =
+            wake_send_hex_value(
+                text[i * 2 + 1]);
+
+        if (high < 0 ||
+            low < 0) {
+            return 0;
+        }
+
+        out[i] =
+            (uint8_t)(
+                (high << 4) |
+                low);
+    }
+
+    if (decoded_size) {
+        *decoded_size =
+            length / 2;
+    }
+
+    return 1;
+}
+
+static int wake_send_run(
+    const char *adapter_id,
+    const char *controller_address,
+    const char *advertisement_hex)
+{
+    int dev_id =
+        wake_probe_adapter_index(
+            adapter_id);
+
+    if (dev_id < 0) {
+        fprintf(
+            stderr,
+            "Invalid wake-send adapter\n");
+        return 2;
+    }
+
+    bdaddr_t controller;
+
+    if (!controller_address ||
+        str2ba(
+            controller_address,
+            &controller) < 0) {
+        fprintf(
+            stderr,
+            "Invalid controller Bluetooth address\n");
+        return 2;
+    }
+
+    uint8_t advertisement[31];
+    size_t advertisement_size = 0;
+
+    if (!wake_send_decode_hex(
+            advertisement_hex,
+            advertisement,
+            sizeof(advertisement),
+            &advertisement_size)) {
+        fprintf(
+            stderr,
+            "Invalid Switch 2 advertisement data\n");
+        return 2;
+    }
+
+    /*
+     * Never transmit arbitrary data through this privileged helper.
+     * Require the Nintendo Switch 2 wake manufacturer payload that the
+     * capture path itself recognises.
+     */
+    if (!wake_capture_find_switch2(
+            advertisement,
+            advertisement_size,
+            NULL)) {
+        fprintf(
+            stderr,
+            "Advertisement is not a Switch 2 Nintendo wake beacon\n");
+        return 2;
+    }
+
+    int control =
+        socket(
+            AF_BLUETOOTH,
+            SOCK_RAW | SOCK_CLOEXEC,
+            BTPROTO_HCI);
+
+    if (control < 0) {
+        fprintf(
+            stderr,
+            "Could not open HCI control socket: %s\n",
+            strerror(errno));
+        return 1;
+    }
+
+    if (ioctl(
+            control,
+            HCIDEVUP,
+            dev_id) < 0 &&
+        errno != EALREADY) {
+        fprintf(
+            stderr,
+            "Could not bring %s up: %s\n",
+            adapter_id,
+            strerror(errno));
+
+        close(control);
+        return 1;
+    }
+
+    close(control);
+
+    int dd =
+        hci_open_dev(
+            dev_id);
+
+    if (dd < 0) {
+        fprintf(
+            stderr,
+            "Could not open %s: %s\n",
+            adapter_id,
+            strerror(errno));
+        return 1;
+    }
+
+    const uint8_t scan_off[] = {
+        0x00,
+        0x00
+    };
+
+    const uint8_t advertising_off =
+        0x00;
+
+    const uint8_t advertising_on =
+        0x01;
+
+    /*
+     * str2ba() stores the address in the byte order expected by HCI.
+     *
+     * Example:
+     *   38:C6:CE:11:2B:F7
+     *
+     * becomes:
+     *   F7 2B 11 CE C6 38
+     *
+     * which is exactly the proven wake PoC.
+     */
+    uint8_t random_address[6];
+
+    memcpy(
+        random_address,
+        controller.b,
+        sizeof(random_address));
+
+    const uint8_t advertising_parameters[] = {
+        0x20, 0x00,
+        0x40, 0x00,
+        0x03,       /* ADV_NONCONN_IND */
+        0x01,       /* random own address */
+        0x00,
+        0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x07,
+        0x00
+    };
+
+    uint8_t advertising_data[32];
+
+    memset(
+        advertising_data,
+        0,
+        sizeof(advertising_data));
+
+    advertising_data[0] =
+        (uint8_t)advertisement_size;
+
+    memcpy(
+        advertising_data + 1,
+        advertisement,
+        advertisement_size);
+
+    /*
+     * Start from a known controller state.
+     */
+    wake_probe_command(
+        dd,
+        WAKE_PROBE_OCF_SET_SCAN_ENABLE,
+        scan_off,
+        sizeof(scan_off),
+        "cleanup scan disable",
+        1);
+
+    wake_probe_command(
+        dd,
+        WAKE_PROBE_OCF_SET_ADV_ENABLE,
+        &advertising_off,
+        sizeof(advertising_off),
+        "cleanup advertising disable",
+        1);
+
+    int ok = 1;
+
+#define WAKE_SEND_STEP(ocf, data, name)                       \
+    do {                                                       \
+        if (!wake_probe_command(                               \
+                dd,                                            \
+                (ocf),                                         \
+                (data),                                        \
+                sizeof(data),                                  \
+                (name),                                        \
+                0)) {                                          \
+            ok = 0;                                            \
+            goto wake_send_cleanup;                            \
+        }                                                      \
+    } while (0)
+
+    WAKE_SEND_STEP(
+        WAKE_PROBE_OCF_SET_RANDOM_ADDRESS,
+        random_address,
+        "LE Set Random Address");
+
+    WAKE_SEND_STEP(
+        WAKE_PROBE_OCF_SET_ADV_PARAMETERS,
+        advertising_parameters,
+        "LE Set Advertising Parameters");
+
+    WAKE_SEND_STEP(
+        WAKE_PROBE_OCF_SET_ADV_DATA,
+        advertising_data,
+        "LE Set Advertising Data");
+
+    WAKE_SEND_STEP(
+        WAKE_PROBE_OCF_SET_ADV_ENABLE,
+        &advertising_on,
+        "LE Advertising Enable");
+
+    fprintf(
+        stderr,
+        "Transmitting Switch 2 wake beacon for 3 seconds...\n");
+
+    g_usleep(
+        3 * G_USEC_PER_SEC);
+
+wake_send_cleanup:
+
+    wake_probe_command(
+        dd,
+        WAKE_PROBE_OCF_SET_ADV_ENABLE,
+        &advertising_off,
+        sizeof(advertising_off),
+        "LE Advertising Disable",
+        ok ? 0 : 1);
+
+    close(dd);
+
+#undef WAKE_SEND_STEP
+
+    if (!ok) {
+        return 1;
+    }
+
+    printf(
+        "WAKE_SEND_OK %s\n",
+        adapter_id);
+
+    fflush(stdout);
+    return 0;
+}
+
 static const char xml[]=
 "<node><interface name='org.bluez.Agent1'>"
 "<method name='Release'/><method name='Cancel'/>"
@@ -1938,6 +3152,15 @@ static const char xml[]=
 "<method name='NewConnection'><arg type='o' direction='in'/><arg type='h' direction='in'/><arg type='a{sv}' direction='in'/></method>"
 "<method name='RequestDisconnection'><arg type='o' direction='in'/></method></interface></node>";
 int main(int argc,char **argv) {
+    if(argc==3 && !strcmp(argv[1],"--wake-probe"))
+        return wake_probe_run(argv[2]);
+
+    if(argc==3 && !strcmp(argv[1],"--wake-capture"))
+        return wake_capture_run(argv[2]);
+
+    if(argc==5 && !strcmp(argv[1],"--wake-send"))
+        return wake_send_run(argv[2],argv[3],argv[4]);
+
     mock_mode=argc>=2 && !strcmp(argv[1],"--mock");
     if(mock_mode) {
         if(argc>3 || (argc==3 && !select_controller(argv[2]))) {fprintf(stderr,"Usage: %s --mock [pro|joycon-l|joycon-r]\n",argv[0]);return 2;}

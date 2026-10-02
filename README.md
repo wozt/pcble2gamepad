@@ -301,6 +301,8 @@ The earlier Joy-Con 2 BLE work remains available for future research.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+pcble2gamepad is licensed under the **GNU General Public License v3.0**.
 
-Third-party protocol references and imported assets retain their respective attribution and licenses.
+See [LICENSE](LICENSE) for the full license text.
+
+Third-party code, protocol references and assets retain their respective licenses.
