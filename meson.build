@@ -15,6 +15,7 @@ polkit_policy = configure_file(
   output: 'io.github.wozt.pcble2gamepad.policy',
   configuration: configuration)
 executable('pcble2gamepaddiag', 'src/adapter-diag.c', dependencies: [gio, bluetooth], install: true)
+executable('pcble2gamepad-dual-adv-diag', 'src/dual-adv-diag.c', dependencies: bluetooth, install: true)
 inc = include_directories('src')
 protocol = static_library('joycon2-protocol', 'src/protocol.c', dependencies: gio)
 client = static_library('joycon2-client', 'src/client.c', dependencies: [gio, json])

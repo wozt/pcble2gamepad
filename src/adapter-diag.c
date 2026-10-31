@@ -31,6 +31,27 @@ static gboolean read_capabilities(int fd, uint16_t command, uint8_t bytes[8])
     return TRUE;
 }
 
+/* LE Read Number of Supported Advertising Sets (0x2043) */
+static gboolean read_num_adv_sets(int fd, uint8_t *num_sets)
+{
+    uint8_t reply[2] = {0};
+    struct hci_request request = {
+        .ogf = OGF_LE_CTL, .ocf = 0x0043,
+        .rparam = reply, .rlen = sizeof(reply),
+    };
+    if (hci_send_req(fd, &request, 2000) < 0) {
+        fprintf(stderr, "LE Read Number of Supported Advertising Sets failed: %s\n", strerror(errno));
+        return FALSE;
+    }
+    if (request.rlen != sizeof(reply) || reply[0] != 0) {
+        fprintf(stderr, "Invalid response (length %d, status 0x%02x)\n",
+                request.rlen, reply[0]);
+        return FALSE;
+    }
+    *num_sets = reply[1];
+    return TRUE;
+}
+
 static void print_bytes(const uint8_t bytes[8])
 {
     for (unsigned i = 0; i < 8; i++)
@@ -53,9 +74,10 @@ int main(int argc, char **argv)
                 adapter, strerror(errno));
         return 1;
     }
-    uint8_t features[8], states[8];
+    uint8_t features[8], states[8], num_sets = 0;
     gboolean ok = read_capabilities(fd, OCF_LE_READ_LOCAL_SUPPORTED_FEATURES, features) &&
-                  read_capabilities(fd, OCF_LE_READ_SUPPORTED_STATES, states);
+                  read_capabilities(fd, OCF_LE_READ_SUPPORTED_STATES, states) &&
+                  read_num_adv_sets(fd, &num_sets);
     close(fd);
     if (!ok)
         return 1;
@@ -67,10 +89,12 @@ int main(int argc, char **argv)
      * requires state bits 38+21 (peripheral) or 35+19 (central). */
     printf("\",\n  \"le_2m_phy\": %s,\n  \"data_length_extension\": %s,\n"
            "  \"connectable_advertising_with_peripheral_link\": %s,\n"
-           "  \"connectable_advertising_with_central_link\": %s\n}\n",
+           "  \"connectable_advertising_with_central_link\": %s,\n"
+           "  \"max_advertising_sets\": %u\n}\n",
            features[1] & 0x01 ? "true" : "false",
            features[0] & 0x20 ? "true" : "false",
            (states[4] & 0x40) && (states[2] & 0x20) ? "true" : "false",
-           (states[4] & 0x08) && (states[2] & 0x08) ? "true" : "false");
+           (states[4] & 0x08) && (states[2] & 0x08) ? "true" : "false",
+           num_sets);
     return 0;
 }
