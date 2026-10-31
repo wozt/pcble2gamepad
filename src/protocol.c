@@ -53,3 +53,36 @@ char *jc_describe_command(guint16 handle, const guint8 *data, gsize length)
                            h[0], h[1], h[2], h[3], h[5], stage,
                            length - offset - 8 < h[5] ? " (truncated data)" : "");
 }
+
+/* Minimal command response - ACK for common subcommands */
+guint8 *jc_build_command_response(const guint8 *command, gsize cmd_len, gsize *out_len)
+{
+    (void)cmd_len;
+    if (cmd_len < 8) return NULL;
+
+    const guint8 *h = command;
+    gsize offset = 0;
+
+    /* Skip rumble prefix if present (handle 0x16) */
+    if (cmd_len >= 25 && command[0] == 0x10 && command[1] == 0x08 &&
+        command[2] == 0x00 && command[3] == 0x00) {
+        offset = 17;
+        h = command + offset;
+    }
+
+    if (cmd_len < offset + 8) return NULL;
+
+    /* Build minimal ACK response */
+    guint8 *response = g_new0(guint8, 12);
+    response[0] = h[0];  /* Command ID */
+    response[1] = 0x01;  /* Direction: response */
+    response[2] = h[2];  /* Transport */
+    response[3] = h[3];  /* Subcommand */
+    response[4] = 0x00;  /* Unknown */
+    response[5] = 0x00;  /* Data length (ACK) */
+    response[6] = 0x00;  /* Reserved */
+    response[7] = 0x00;  /* Reserved */
+
+    *out_len = 12;
+    return response;
+}

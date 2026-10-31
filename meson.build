@@ -19,8 +19,8 @@ executable('pcble2gamepad-dual-adv-diag', 'src/dual-adv-diag.c', dependencies: b
 inc = include_directories('src')
 protocol = static_library('joycon2-protocol', 'src/protocol.c', dependencies: gio)
 client = static_library('joycon2-client', 'src/client.c', dependencies: [gio, json])
-daemon = executable('pcble2gamepadd', ['src/daemon.c', 'src/core.c', 'src/bluez.c', 'src/ipc.c', 'src/ipc-engine.c'],
-  link_with: [protocol, client], dependencies: [gio, json], install: true)
+daemon = executable('pcble2gamepadd', ['src/daemon.c', 'src/core.c', 'src/bluez.c', 'src/mgmt.c', 'src/ipc.c', 'src/ipc-engine.c'],
+  link_with: [protocol, client], dependencies: [gio, json, bluetooth], install: true)
 ctl = executable('pcble2gamepadctl', 'src/cli.c', link_with: client, dependencies: [gio, json], install: true)
 executable('pcble2gamepad-controller-backend',
   ['poc/pro-controller.c', 'poc/protocol.c', 'poc/control.c', 'src/ipc.c'],
