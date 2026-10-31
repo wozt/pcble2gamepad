@@ -2,6 +2,7 @@ project('pcble2gamepad', 'c', version: '0.1.0', default_options: ['c_std=c11', '
 gio = dependency('gio-unix-2.0', version: '>=2.74')
 json = dependency('json-glib-1.0')
 bluetooth = dependency('bluez')
+openssl = dependency('openssl', version: '>=3.0')
 libexec_dir = get_option('libexecdir') / 'pcble2gamepad'
 runner_path = get_option('prefix') / libexec_dir / 'run-classic.sh'
 configuration = configuration_data()
@@ -17,7 +18,7 @@ polkit_policy = configure_file(
 executable('pcble2gamepaddiag', 'src/adapter-diag.c', dependencies: [gio, bluetooth], install: true)
 executable('pcble2gamepad-dual-adv-diag', 'src/dual-adv-diag.c', dependencies: bluetooth, install: true)
 inc = include_directories('src')
-protocol = static_library('joycon2-protocol', 'src/protocol.c', dependencies: gio)
+protocol = static_library('joycon2-protocol', 'src/protocol.c', 'src/pairing.c', dependencies: [gio, openssl])
 client = static_library('joycon2-client', 'src/client.c', dependencies: [gio, json])
 daemon = executable('pcble2gamepadd', ['src/daemon.c', 'src/core.c', 'src/bluez.c', 'src/mgmt.c', 'src/ipc.c', 'src/ipc-engine.c'],
   link_with: [protocol, client], dependencies: [gio, json, bluetooth], install: true)
