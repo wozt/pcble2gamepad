@@ -185,6 +185,12 @@ static void reports(void)
     jc2_from_pro_frame(JC2_LEFT, buttons, sticks, &out);
     g_assert_cmpuint(out.buttons, ==, JC2_SL | JC2_SR | JC2_L_DOWN);
 
+    Jc2Input upright;
+    jc2_from_pro_frame_vertical(JC2_RIGHT, buttons, sticks, &upright);
+    g_assert_cmpuint(upright.buttons, ==, JC2_R_R | JC2_R_A);
+    jc2_from_pro_frame_vertical(JC2_LEFT, buttons, sticks, &upright);
+    g_assert_cmpuint(upright.buttons, ==, JC2_L_L);
+
     uint8_t adv[31];
     jc2_advertising_data(JC2_LEFT, NULL, adv);
     g_assert_cmpuint(adv[12] | adv[13] << 8, ==, 0x2067);

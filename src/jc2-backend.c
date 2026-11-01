@@ -37,7 +37,7 @@ typedef struct {
     Jc2Side side;
     Jc2Session session;
     uint8_t local[6];              /* least significant octet first */
-    gboolean verbose, reconnect;
+    gboolean verbose, reconnect, vertical;
     /* Link */
     gboolean connected;
     uint16_t handle;
@@ -63,6 +63,7 @@ typedef struct {
     gint64 release_at;
     GMainLoop *loop;
     gboolean mtu_warned;
+    unsigned reports_sent, completed;
 } Backend;
 
 static void logf_event(Backend *b, const char *event, const char *format, ...) G_GNUC_PRINTF(3, 4);
@@ -563,8 +564,10 @@ static void handle_event(Backend *b, const uint8_t *packet, size_t length)
             disconnected(b, get16(p + 1), p[3]);
         break;
     case EVT_NUM_COMP_PKTS:
-        for (size_t i = 0; n >= 1 && i < p[0] && 1 + 4 * i + 4 <= n; i++)
+        for (size_t i = 0; n >= 1 && i < p[0] && 1 + 4 * i + 4 <= n; i++) {
+            b->completed += get16(p + 1 + 4 * i + 2);
             b->acl_credits += get16(p + 1 + 4 * i + 2);
+        }
         flush_acl(b);
         break;
     case EVT_ENCRYPT_CHANGE:
@@ -631,12 +634,26 @@ static gboolean report_tick(gpointer data)
         return G_SOURCE_CONTINUE;
     }
     Jc2Input input;
-    jc2_from_pro_frame(b->side, b->state.buttons, b->state.sticks, &input);
+    if (b->vertical)
+        jc2_from_pro_frame_vertical(b->side, b->state.buttons, b->state.sticks, &input);
+    else
+        jc2_from_pro_frame(b->side, b->state.buttons, b->state.sticks, &input);
     uint8_t pdu[3 + JC2_REPORT_SIZE];
     pdu[0] = 0x1b;
     put16(pdu + 1, JC2_HANDLE_INPUT);
     jc2_build_report(&b->session, &input, pdu + 3);
     l2cap_send(b, 0x0004, pdu, sizeof(pdu));
+    b->reports_sent++;
+    return G_SOURCE_CONTINUE;
+}
+
+static gboolean status_tick(gpointer data)
+{
+    Backend *b = data;
+    if (b->connected)
+        logf_event(b, "link_status", "reports=%u acl_tx=%u acl_rx=%u completed=%u credits=%d queued=%u encrypted=%d",
+                   b->reports_sent, b->tx_packets, b->rx_packets, b->completed, b->acl_credits,
+                   g_queue_get_length(&b->tx), b->encrypted);
     return G_SOURCE_CONTINUE;
 }
 
@@ -735,7 +752,7 @@ static gboolean quit(gpointer data)
 static void usage(void)
 {
     g_printerr("Usage: pcble2gamepad-joycon2-backend <hciN|address> --side left|right "
-               "[--desktop UID] [--reconnect] [--verbose]\n");
+               "[--desktop UID] [--reconnect] [--vertical] [--verbose]\n");
 }
 
 int main(int argc, char **argv)
@@ -743,11 +760,13 @@ int main(int argc, char **argv)
     const char *adapter = NULL, *side = NULL;
     long owner = -1;
     Backend b = {.fd = -1};
+    setvbuf(stdout, NULL, _IOLBF, 0);
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--side") && i + 1 < argc) side = argv[++i];
         else if (!strcmp(argv[i], "--desktop") && i + 1 < argc) owner = strtol(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--reconnect")) b.reconnect = TRUE;
         else if (!strcmp(argv[i], "--verbose")) b.verbose = TRUE;
+        else if (!strcmp(argv[i], "--vertical")) b.vertical = TRUE;
         else if (argv[i][0] != '-' && !adapter) adapter = argv[i];
         else { usage(); return 2; }
     }
@@ -808,6 +827,7 @@ int main(int argc, char **argv)
     update_control(&b);
     g_unix_fd_add(b.fd, G_IO_IN | G_IO_ERR | G_IO_HUP, on_hci, &b);
     g_timeout_add(REPORT_INTERVAL_MS, report_tick, &b);
+    g_timeout_add_seconds(3, status_tick, &b);
     g_unix_signal_add(SIGINT, quit, &b);
     g_unix_signal_add(SIGTERM, quit, &b);
     g_main_loop_run(b.loop);

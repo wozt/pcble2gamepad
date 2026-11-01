@@ -11,8 +11,13 @@ unchanged.
 |---|---|
 | Compiled | yes, `-Werror` |
 | Automated tests | `tests/test-jc2.c`: GATT discovery, pairing flow with capture vectors, SPI read, report layout; also passes under ASan/UBSan |
-| Local adapter | not run yet |
-| Switch 2 | not validated by this project |
+| Local adapter | TP-Link RTL8761BUV: LE 2M, data length 251, ACL buffer 27 bytes x 8 |
+| Switch 2, 2026-11-01 | Joy-Con 2 (R) alone: connected, Nintendo pairing, encryption with the derived LTK, input reports requested; shown in Change Grip/Order. Mixed pair Joy-Con 1 (L) Classic on a second adapter + Joy-Con 2 (R) BLE `--vertical`: accepted as a pair after L+R |
+
+The console kept the 15 ms interval and never requested 5 ms during these
+sessions. Reports reach about 20 per second: each 66-byte notification is
+split into three 27-byte ACL packets, and the controller returns roughly one
+packet per connection event.
 
 ## Sources
 

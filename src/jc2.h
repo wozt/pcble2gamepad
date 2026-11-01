@@ -102,3 +102,6 @@ void jc2_advertising_data(Jc2Side side, const uint8_t *host, uint8_t out[31]);
  * See docs/joycon2-ble.md for the mapping. */
 void jc2_from_pro_frame(Jc2Side side, const uint8_t buttons[3],
                         const uint16_t sticks[4], Jc2Input *out);
+/* Upright mapping for a Joy-Con used as half of a pair. */
+void jc2_from_pro_frame_vertical(Jc2Side side, const uint8_t buttons[3],
+                                 const uint16_t sticks[4], Jc2Input *out);

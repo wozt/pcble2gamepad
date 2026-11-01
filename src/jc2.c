@@ -732,3 +732,41 @@ void jc2_from_pro_frame(Jc2Side side, const uint8_t b[3], const uint16_t sticks[
     out->stick_x = (uint16_t)(c->center_x + (int)(px * c->throw_x));
     out->stick_y = (uint16_t)(c->center_y + (int)(py * c->throw_y));
 }
+
+void jc2_from_pro_frame_vertical(Jc2Side side, const uint8_t b[3], const uint16_t sticks[4],
+                                 Jc2Input *out)
+{
+    /* Joy-Con held upright as half of a pair: every button keeps its name. */
+    int first = side == JC2_LEFT ? 0 : 2;
+    double x = pro_axis(sticks, first), y = pro_axis(sticks, first + 1);
+    if (x * x + y * y < 0.01) {
+        x = pro_axis(sticks, 2 - first);
+        y = pro_axis(sticks, 3 - first);
+    }
+    uint16_t v = 0;
+    if (side == JC2_LEFT) {
+        if (b[2] & PRO2_DOWN) v |= JC2_L_DOWN;
+        if (b[2] & PRO2_LEFT) v |= JC2_L_LEFT;
+        if (b[2] & PRO2_RIGHT) v |= JC2_L_RIGHT;
+        if (b[2] & PRO2_UP) v |= JC2_L_UP;
+        if (b[2] & PRO2_L) v |= JC2_L_L;
+        if (b[2] & PRO2_ZL) v |= JC2_L_ZL;
+        if (b[1] & PRO1_MINUS) v |= JC2_L_MINUS;
+        if (b[1] & PRO1_CAPTURE) v |= JC2_L_CAPTURE;
+        if (b[1] & PRO1_LSTICK) v |= JC2_L_STICK;
+    } else {
+        if (b[0] & PRO0_A) v |= JC2_R_A;
+        if (b[0] & PRO0_B) v |= JC2_R_B;
+        if (b[0] & PRO0_X) v |= JC2_R_X;
+        if (b[0] & PRO0_Y) v |= JC2_R_Y;
+        if (b[0] & PRO0_R) v |= JC2_R_R;
+        if (b[0] & PRO0_ZR) v |= JC2_R_ZR;
+        if (b[1] & PRO1_PLUS) v |= JC2_R_PLUS;
+        if (b[1] & PRO1_HOME) v |= JC2_R_HOME;
+        if (b[1] & PRO1_RSTICK) v |= JC2_R_STICK;
+    }
+    const StickCal *c = &stick_cal[side];
+    out->buttons = v;
+    out->stick_x = (uint16_t)(c->center_x + (int)(x * c->throw_x));
+    out->stick_y = (uint16_t)(c->center_y + (int)(y * c->throw_y));
+}
