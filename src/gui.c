@@ -34,6 +34,8 @@ typedef struct {
     char *paired_switch_address,*paired_adapter_address;
     guint timer,ticks,saved_source;
     gboolean saved_arm,saved_auto_select,saved_traffic;
+    /* Automatic L+R in Change Grip/Order after Pair / Sync (Joy-Con profiles). */
+    gboolean auto_validate,remote_initialized;int player_lights,validate_attempts;gint64 validate_at;
     GSubprocess *launcher;
     RsvgHandle *pro_svg,*joycon_left_svg,*joycon_right_svg;
     GtkWidget *mouse_panel,*mouse_area;GtkScale *mouse_gain;
@@ -75,7 +77,7 @@ static void update_paired_console(Ui *u) {
 }
 static void update_controls(Ui *u) {
     gboolean adapters_ok=u->adapter_ids->len>0 && (!pair_mode(u) || u->secondary_ids->len>1);
-    gboolean can_reconnect=pro_mode(u) &&
+    gboolean can_reconnect=(pro_mode(u) || mixed_mode(u)) &&
         u->paired_switch_address && *u->paired_switch_address &&
         paired_adapter_selected(u);
     gboolean reconnect_existing=
@@ -1895,6 +1897,9 @@ static void complete(GObject *source,
                     session_state,
                     "connected");
 
+            u->remote_initialized=json_object_get_boolean_member_with_default(state,"initialized",FALSE);
+            u->player_lights=(int)json_object_get_int_member_with_default(state,"player_lights",0);
+
             gboolean simulated=
                 json_object_get_boolean_member_with_default(
                     state,
@@ -1920,7 +1925,7 @@ static void complete(GObject *source,
                 peer_address);
 
             if(!simulated &&
-               pro_mode(u) &&
+               (pro_mode(u) || mixed_mode(u)) &&
                !strcmp(session_state,"connected") &&
                g_regex_match_simple(
                     "^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$",
@@ -2126,7 +2131,24 @@ static gboolean tick(gpointer data) {
     }
     input_compose(&u->profile,pressed,axes,&u->frame);gtk_widget_queue_draw(u->drawing);
     gboolean allowed=gtk_window_is_active(u->window) || (u->profile.background && gtk_drop_down_get_selected(u->source)==1);
-    if(u->online && gtk_switch_get_active(GTK_SWITCH(u->arm)) && allowed)request(u,"input");
+    gboolean force=FALSE;
+    if(u->auto_validate) {
+        if(!u->launcher && !u->online) {
+            u->auto_validate=FALSE;
+        } else if(u->validate_attempts>=2) {
+            /* Player lights are already set during Change Grip/Order, so they do
+             * not signal validation; stop after two presses instead. */
+            u->auto_validate=FALSE;
+            toast(u,"L+R sent. Press A to finish Change Grip/Order.");
+        } else if(u->online && u->connected && u->remote_initialized) {
+            /* Hold L+R (SL+SR on a sideways Joy-Con 2) for 1.5 s, twice, 6 s apart. */
+            gint64 now=g_get_monotonic_time();
+            if(!u->validate_at)u->validate_at=now+1500000;
+            if(now>=u->validate_at+1500000){u->validate_attempts++;u->validate_at=now+4500000;}
+            else if(now>=u->validate_at){u->frame.buttons[0]|=0x40;u->frame.buttons[2]|=0x40;force=TRUE;}
+        }
+    }
+    if(u->online && ((gtk_switch_get_active(GTK_SWITCH(u->arm)) && allowed) || force))request(u,"input");
     else if(++u->ticks%20==0)request(u,"status");
     return G_SOURCE_CONTINUE;
 }
@@ -2351,7 +2373,7 @@ static void launch_switch_session(Ui *u,gboolean reconnect) {
     if(i>=u->adapter_ids->len){toast(u,"Select a Bluetooth adapter first");return;}
 
     if(reconnect) {
-        if(!pro_mode(u)) {
+        if(!pro_mode(u) && !mixed_mode(u)) {
             toast(u,"Automatic reconnect is currently implemented for Pro Controller first");
             return;
         }
@@ -2496,7 +2518,7 @@ static void start(GtkButton *b,Ui *u) {
      * Prefer reconnecting inside the existing privileged backend. This keeps
      * the Bluetooth identity and BlueZ state established during pairing.
      */
-    if(u->online && !u->connected) {
+    if(u->online && !u->connected && pro_mode(u)) {
         gtk_label_set_text(u->status,"RECONNECTING");
         gtk_label_set_text(u->error,"");
         request(u,"reconnect");
@@ -2508,6 +2530,10 @@ static void start(GtkButton *b,Ui *u) {
 static void sync_clicked(GtkButton *b,Ui *u) {
     (void)b;
     launch_switch_session(u,FALSE);
+    if(u->launcher && !pro_mode(u)) {
+        u->auto_validate=TRUE;u->validate_at=0;u->validate_attempts=0;
+        u->player_lights=0;u->remote_initialized=FALSE;
+    }
 }
 static void stop_clicked(GtkButton *b,Ui *u) {
     (void)b;

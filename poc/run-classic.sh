@@ -127,7 +127,7 @@ if [[ $profile == joycon-pair || $profile == joycon-mixed ]]; then
     $desktop || { echo 'Joy-Con pair currently requires desktop mode' >&2; exit 2; }
     [[ -n $secondary && $secondary != "$adapter" ]] || { echo 'Joy-Con pair requires two distinct adapters' >&2; exit 2; }
 fi
-[[ -z $reconnect || $profile == pro ]] || { echo 'Reconnect is currently implemented for the Pro Controller profile only.' >&2; exit 2; }
+[[ -z $reconnect || $profile == pro || $profile == joycon-mixed ]] || { echo 'Reconnect is implemented for the Pro Controller and the Joy-Con 1 (L) + Joy-Con 2 (R) profiles.' >&2; exit 2; }
 backend_options=()
 $verbose && backend_options+=(--verbose)
 [[ -n $reconnect ]] && backend_options+=(--reconnect "$reconnect")
@@ -294,6 +294,7 @@ if $desktop; then
         "$app" "$adapter" "$sdp" --desktop "$PKEXEC_UID" --type pro "${backend_options[@]}" | tee "$capture/daemon.log"
     elif [[ $profile == joycon-mixed ]]; then
         jc2_options=(--side right --vertical --socket joycon-right.sock --desktop "$PKEXEC_UID")
+        [[ -n $reconnect ]] && jc2_options+=(--reconnect)
         $verbose && jc2_options+=(--verbose)
         "$jc2" "$secondary" "${jc2_options[@]}" > "$capture/joycon2-right.log" 2>&1 &
         right_pid=$!;backend_pids+=("$right_pid")

@@ -3296,8 +3296,7 @@ int main(int argc,char **argv) {
     }
     have_class=TRUE;
 
-    if(!reconnect_mode && controller_type==CONTROLLER_PRO &&
-       !pairing_capture_start())
+    if(!reconnect_mode && !pairing_capture_start())
         goto cleanup;
 
     static const GDBusInterfaceVTable av={.method_call=agent},pv={.method_call=profile};
