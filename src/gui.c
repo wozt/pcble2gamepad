@@ -42,7 +42,9 @@ static void adapters_scan(GtkButton *b,Ui *u);
 static void controller_selected(GObject *o,GParamSpec *p,Ui *u);
 static void update_pro_svg_colors(Ui *u);
 static void apply_profile_state(Ui *u);
-static gboolean pair_mode(Ui *u){return u->controllers && gtk_drop_down_get_selected(u->controllers)==1;}
+/* Index 1: Joy-Con 1 pair (Classic). Index 4: Joy-Con 1 (L) Classic + Joy-Con 2 (R) BLE. */
+static gboolean mixed_mode(Ui *u){return u->controllers && gtk_drop_down_get_selected(u->controllers)==4;}
+static gboolean pair_mode(Ui *u){return u->controllers && (gtk_drop_down_get_selected(u->controllers)==1 || mixed_mode(u));}
 /* Joy-Con 2 (BLE) profiles: 0 when not selected, 1 for left, 2 for right. */
 static int joycon2_side(Ui *u) {
     guint i=u->controllers?gtk_drop_down_get_selected(u->controllers):0;
@@ -2045,8 +2047,8 @@ static void controller_selected(GObject *o,GParamSpec *p,Ui *u) {
     if(pair_mode(u)) {
         const char *mock_dir=g_getenv("PCBLE2GAMEPAD_JOYCON_SOCKET_DIR");g_autofree char *runtime=mock_dir?g_strdup(mock_dir):g_strdup_printf("/run/pcble2gamepad/%u",(unsigned)getuid());
         u->socket=g_build_filename(runtime,"joycon-left.sock",NULL);u->socket2=g_build_filename(runtime,"joycon-right.sock",NULL);
-        gtk_widget_set_visible(u->secondary_row,TRUE);gtk_label_set_text(u->hero_title,"Nintendo Joy-Con Pair");
-        gtk_label_set_text(u->controller_hint,u->adapter_ids->len<2?"A Joy-Con pair needs two Bluetooth identities. Connect a second adapter to enable this profile.":"Left and right Joy-Con use separate Bluetooth adapters and one combined input profile.");
+        gtk_widget_set_visible(u->secondary_row,TRUE);gtk_label_set_text(u->hero_title,mixed_mode(u)?"Joy-Con 1 (L) + Joy-Con 2 (R)":"Nintendo Joy-Con Pair");
+        gtk_label_set_text(u->controller_hint,u->adapter_ids->len<2?"A Joy-Con pair needs two Bluetooth identities. Connect a second adapter to enable this profile.":mixed_mode(u)?"Primary adapter: Joy-Con 1 (L) over Classic Bluetooth. Right adapter: Joy-Con 2 (R) over Bluetooth LE, taken over exclusively (use the Bluetooth 6.0 dongle). In Change Grip/Order press L+R.":"Left and right Joy-Con use separate Bluetooth adapters and one combined input profile.");
     } else {
         const char *override=g_getenv("PCBLE2GAMEPAD_PRO_SOCKET");u->socket=override?g_strdup(override):g_strdup_printf("/run/pcble2gamepad/%u/pro.sock",(unsigned)getuid());
         gtk_widget_set_visible(u->secondary_row,FALSE);
@@ -2253,7 +2255,7 @@ static void launch_switch_session(Ui *u,gboolean reconnect) {
     args[n++]="--profile";
 
     if(pair_mode(u)) {
-        args[n++]="joycon-pair";
+        args[n++]=mixed_mode(u)?"joycon-mixed":"joycon-pair";
         args[n++]="--secondary";
         args[n++]=g_ptr_array_index(u->secondary_ids,j);
     } else if(joycon2_side(u)) {
@@ -2617,7 +2619,7 @@ static void activate(GtkApplication *app,gpointer unused) {
 
     gtk_box_append(GTK_BOX(box),hero);
     AdwPreferencesGroup *g=group(box,"Bluetooth session","Starting a session requests administrator authentication and temporarily pauses other Bluetooth services.");
-    const char *controllers[]={"Nintendo Switch Pro Controller","Nintendo Joy-Con Pair","Nintendo Switch 2 Joy-Con 2 (L) · BLE","Nintendo Switch 2 Joy-Con 2 (R) · BLE",NULL};u->controllers=GTK_DROP_DOWN(gtk_drop_down_new_from_strings(controllers));row(g,"Emulated controller","Sony and Microsoft profiles can be added to the same controller catalog later.",GTK_WIDGET(u->controllers));
+    const char *controllers[]={"Nintendo Switch Pro Controller","Nintendo Joy-Con Pair","Nintendo Switch 2 Joy-Con 2 (L) · BLE","Nintendo Switch 2 Joy-Con 2 (R) · BLE","Joy-Con 1 (L) Classic + Joy-Con 2 (R) BLE",NULL};u->controllers=GTK_DROP_DOWN(gtk_drop_down_new_from_strings(controllers));row(g,"Emulated controller","Sony and Microsoft profiles can be added to the same controller catalog later.",GTK_WIDGET(u->controllers));
     u->adapter_names=gtk_string_list_new(NULL);u->adapters=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->adapter_names),NULL));gtk_widget_set_size_request(GTK_WIDGET(u->adapters),280,-1);
     row(g,"Primary adapter","Pro Controller, or left Joy-Con. Choose by address; hci numbers can change after reboot.",GTK_WIDGET(u->adapters));
     u->secondary_names=gtk_string_list_new(NULL);u->secondary=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->secondary_names),NULL));gtk_widget_set_size_request(GTK_WIDGET(u->secondary),280,-1);

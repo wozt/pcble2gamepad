@@ -111,8 +111,19 @@ if [[ $profile == joycon2-left || $profile == joycon2-right ]]; then
     echo "Adapter returned to BlueZ. Private log: $capture"
     exit $status
 fi
-[[ $profile == pro || $profile == joycon-pair ]] || { echo 'Profile must be pro, joycon-pair, joycon2-left or joycon2-right' >&2; exit 2; }
-if [[ $profile == joycon-pair ]]; then
+[[ $profile == pro || $profile == joycon-pair || $profile == joycon-mixed ]] || { echo 'Profile must be pro, joycon-pair, joycon-mixed, joycon2-left or joycon2-right' >&2; exit 2; }
+jc2=
+if [[ $profile == joycon-mixed ]]; then
+    # Joy-Con 1 (L) Classic on the primary adapter, Joy-Con 2 (R) BLE on the
+    # secondary adapter through its own HCI user-channel backend.
+    for candidate in \
+        "$script_dir/pcble2gamepad-joycon2-backend" \
+        "$script_dir/../build/pcble2gamepad-joycon2-backend"; do
+        if [[ -x "$candidate" ]]; then jc2=$candidate; break; fi
+    done
+    [[ -n "$jc2" ]] || { echo 'Build the Joy-Con 2 backend first.' >&2; exit 1; }
+fi
+if [[ $profile == joycon-pair || $profile == joycon-mixed ]]; then
     $desktop || { echo 'Joy-Con pair currently requires desktop mode' >&2; exit 2; }
     [[ -n $secondary && $secondary != "$adapter" ]] || { echo 'Joy-Con pair requires two distinct adapters' >&2; exit 2; }
 fi
@@ -219,8 +230,11 @@ backend_pids=()
 cleanup() {
     trap - EXIT INT TERM
     app_target=$(readlink -f "$app")
+    jc2_target=
+    [[ -n $jc2 ]] && jc2_target=$(readlink -f "$jc2")
     for pid in "${backend_pids[@]}"; do
-        [[ -e /proc/$pid/exe && $(readlink -f "/proc/$pid/exe") == "$app_target" ]] && kill -TERM "$pid" 2>/dev/null || true
+        exe=$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)
+        [[ -n $exe && ( $exe == "$app_target" || $exe == "$jc2_target" ) ]] && kill -TERM "$pid" 2>/dev/null || true
     done
     for pid in "${backend_pids[@]}"; do wait "$pid" 2>/dev/null || true; done
     for pid in "${monitor_pids[@]}"; do kill -INT "$pid" 2>/dev/null || true; wait "$pid" || true; done
@@ -274,6 +288,22 @@ if $desktop; then
     chmod 700 "/run/pcble2gamepad/$PKEXEC_UID"
     if [[ $profile == pro ]]; then
         "$app" "$adapter" "$sdp" --desktop "$PKEXEC_UID" --type pro "${backend_options[@]}" | tee "$capture/daemon.log"
+    elif [[ $profile == joycon-mixed ]]; then
+        jc2_options=(--side right --vertical --socket joycon-right.sock --desktop "$PKEXEC_UID")
+        $verbose && jc2_options+=(--verbose)
+        "$jc2" "$secondary" "${jc2_options[@]}" > "$capture/joycon2-right.log" 2>&1 &
+        right_pid=$!;backend_pids+=("$right_pid")
+        right_socket="/run/pcble2gamepad/$PKEXEC_UID/joycon-right.sock"
+        for _ in {1..100}; do [[ -S $right_socket ]] && break; kill -0 "$right_pid" 2>/dev/null || break; sleep .05; done
+        [[ -S $right_socket ]] || { echo 'Joy-Con 2 (R) backend failed to start' >&2; wait "$right_pid" || true; exit 1; }
+        "$app" "$adapter" "$sdp" --desktop "$PKEXEC_UID" --type joycon-l "${backend_options[@]}" > "$capture/joycon-left.log" 2>&1 &
+        left_pid=$!;backend_pids+=("$left_pid")
+        set +e
+        wait "$left_pid"; left_status=$?
+        wait "$right_pid"; right_status=$?
+        backend_pids=()
+        set -e
+        [[ $left_status == 0 && $right_status == 0 ]]
     else
         "$app" "$adapter" "$sdp" --desktop "$PKEXEC_UID" --type joycon-l --allow-adapter "$secondary" "${backend_options[@]}" > "$capture/joycon-left.log" 2>&1 &
         left_pid=$!;backend_pids+=("$left_pid")

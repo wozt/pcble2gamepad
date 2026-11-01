@@ -659,6 +659,29 @@ static gboolean status_tick(gpointer data)
 
 /* ---------- Setup ---------- */
 
+/* hci_devid() only finds adapters that are up; resolve powered-down ones too. */
+static int resolve_adapter(const char *name)
+{
+    int index;
+    char tail;
+    if (sscanf(name, "hci%d%c", &index, &tail) == 1)
+        return index >= 0 ? index : -1;
+    bdaddr_t wanted;
+    if (str2ba(name, &wanted) < 0)
+        return -1;
+    int ctl = socket(AF_BLUETOOTH, SOCK_RAW | SOCK_CLOEXEC, BTPROTO_HCI);
+    if (ctl < 0)
+        return -1;
+    int found = -1;
+    for (int id = 0; id < HCI_MAX_DEV && found < 0; id++) {
+        struct hci_dev_info info = {.dev_id = (uint16_t)id};
+        if (ioctl(ctl, HCIGETDEVINFO, &info) == 0 && !bacmp(&info.bdaddr, &wanted))
+            found = id;
+    }
+    close(ctl);
+    return found;
+}
+
 static int open_user_channel(int device_id)
 {
     int fd = socket(AF_BLUETOOTH, SOCK_RAW | SOCK_CLOEXEC, BTPROTO_HCI);
@@ -752,12 +775,13 @@ static gboolean quit(gpointer data)
 static void usage(void)
 {
     g_printerr("Usage: pcble2gamepad-joycon2-backend <hciN|address> --side left|right "
-               "[--desktop UID] [--reconnect] [--vertical] [--verbose]\n");
+               "[--desktop UID] [--reconnect] [--vertical] [--socket NAME] [--verbose]\n");
 }
 
 int main(int argc, char **argv)
 {
     const char *adapter = NULL, *side = NULL;
+    const char *socket_name = "pro.sock";
     long owner = -1;
     Backend b = {.fd = -1};
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -767,6 +791,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--reconnect")) b.reconnect = TRUE;
         else if (!strcmp(argv[i], "--verbose")) b.verbose = TRUE;
         else if (!strcmp(argv[i], "--vertical")) b.vertical = TRUE;
+        else if (!strcmp(argv[i], "--socket") && i + 1 < argc) socket_name = argv[++i];
         else if (argv[i][0] != '-' && !adapter) adapter = argv[i];
         else { usage(); return 2; }
     }
@@ -775,7 +800,7 @@ int main(int argc, char **argv)
         return 2;
     }
     b.side = !strcmp(side, "left") ? JC2_LEFT : JC2_RIGHT;
-    b.device_id = hci_devid(adapter);
+    b.device_id = resolve_adapter(adapter);
     if (b.device_id < 0) {
         g_printerr("Cannot resolve Bluetooth adapter %s\n", adapter);
         return 1;
@@ -803,7 +828,7 @@ int main(int argc, char **argv)
     if (owner >= 0) {
         g_autoptr(GError) error = NULL;
         b.control = pro_control_new(&b.state, &b.release_at, &b.verbose, (uid_t)owner, FALSE,
-                                    "pro.sock", b.loop, &error);
+                                    socket_name, b.loop, &error);
         if (!b.control) {
             g_printerr("Control socket failed: %s\n", error->message);
             controller_release(&b);
