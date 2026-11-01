@@ -2,6 +2,9 @@
 #include "input-model.h"
 #include "config.h"
 #include <adwaita.h>
+#ifdef GDK_WINDOWING_X11
+#include <gdk/x11/gdkx.h>
+#endif
 #include <librsvg/rsvg.h>
 #include <math.h>
 #include <signal.h>
@@ -33,6 +36,10 @@ typedef struct {
     gboolean saved_arm,saved_auto_select,saved_traffic;
     GSubprocess *launcher;
     RsvgHandle *pro_svg,*joycon_left_svg,*joycon_right_svg;
+    GtkWidget *mouse_panel,*mouse_area;GtkScale *mouse_gain;
+    gboolean mouse_captured,mouse_grabbed,mouse_have_last;
+    double mouse_acc_x,mouse_acc_y,mouse_last_x,mouse_last_y,mouse_scroll;
+    int mouse_wheel;guint mouse_buttons;
 } Ui;
 typedef struct {char *path,*path2;JsonObject *request;} Request;
 static void refresh_bindings(Ui *u);
@@ -961,8 +968,121 @@ static void bind_pad(GtkButton *b,Ui *u) {
     u->learn_key=-1;u->learn_pad=GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b),"index"));refresh_bindings(u);gtk_button_set_label(b,"Press a button…");
     toast(u,"Press a controller button or trigger. Escape cancels.");
 }
+
+/*
+ * Mouse capture for the Joy-Con 2 optical sensor. While captured, a
+ * capture-phase controller on the window consumes motion, buttons and
+ * scrolling so nothing underneath is activated. On X11 the pointer is
+ * grabbed, hidden and re-centred after every movement so it never leaves
+ * the window; elsewhere movement is measured between events.
+ */
+#ifdef GDK_WINDOWING_X11
+/* GTK 4.18 deprecates its X11 accessors without a replacement for pointer
+ * grabs; keep their use in these helpers. */
+G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+static gboolean x11_surface(GdkSurface *s){return s && GDK_IS_X11_SURFACE(s);}
+static Display *x11_display(GdkSurface *s){return gdk_x11_display_get_xdisplay(gdk_surface_get_display(s));}
+static Window x11_window(GdkSurface *s){return gdk_x11_surface_get_xid(s);}
+G_GNUC_END_IGNORE_DEPRECATIONS
+#endif
+static gboolean mouse_enabled(Ui *u){return joycon2_side(u) || mixed_mode(u);}
+static void mouse_area_update(Ui *u) {
+    if(u->mouse_area)
+        gtk_label_set_text(GTK_LABEL(u->mouse_area),u->mouse_captured?
+            "Mouse captured: movement drives the Joy-Con 2 mouse sensor. Left click = R, right click = ZR, wheel = stick. Press Right Ctrl to release.":
+            "Click here to capture the PC mouse for the Joy-Con 2 mouse mode. Right Ctrl releases it.");
+}
+static void mouse_center(Ui *u,double *x,double *y) {
+    GdkSurface *s=gtk_native_get_surface(GTK_NATIVE(u->window));
+    *x=s?gdk_surface_get_width(s)/2.0:0;*y=s?gdk_surface_get_height(s)/2.0:0;
+}
+static void mouse_warp(Ui *u) {
+#ifdef GDK_WINDOWING_X11
+    GdkSurface *s=gtk_native_get_surface(GTK_NATIVE(u->window));
+    if(!u->mouse_grabbed || !x11_surface(s))return;
+    double x,y;mouse_center(u,&x,&y);
+    int scale=gdk_surface_get_scale_factor(s);
+    Display *d=x11_display(s);
+    XWarpPointer(d,None,x11_window(s),0,0,0,0,(int)(x*scale),(int)(y*scale));
+    XFlush(d);
+#else
+    (void)u;
+#endif
+}
+static void mouse_capture_stop(Ui *u) {
+    if(!u->mouse_captured)return;
+#ifdef GDK_WINDOWING_X11
+    GdkSurface *s=gtk_native_get_surface(GTK_NATIVE(u->window));
+    if(u->mouse_grabbed && x11_surface(s)) {
+        Display *d=x11_display(s);
+        XUngrabPointer(d,CurrentTime);XFlush(d);
+    }
+#endif
+    u->mouse_captured=u->mouse_grabbed=u->mouse_have_last=FALSE;
+    u->mouse_buttons=0;u->mouse_acc_x=u->mouse_acc_y=0;u->mouse_wheel=0;
+    gtk_widget_set_cursor(GTK_WIDGET(u->window),NULL);
+    mouse_area_update(u);
+}
+static void mouse_capture_start(Ui *u) {
+    if(u->mouse_captured || !mouse_enabled(u))return;
+    if(!gtk_switch_get_active(GTK_SWITCH(u->arm)))gtk_switch_set_active(GTK_SWITCH(u->arm),TRUE);
+    u->mouse_captured=TRUE;u->mouse_have_last=FALSE;u->mouse_buttons=0;
+#ifdef GDK_WINDOWING_X11
+    GdkSurface *s=gtk_native_get_surface(GTK_NATIVE(u->window));
+    if(x11_surface(s)) {
+        Display *d=x11_display(s);
+        Window w=x11_window(s);
+        u->mouse_grabbed=XGrabPointer(d,w,True,ButtonPressMask|ButtonReleaseMask|PointerMotionMask,
+            GrabModeAsync,GrabModeAsync,w,None,CurrentTime)==GrabSuccess;
+    }
+#endif
+    gtk_widget_set_cursor_from_name(GTK_WIDGET(u->window),"none");
+    mouse_warp(u);
+    mouse_area_update(u);
+}
+static gboolean mouse_event(GtkEventControllerLegacy *c,GdkEvent *e,Ui *u) {
+    (void)c;if(!u->mouse_captured)return FALSE;
+    GdkEventType type=gdk_event_get_event_type(e);
+    if(type==GDK_MOTION_NOTIFY) {
+        double x,y;if(!gdk_event_get_position(e,&x,&y))return TRUE;
+        if(u->mouse_grabbed) {
+            double cx,cy;mouse_center(u,&cx,&cy);
+            if(fabs(x-cx)<0.5 && fabs(y-cy)<0.5)return TRUE;
+            u->mouse_acc_x+=x-cx;u->mouse_acc_y+=y-cy;mouse_warp(u);
+        } else {
+            if(u->mouse_have_last){u->mouse_acc_x+=x-u->mouse_last_x;u->mouse_acc_y+=y-u->mouse_last_y;}
+            u->mouse_last_x=x;u->mouse_last_y=y;u->mouse_have_last=TRUE;
+        }
+        return TRUE;
+    }
+    if(type==GDK_BUTTON_PRESS || type==GDK_BUTTON_RELEASE) {
+        guint b=gdk_button_event_get_button(e),bit=b==1?1:b==3?2:b==2?4:0;
+        if(type==GDK_BUTTON_PRESS)u->mouse_buttons|=bit;else u->mouse_buttons&=~bit;
+        return TRUE;
+    }
+    if(type==GDK_SCROLL) {
+        GdkScrollDirection d=gdk_scroll_event_get_direction(e);
+        if(d==GDK_SCROLL_UP)u->mouse_wheel++;
+        else if(d==GDK_SCROLL_DOWN)u->mouse_wheel--;
+        else if(d==GDK_SCROLL_SMOOTH) {
+            double sx,sy;gdk_scroll_event_get_deltas(e,&sx,&sy);u->mouse_scroll-=sy;
+            while(u->mouse_scroll>=1){u->mouse_wheel++;u->mouse_scroll-=1;}
+            while(u->mouse_scroll<=-1){u->mouse_wheel--;u->mouse_scroll+=1;}
+        }
+        return TRUE;
+    }
+    return type==GDK_TOUCHPAD_SWIPE || type==GDK_TOUCHPAD_PINCH;
+}
+static void mouse_area_clicked(GtkGestureClick *g,int n,double x,double y,Ui *u) {
+    (void)g;(void)n;(void)x;(void)y;mouse_capture_start(u);
+}
+
 static gboolean key_pressed(GtkEventControllerKey *c,guint key,guint code,GdkModifierType modifiers,Ui *u) {
     (void)c;(void)code;(void)modifiers;key=gdk_keyval_to_lower(key);
+    if(u->mouse_captured && (key==GDK_KEY_Control_R || key==GDK_KEY_Escape)) {
+        mouse_capture_stop(u);
+        return TRUE;
+    }
     if(u->learn_key>=0) {
         if(key!=GDK_KEY_Escape){guint value=key==GDK_KEY_BackSpace?0:key;for(int i=0;i<INPUT_ACTIONS;i++)if(value && u->profile.keys[i]==value)u->profile.keys[i]=0;u->profile.keys[u->learn_key]=value;}
         u->learn_key=-1;refresh_bindings(u);gtk_label_set_text(GTK_LABEL(u->capture_hint),"Click a binding to change it. Save your profile when finished.");return TRUE;
@@ -984,7 +1104,7 @@ static gboolean key_pressed(GtkEventControllerKey *c,guint key,guint code,GdkMod
     return FALSE;
 }
 static void key_released(GtkEventControllerKey *c,guint key,guint code,GdkModifierType mod,Ui *u){(void)c;(void)code;(void)mod;g_hash_table_remove(u->keys,GUINT_TO_POINTER(gdk_keyval_to_lower(key)));}
-static void focus_changed(GObject *o,GParamSpec *p,Ui *u){(void)o;(void)p;if(!gtk_window_is_active(u->window))release_input(u);}
+static void focus_changed(GObject *o,GParamSpec *p,Ui *u){(void)o;(void)p;if(!gtk_window_is_active(u->window)){mouse_capture_stop(u);release_input(u);}}
 static void armed_changed(GObject *o,GParamSpec *p,Ui *u){
     (void)o;(void)p;if(u->loading)return;
     release_input(u);
@@ -1946,6 +2066,15 @@ static void request(Ui *u,const char *method) {
     if(!strcmp(method,"input")){
         JsonArray *a=json_array_new();for(int i=0;i<3;i++)json_array_add_int_element(a,u->frame.buttons[i]);json_object_set_array_member(r->request,"buttons",a);
         a=json_array_new();for(int i=0;i<4;i++)json_array_add_int_element(a,u->frame.sticks[i]);json_object_set_array_member(r->request,"sticks",a);
+        if(mouse_enabled(u)) {
+            double gain=u->mouse_gain?gtk_range_get_value(GTK_RANGE(u->mouse_gain)):1.5;
+            long dx=lrint(CLAMP(u->mouse_acc_x*gain,-32768.,32767.)),dy=lrint(CLAMP(u->mouse_acc_y*gain,-32768.,32767.));
+            u->mouse_acc_x-=dx/gain;u->mouse_acc_y-=dy/gain;
+            int wheel=CLAMP(u->mouse_wheel,-100,100);u->mouse_wheel-=wheel;
+            a=json_array_new();json_array_add_int_element(a,dx);json_array_add_int_element(a,dy);
+            json_array_add_int_element(a,wheel);json_array_add_int_element(a,u->mouse_captured?u->mouse_buttons:0);
+            json_array_add_int_element(a,u->mouse_captured);json_object_set_array_member(r->request,"mouse",a);
+        }
     } else if(!strcmp(method,"reconnect")) {
         if(u->paired_switch_address)
             json_object_set_string_member(r->request,"address",u->paired_switch_address);
@@ -2040,6 +2169,8 @@ static void launcher_done(GObject *source,GAsyncResult *result,gpointer data) {
 }
 static void controller_selected(GObject *o,GParamSpec *p,Ui *u) {
     (void)p;if(u->loading || u->online || u->launcher)return;
+    mouse_capture_stop(u);
+    if(u->mouse_panel)gtk_widget_set_visible(u->mouse_panel,mouse_enabled(u));
     if(o)release_input(u);
     u->profile.emulated_controller=(int)gtk_drop_down_get_selected(u->controllers);
     save_profile_quiet(u);
@@ -2549,6 +2680,28 @@ static void activate(GtkApplication *app,gpointer unused) {
         NULL);
     gtk_box_append(GTK_BOX(hero),u->drawing);
 
+    u->mouse_panel=gtk_box_new(GTK_ORIENTATION_VERTICAL,6);
+    GtkWidget *mouse_frame=gtk_frame_new(NULL);
+    u->mouse_area=gtk_label_new(NULL);
+    gtk_label_set_wrap(GTK_LABEL(u->mouse_area),TRUE);
+    gtk_label_set_justify(GTK_LABEL(u->mouse_area),GTK_JUSTIFY_CENTER);
+    gtk_widget_set_size_request(u->mouse_area,-1,72);
+    gtk_widget_set_cursor_from_name(u->mouse_area,"crosshair");
+    gtk_frame_set_child(GTK_FRAME(mouse_frame),u->mouse_area);
+    GtkGesture *mouse_click=gtk_gesture_click_new();
+    g_signal_connect(mouse_click,"pressed",G_CALLBACK(mouse_area_clicked),u);
+    gtk_widget_add_controller(u->mouse_area,GTK_EVENT_CONTROLLER(mouse_click));
+    gtk_box_append(GTK_BOX(u->mouse_panel),mouse_frame);
+    GtkWidget *gain_row=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,12);
+    gtk_box_append(GTK_BOX(gain_row),gtk_label_new("Mouse sensitivity"));
+    u->mouse_gain=GTK_SCALE(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,.25,5,.05));
+    gtk_range_set_value(GTK_RANGE(u->mouse_gain),1.5);
+    gtk_widget_set_hexpand(GTK_WIDGET(u->mouse_gain),TRUE);
+    gtk_box_append(GTK_BOX(gain_row),GTK_WIDGET(u->mouse_gain));
+    gtk_box_append(GTK_BOX(u->mouse_panel),gain_row);
+    gtk_box_append(GTK_BOX(hero),u->mouse_panel);
+    mouse_area_update(u);
+
     u->pro_color_panel=
         gtk_box_new(GTK_ORIENTATION_HORIZONTAL,24);
 
@@ -2691,6 +2844,8 @@ static void activate(GtkApplication *app,gpointer unused) {
     g_signal_connect(u->deadzone,"value-changed",G_CALLBACK(scale_changed),u);g_signal_connect(u->sensitivity,"value-changed",G_CALLBACK(scale_changed),u);g_signal_connect(u->swap,"notify::active",G_CALLBACK(settings_changed),u);g_signal_connect(u->background,"notify::active",G_CALLBACK(settings_changed),u);g_signal_connect(u->swap_face,"notify::active",G_CALLBACK(settings_changed),u);
     g_signal_connect(u->auto_select,"notify::active",G_CALLBACK(auto_select_changed),u);
     g_signal_connect(u->traffic_logs,"notify::active",G_CALLBACK(traffic_logs_changed),u);
+    GtkEventController *mouse=gtk_event_controller_legacy_new();gtk_event_controller_set_propagation_phase(mouse,GTK_PHASE_CAPTURE);
+    g_signal_connect(mouse,"event",G_CALLBACK(mouse_event),u);gtk_widget_add_controller(GTK_WIDGET(u->window),mouse);
     GtkEventController *keys=gtk_event_controller_key_new();gtk_event_controller_set_propagation_phase(keys,GTK_PHASE_CAPTURE);g_signal_connect(keys,"key-pressed",G_CALLBACK(key_pressed),u);g_signal_connect(keys,"key-released",G_CALLBACK(key_released),u);gtk_widget_add_controller(GTK_WIDGET(u->window),keys);
     controller_selected(NULL,NULL,u);u->timer=g_timeout_add(16,tick,u);request(u,"status");gtk_window_present(u->window);
 }

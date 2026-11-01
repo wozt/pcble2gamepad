@@ -64,6 +64,7 @@ typedef struct {
     GMainLoop *loop;
     gboolean mtu_warned;
     unsigned reports_sent, completed;
+    int wheel_reports, wheel_direction;
 } Backend;
 
 static void logf_event(Backend *b, const char *event, const char *format, ...) G_GNUC_PRINTF(3, 4);
@@ -611,6 +612,36 @@ static gboolean on_hci(int fd, GIOCondition condition, gpointer data)
 
 static const uint16_t pro_neutral[4] = {2159, 1916, 2070, 2013};
 
+/* PC mouse to the Joy-Con 2 optical sensor. Left/right/middle buttons become
+ * R/ZR/stick click (L/ZL/stick click on the left side); each wheel notch
+ * pushes the stick up or down for six reports. Deltas pass through in PC
+ * orientation, as XD2Joy forwards Bluetooth mouse reports. */
+static void apply_mouse(Backend *b, Jc2Input *input)
+{
+    ProState *s = &b->state;
+    input->mouse = s->mouse_active;
+    if (input->mouse) {
+        input->mouse_dx = (int16_t)CLAMP(s->mouse_dx, -32768, 32767);
+        input->mouse_dy = (int16_t)CLAMP(s->mouse_dy, -32768, 32767);
+    }
+    s->mouse_dx = s->mouse_dy = 0;
+    gboolean left = b->side == JC2_LEFT;
+    if (s->mouse_buttons & 1) input->buttons |= left ? JC2_L_L : JC2_R_R;
+    if (s->mouse_buttons & 2) input->buttons |= left ? JC2_L_ZL : JC2_R_ZR;
+    if (s->mouse_buttons & 4) input->buttons |= left ? JC2_L_STICK : JC2_R_STICK;
+    if (!b->wheel_reports && s->mouse_wheel) {
+        b->wheel_direction = s->mouse_wheel > 0 ? 1 : -1;
+        s->mouse_wheel -= b->wheel_direction;
+        b->wheel_reports = 6;
+    }
+    if (b->wheel_reports) {
+        Jc2Input neutral;
+        jc2_neutral(b->side, &neutral);
+        input->stick_y = (uint16_t)(neutral.stick_y + b->wheel_direction * 1100);
+        b->wheel_reports--;
+    }
+}
+
 static gboolean report_tick(gpointer data)
 {
     Backend *b = data;
@@ -622,6 +653,8 @@ static gboolean report_tick(gpointer data)
     }
     if (b->release_at && now >= b->release_at) {
         memset(b->state.buttons, 0, 3);
+        b->state.mouse_buttons = 0;
+        b->state.mouse_active = FALSE;
         memcpy(b->state.sticks, pro_neutral, sizeof(pro_neutral));
         b->release_at = 0;
     }
@@ -633,11 +666,12 @@ static gboolean report_tick(gpointer data)
         b->mtu_warned = TRUE;
         return G_SOURCE_CONTINUE;
     }
-    Jc2Input input;
+    Jc2Input input = {0};
     if (b->vertical)
         jc2_from_pro_frame_vertical(b->side, b->state.buttons, b->state.sticks, &input);
     else
         jc2_from_pro_frame(b->side, b->state.buttons, b->state.sticks, &input);
+    apply_mouse(b, &input);
     uint8_t pdu[3 + JC2_REPORT_SIZE];
     pdu[0] = 0x1b;
     put16(pdu + 1, JC2_HANDLE_INPUT);

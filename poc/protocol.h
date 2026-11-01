@@ -13,6 +13,10 @@ typedef struct {
     uint16_t sticks[4];
     ControllerType type;
     bool imu, vibration;
+    /* Mouse input for Joy-Con 2 profiles; other controllers ignore it. */
+    int32_t mouse_dx, mouse_dy, mouse_wheel;
+    uint8_t mouse_buttons;
+    bool mouse_active;
 } ProState;
 void controller_init(ProState *s, ControllerType type, const uint8_t address[6]);
 void controller_set_colors(ProState *s,

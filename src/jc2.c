@@ -623,9 +623,10 @@ void jc2_build_report(Jc2Session *s, const Jc2Input *in, uint8_t r[JC2_REPORT_SI
     r[0x05] = packed & 0xff;
     r[0x06] = (packed >> 8) & 0xff;
     r[0x07] = (packed >> 16) & 0xff;
-    /* No mouse: zero deltas and a lifted sensor. */
-    memset(r + 0x09, 0, 4);
-    r[0x0d] = 0xff;
+    /* Mouse deltas; 0x0d is the sensor distance, 0xff when lifted. */
+    put16(r + 0x09, in->mouse ? (uint16_t)in->mouse_dx : 0);
+    put16(r + 0x0b, in->mouse ? (uint16_t)in->mouse_dy : 0);
+    r[0x0d] = in->mouse ? 0x3d : 0xff;
 }
 
 void jc2_advertising_data(Jc2Side side, const uint8_t *host, uint8_t out[31])

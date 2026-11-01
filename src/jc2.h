@@ -46,6 +46,8 @@ typedef enum { JC2_LEFT = 0, JC2_RIGHT = 1 } Jc2Side;
 typedef struct {
     uint16_t buttons;
     uint16_t stick_x, stick_y; /* 12-bit raw positions */
+    int16_t mouse_dx, mouse_dy;  /* optical sensor movement since the last report */
+    bool mouse;                  /* sensor on a surface (mouse mode) */
 } Jc2Input;
 
 typedef enum {

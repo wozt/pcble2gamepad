@@ -74,6 +74,19 @@ sends the physical button that sits at the requested on-screen position.
 
 Change Grip/Order: press L+R. These are sent as SL+SR.
 
+## Mouse mode
+
+Profiles with a Joy-Con 2 show a capture area under the controller picture.
+Clicking it hides the PC pointer and captures it; on X11 the pointer is
+grabbed and re-centred continuously. Right Ctrl, Escape or losing window focus
+releases it. Movement goes to the optical sensor fields of the input report
+(offsets 0x09..0x0c, sensor distance 0x0d), scaled by the sensitivity slider.
+Left click, right click and middle click become R, ZR and the stick click (L, ZL
+and the stick click on a left Joy-Con 2). Each wheel notch pushes the stick up
+or down for six reports. The control socket carries this data as an optional
+`"mouse": [dx, dy, wheel, buttons, active]` field of `input`. Classic
+backends ignore it. Gyro aiming is not emulated yet.
+
 ## Manual run
 
 ```bash

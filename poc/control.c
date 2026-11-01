@@ -42,6 +42,27 @@ static gboolean numbers(JsonObject *o,const char *key,int count,int maximum,int 
     }
     return TRUE;
 }
+/* Optional "mouse": [dx, dy, wheel, buttons, active]. Deltas accumulate until the
+ * backend consumes them in its next report. */
+static gboolean mouse_input(JsonObject *o,ProState *s) {
+    JsonNode *n=json_object_get_member(o,"mouse");
+    if(!n)return TRUE;
+    if(!JSON_NODE_HOLDS_ARRAY(n))return FALSE;
+    JsonArray *a=json_node_get_array(n);if(json_array_get_length(a)!=5)return FALSE;
+    gint64 v[5];
+    for(int i=0;i<5;i++) {
+        JsonNode *e=json_array_get_element(a,i);
+        if(!JSON_NODE_HOLDS_VALUE(e) || json_node_get_value_type(e)!=G_TYPE_INT64)return FALSE;
+        v[i]=json_node_get_int(e);
+    }
+    if(v[0]<-32768 || v[0]>32767 || v[1]<-32768 || v[1]>32767 || v[2]<-100 || v[2]>100 ||
+       v[3]<0 || v[3]>7 || v[4]<0 || v[4]>1)return FALSE;
+    s->mouse_dx=CLAMP(s->mouse_dx+(int32_t)v[0],-32768,32767);
+    s->mouse_dy=CLAMP(s->mouse_dy+(int32_t)v[1],-32768,32767);
+    s->mouse_wheel=CLAMP(s->mouse_wheel+(int32_t)v[2],-100,100);
+    s->mouse_buttons=(uint8_t)v[3];s->mouse_active=v[4]!=0;
+    return TRUE;
+}
 static char *request(gpointer data,const char *text) {
     ProControl *c=data;
     c->last_request=g_get_monotonic_time();
@@ -58,9 +79,12 @@ static char *request(gpointer data,const char *text) {
         if(!numbers(o,"buttons",3,255,buttons) || !numbers(o,"sticks",4,4095,sticks))return failure("Invalid input frame");
         for(int i=0;i<3;i++)c->state->buttons[i]=buttons[i];
         for(int i=0;i<4;i++)c->state->sticks[i]=sticks[i];
+        if(!mouse_input(o,c->state))return failure("Invalid mouse input");
         *c->release_at=g_get_monotonic_time()+500000;
     } else if(!strcmp(method,"release")) {
-        memset(c->state->buttons,0,3);c->state->sticks[0]=2159;c->state->sticks[1]=1916;
+        memset(c->state->buttons,0,3);c->state->mouse_buttons=0;c->state->mouse_active=FALSE;
+        c->state->mouse_dx=c->state->mouse_dy=c->state->mouse_wheel=0;
+        c->state->sticks[0]=2159;c->state->sticks[1]=1916;
         c->state->sticks[2]=2070;c->state->sticks[3]=2013;*c->release_at=0;
     } else if(!strcmp(method,"stop")) {
         g_timeout_add(100,stop,c->loop);

@@ -170,8 +170,13 @@ static void reports(void)
     g_assert_cmpuint(r[6], ==, 0xc1);
     g_assert_cmpuint(r[7], ==, 0xab);
     g_assert_cmpuint(r[0x0d], ==, 0xff);
+    Jc2Input mouse = {.stick_x = 2048, .stick_y = 2048, .mouse_dx = -5, .mouse_dy = 700, .mouse = true};
+    jc2_build_report(&s, &mouse, r);
+    g_assert_cmpint((int16_t)(r[0x09] | r[0x0a] << 8), ==, -5);
+    g_assert_cmpint((int16_t)(r[0x0b] | r[0x0c] << 8), ==, 700);
+    g_assert_cmpuint(r[0x0d], ==, 0x3d);
     jc2_build_report(&s, &in, r);
-    g_assert_cmpuint(r[0], ==, 1);
+    g_assert_cmpuint(r[0], ==, 2);
 
     /* Neutral Pro frame stays centered; L+R become SL+SR. */
     const uint8_t buttons[3] = {0x40 | 0x08, 0, 0x40};

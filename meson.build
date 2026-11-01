@@ -38,9 +38,10 @@ adw = dependency('libadwaita-1', version: '>=1.2', required: get_option('gui'))
 rsvg = dependency('librsvg-2.0', version: '>=2.46', required: get_option('gui'))
 if gtk.found() and adw.found() and rsvg.found()
   sdl = dependency('sdl2', version: '>=2.0.14')
+  x11 = dependency('x11', required: false)
   math = meson.get_compiler('c').find_library('m')
   executable('pcble2gamepad-ble-lab', 'src/gui-ble.c', link_with: client, dependencies: [gio, json, gtk, adw], install: true)
-  executable('pcble2gamepad', ['src/gui.c', 'src/input-model.c'], link_with: client, dependencies: [gio, json, gtk, adw, rsvg, sdl, math], install: true)
+  executable('pcble2gamepad', ['src/gui.c', 'src/input-model.c'], link_with: client, dependencies: [gio, json, gtk, adw, rsvg, sdl, math, x11], install: true)
   install_data(
     [
       'assets/svg/pro-controller.svg',
