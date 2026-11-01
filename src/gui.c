@@ -43,6 +43,12 @@ static void controller_selected(GObject *o,GParamSpec *p,Ui *u);
 static void update_pro_svg_colors(Ui *u);
 static void apply_profile_state(Ui *u);
 static gboolean pair_mode(Ui *u){return u->controllers && gtk_drop_down_get_selected(u->controllers)==1;}
+/* Joy-Con 2 (BLE) profiles: 0 when not selected, 1 for left, 2 for right. */
+static int joycon2_side(Ui *u) {
+    guint i=u->controllers?gtk_drop_down_get_selected(u->controllers):0;
+    return i==2?1:i==3?2:0;
+}
+static gboolean pro_mode(Ui *u){return !pair_mode(u) && !joycon2_side(u);}
 static gboolean paired_adapter_selected(Ui *u) {
     if(!u->adapters || !u->paired_adapter_address || !*u->paired_adapter_address)return FALSE;
     guint i=gtk_drop_down_get_selected(u->adapters);
@@ -58,7 +64,7 @@ static void update_paired_console(Ui *u) {
 }
 static void update_controls(Ui *u) {
     gboolean adapters_ok=u->adapter_ids->len>0 && (!pair_mode(u) || u->secondary_ids->len>1);
-    gboolean can_reconnect=!pair_mode(u) &&
+    gboolean can_reconnect=pro_mode(u) &&
         u->paired_switch_address && *u->paired_switch_address &&
         paired_adapter_selected(u);
     gboolean reconnect_existing=
@@ -87,7 +93,7 @@ static void update_controls(Ui *u) {
     gtk_widget_set_sensitive(GTK_WIDGET(u->secondary),!u->online && !u->launcher);
 
     gboolean colors_enabled=
-        !pair_mode(u) &&
+        pro_mode(u) &&
         !u->online &&
         !u->launcher;
 
@@ -1246,7 +1252,13 @@ static void draw(GtkDrawingArea *area,
         (height-270.0*scale)/2.0);
     cairo_scale(cr,scale,scale);
 
-    if(pair_mode(u)) {
+    if(joycon2_side(u)) {
+        RsvgHandle *svg=joycon2_side(u)==1?u->joycon_left_svg:u->joycon_right_svg;
+        if(svg)
+            render_controller_svg(svg,cr,278,12,84,241);
+        else
+            draw_missing_controller(cr);
+    } else if(pair_mode(u)) {
         /*
          * Original SVG ratio:
          *   85.9 x 246.1
@@ -1756,7 +1768,7 @@ static void complete(GObject *source,
                 peer_address);
 
             if(!simulated &&
-               !pair_mode(u) &&
+               pro_mode(u) &&
                !strcmp(session_state,"connected") &&
                g_regex_match_simple(
                     "^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$",
@@ -2027,7 +2039,7 @@ static void launcher_done(GObject *source,GAsyncResult *result,gpointer data) {
 static void controller_selected(GObject *o,GParamSpec *p,Ui *u) {
     (void)p;if(u->loading || u->online || u->launcher)return;
     if(o)release_input(u);
-    u->profile.emulated_controller=pair_mode(u)?1:0;
+    u->profile.emulated_controller=(int)gtk_drop_down_get_selected(u->controllers);
     save_profile_quiet(u);
     g_free(u->socket);g_free(u->socket2);u->socket2=NULL;
     if(pair_mode(u)) {
@@ -2037,12 +2049,18 @@ static void controller_selected(GObject *o,GParamSpec *p,Ui *u) {
         gtk_label_set_text(u->controller_hint,u->adapter_ids->len<2?"A Joy-Con pair needs two Bluetooth identities. Connect a second adapter to enable this profile.":"Left and right Joy-Con use separate Bluetooth adapters and one combined input profile.");
     } else {
         const char *override=g_getenv("PCBLE2GAMEPAD_PRO_SOCKET");u->socket=override?g_strdup(override):g_strdup_printf("/run/pcble2gamepad/%u/pro.sock",(unsigned)getuid());
-        gtk_widget_set_visible(u->secondary_row,FALSE);gtk_label_set_text(u->hero_title,"Nintendo Switch Pro Controller");gtk_label_set_text(u->controller_hint,"One Bluetooth adapter exposes one Classic HID controller. After pairing, press A once on the virtual controller to leave Change Grip/Order.");
+        gtk_widget_set_visible(u->secondary_row,FALSE);
+        if(joycon2_side(u)) {
+            gtk_label_set_text(u->hero_title,joycon2_side(u)==1?"Nintendo Switch 2 Joy-Con 2 (L)":"Nintendo Switch 2 Joy-Con 2 (R)");
+            gtk_label_set_text(u->controller_hint,"Bluetooth LE, held sideways. The adapter is taken over exclusively while the session runs. In Change Grip/Order, press L+R (sent as SL+SR).");
+        } else {
+            gtk_label_set_text(u->hero_title,"Nintendo Switch Pro Controller");gtk_label_set_text(u->controller_hint,"One Bluetooth adapter exposes one Classic HID controller. After pairing, press A once on the virtual controller to leave Change Grip/Order.");
+        }
     }
     if(u->pro_color_panel)
         gtk_widget_set_visible(
             u->pro_color_panel,
-            !pair_mode(u));
+            pro_mode(u));
 
     gtk_label_set_text(u->status,"OFFLINE");
     gtk_label_set_text(
@@ -2145,7 +2163,7 @@ static void launch_switch_session(Ui *u,gboolean reconnect) {
     if(i>=u->adapter_ids->len){toast(u,"Select a Bluetooth adapter first");return;}
 
     if(reconnect) {
-        if(pair_mode(u)) {
+        if(!pro_mode(u)) {
             toast(u,"Automatic reconnect is currently implemented for Pro Controller first");
             return;
         }
@@ -2238,6 +2256,8 @@ static void launch_switch_session(Ui *u,gboolean reconnect) {
         args[n++]="joycon-pair";
         args[n++]="--secondary";
         args[n++]=g_ptr_array_index(u->secondary_ids,j);
+    } else if(joycon2_side(u)) {
+        args[n++]=joycon2_side(u)==1?"joycon2-left":"joycon2-right";
     } else {
         args[n++]="pro";
 
@@ -2597,7 +2617,7 @@ static void activate(GtkApplication *app,gpointer unused) {
 
     gtk_box_append(GTK_BOX(box),hero);
     AdwPreferencesGroup *g=group(box,"Bluetooth session","Starting a session requests administrator authentication and temporarily pauses other Bluetooth services.");
-    const char *controllers[]={"Nintendo Switch Pro Controller","Nintendo Joy-Con Pair",NULL};u->controllers=GTK_DROP_DOWN(gtk_drop_down_new_from_strings(controllers));row(g,"Emulated controller","Sony and Microsoft profiles can be added to the same controller catalog later.",GTK_WIDGET(u->controllers));
+    const char *controllers[]={"Nintendo Switch Pro Controller","Nintendo Joy-Con Pair","Nintendo Switch 2 Joy-Con 2 (L) · BLE","Nintendo Switch 2 Joy-Con 2 (R) · BLE",NULL};u->controllers=GTK_DROP_DOWN(gtk_drop_down_new_from_strings(controllers));row(g,"Emulated controller","Sony and Microsoft profiles can be added to the same controller catalog later.",GTK_WIDGET(u->controllers));
     u->adapter_names=gtk_string_list_new(NULL);u->adapters=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->adapter_names),NULL));gtk_widget_set_size_request(GTK_WIDGET(u->adapters),280,-1);
     row(g,"Primary adapter","Pro Controller, or left Joy-Con. Choose by address; hci numbers can change after reboot.",GTK_WIDGET(u->adapters));
     u->secondary_names=gtk_string_list_new(NULL);u->secondary=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->secondary_names),NULL));gtk_widget_set_size_request(GTK_WIDGET(u->secondary),280,-1);
@@ -2657,7 +2677,7 @@ static void activate(GtkApplication *app,gpointer unused) {
     box=page(u,"diagnostics","Diagnostics","Live session events, association requests and HID initialization. Simulation is always labeled.");
     u->traffic_logs=GTK_SWITCH(gtk_switch_new());gtk_switch_set_active(u->traffic_logs,u->saved_traffic);row(group(box,"Logging",NULL),"Detailed HID traffic","Show repetitive hid_rx packets and periodic status lines. Remembered between launches.",GTK_WIDGET(u->traffic_logs));
     gtk_box_append(GTK_BOX(box),button("Copy diagnostics",G_CALLBACK(copy_logs),u));GtkWidget *view=gtk_text_view_new();gtk_text_view_set_editable(GTK_TEXT_VIEW(view),FALSE);gtk_text_view_set_monospace(GTK_TEXT_VIEW(view),TRUE);gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(view),GTK_WRAP_WORD_CHAR);u->logs=gtk_text_view_get_buffer(GTK_TEXT_VIEW(view));gtk_widget_set_size_request(view,-1,430);margin(view,10);gtk_box_append(GTK_BOX(box),view);
-    row(group(box,"Current scope",NULL),"Nintendo controller profiles","Switch Pro Controller is verified on Switch 2. Joy-Con (L/R) wire formats and dual-adapter routing are implemented but cannot be hardware-tested until a second adapter is connected. Sony and Microsoft profiles remain future additions.",NULL);
+    row(group(box,"Current scope",NULL),"Nintendo controller profiles","Switch Pro Controller is verified on Switch 2. Joy-Con (L/R) wire formats and dual-adapter routing are implemented but cannot be hardware-tested until a second adapter is connected. Joy-Con 2 (L/R) over Bluetooth LE follows the community protocol and is not yet console-validated by this project. Sony and Microsoft profiles remain future additions.",NULL);
     refresh_bindings(u);profile_scan(u);devices_scan(u);adapters_scan(NULL,u);
     g_signal_connect(u->profiles,"notify::selected",G_CALLBACK(profile_selected),u);
     g_signal_connect(u->devices,"notify::selected",G_CALLBACK(device_selected),u);

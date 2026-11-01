@@ -51,7 +51,7 @@ gboolean input_profile_load(InputProfile *p,const char *path,GError **error) {
     for(int i=0;i<INPUT_BUTTONS;i++){if(buttons[i]<-1 || buttons[i]>SDL_CONTROLLER_BUTTON_MAX+1)goto invalid;next.buttons[i]=buttons[i];}
     if(g_key_file_has_key(k,"Controller","profile",NULL))
         next.emulated_controller=g_key_file_get_integer(k,"Controller","profile",NULL);
-    if(next.emulated_controller<0 || next.emulated_controller>1)goto invalid;
+    if(next.emulated_controller<0 || next.emulated_controller>3)goto invalid;
     next.deadzone=g_key_file_get_double(k,"Sticks","deadzone",NULL);next.sensitivity=g_key_file_get_double(k,"Sticks","sensitivity",NULL);
     if(!isfinite(next.deadzone) || next.deadzone<0 || next.deadzone>.5 || !isfinite(next.sensitivity) || next.sensitivity<.25 || next.sensitivity>2)goto invalid;
     invert=g_key_file_get_boolean_list(k,"Sticks","invert",&n,NULL);

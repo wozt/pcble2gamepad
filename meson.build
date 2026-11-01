@@ -18,7 +18,7 @@ polkit_policy = configure_file(
 executable('pcble2gamepaddiag', 'src/adapter-diag.c', dependencies: [gio, bluetooth], install: true)
 executable('pcble2gamepad-dual-adv-diag', 'src/dual-adv-diag.c', dependencies: bluetooth, install: true)
 inc = include_directories('src')
-protocol = static_library('joycon2-protocol', 'src/protocol.c', 'src/pairing.c', dependencies: [gio, openssl])
+protocol = static_library('joycon2-protocol', 'src/protocol.c', 'src/pairing.c', 'src/jc2.c', dependencies: [gio, openssl])
 client = static_library('joycon2-client', 'src/client.c', dependencies: [gio, json])
 daemon = executable('pcble2gamepadd', ['src/daemon.c', 'src/core.c', 'src/bluez.c', 'src/ipc.c', 'src/ipc-engine.c'],
   link_with: [protocol, client], dependencies: [gio, json, bluetooth], install: true)
@@ -26,6 +26,9 @@ ctl = executable('pcble2gamepadctl', 'src/cli.c', link_with: client, dependencie
 executable('pcble2gamepad-controller-backend',
   ['poc/pro-controller.c', 'poc/protocol.c', 'poc/control.c', 'src/ipc.c'],
   dependencies: [gio, json, bluetooth], install: true, install_dir: libexec_dir)
+executable('pcble2gamepad-joycon2-backend',
+  ['src/jc2-backend.c', 'poc/control.c', 'src/ipc.c'],
+  link_with: protocol, dependencies: [gio, json, bluetooth], install: true, install_dir: libexec_dir)
 install_data('poc/pro-controller.xml', install_dir: libexec_dir)
 install_data('poc/run-classic.sh', install_dir: libexec_dir,
   install_mode: 'rwxr-xr-x')
@@ -50,6 +53,8 @@ if gtk.found() and adw.found() and rsvg.found()
   install_data('data/io.github.wozt.pcble2gamepad.desktop', install_dir: get_option('datadir') / 'applications')
 endif
 test('protocol', executable('test-protocol', 'tests/test-protocol.c', include_directories: inc, link_with: protocol, dependencies: gio))
+test('jc2', executable('test-jc2', 'tests/test-jc2.c', include_directories: inc,
+  link_with: protocol, dependencies: gio))
 test('pairing', executable('test-pairing', 'tests/test-pairing.c', include_directories: inc,
   link_with: protocol, dependencies: gio))
 test('controller-backend-protocol',

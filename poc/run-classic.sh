@@ -82,7 +82,36 @@ while [[ $# -gt 0 ]]; do
         *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
 done
-[[ $profile == pro || $profile == joycon-pair ]] || { echo 'Profile must be pro or joycon-pair' >&2; exit 2; }
+if [[ $profile == joycon2-left || $profile == joycon2-right ]]; then
+    # Joy-Con 2 runs its own BLE stack on an exclusive HCI user channel. It
+    # does not touch the bluetoothd configuration; the kernel hands the
+    # adapter back to BlueZ when the backend exits.
+    jc2=
+    for candidate in \
+        "$script_dir/pcble2gamepad-joycon2-backend" \
+        "$script_dir/../build/pcble2gamepad-joycon2-backend"; do
+        if [[ -x "$candidate" ]]; then jc2=$candidate; break; fi
+    done
+    [[ -n "$jc2" ]] || { echo 'Build the Joy-Con 2 backend first.' >&2; exit 1; }
+    [[ -d /sys/class/bluetooth/$adapter ]] || { echo 'Adapter not present' >&2; exit 1; }
+    jc2_options=(--side "${profile#joycon2-}")
+    $verbose && jc2_options+=(--verbose)
+    [[ -n $reconnect ]] && jc2_options+=(--reconnect)
+    if $desktop; then
+        [[ -n ${PKEXEC_UID:-} ]] || { echo 'Desktop mode requires pkexec.' >&2; exit 1; }
+        jc2_options+=(--desktop "$PKEXEC_UID")
+    fi
+    capture_owner=${PKEXEC_UID:-${SUDO_UID:-0}}
+    capture=$(mktemp -d "/tmp/pcble2gamepad-${capture_owner}-XXXXXXXX")
+    chmod 700 "$capture"
+    status=0
+    "$jc2" "$adapter" "${jc2_options[@]}" 2>&1 | tee "$capture/joycon2.log" || status=$?
+    chmod 600 "$capture/joycon2.log"
+    [[ $capture_owner == 0 ]] || chown -R "$capture_owner" "$capture"
+    echo "Adapter returned to BlueZ. Private log: $capture"
+    exit $status
+fi
+[[ $profile == pro || $profile == joycon-pair ]] || { echo 'Profile must be pro, joycon-pair, joycon2-left or joycon2-right' >&2; exit 2; }
 if [[ $profile == joycon-pair ]]; then
     $desktop || { echo 'Joy-Con pair currently requires desktop mode' >&2; exit 2; }
     [[ -n $secondary && $secondary != "$adapter" ]] || { echo 'Joy-Con pair requires two distinct adapters' >&2; exit 2; }
