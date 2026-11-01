@@ -13,9 +13,10 @@ unchanged.
 | Automated tests | `tests/test-jc2.c`: GATT discovery, pairing flow with capture vectors, SPI read, report layout; also passes under ASan/UBSan |
 | Local adapter | TP-Link RTL8761BUV: LE 2M, data length 251, ACL buffer 27 bytes x 8 |
 | Switch 2, 2026-11-01 | Joy-Con 2 (R) alone: connected, Nintendo pairing, encryption with the derived LTK, input reports requested; shown in Change Grip/Order. Mixed pair Joy-Con 1 (L) Classic on a second adapter + Joy-Con 2 (R) BLE `--vertical`: accepted as a pair after L+R |
+| Switch 2, 2026-11-01, Controller Studio | Mixed pair launched from the GUI: L+R then A left Change Grip/Order as player 1. The console then moved the Joy-Con 2 link to a 5 ms interval, which the RTL8761BUV accepted (about 62 reports per second). Captured PC mouse moved the Switch 2 system cursor right and down as expected. Verified through a capture card |
 
-The console kept the 15 ms interval and never requested 5 ms during these
-sessions. Reports reach about 20 per second: each 66-byte notification is
+During Change Grip/Order the console keeps 15 ms, and reports reach about
+20 per second: each 66-byte notification is
 split into three 27-byte ACL packets, and the controller returns roughly one
 packet per connection event.
 

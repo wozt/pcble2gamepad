@@ -225,6 +225,10 @@ capture_owner=${PKEXEC_UID:-${SUDO_UID:-0}}
 # Keep every capture in a private random directory under /tmp.
 capture=$(mktemp -d "/tmp/pcble2gamepad-${capture_owner}-XXXXXXXX")
 chmod 700 "$capture"
+# Keep the launcher output with the session logs; the desktop app does not
+# show it.
+exec > >(tee -a "$capture/runner.log") 2>&1
+trap 'echo "runner: line $LINENO failed: $BASH_COMMAND"' ERR
 monitor_pids=()
 backend_pids=()
 cleanup() {

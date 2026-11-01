@@ -37,15 +37,17 @@ typedef struct {
     GSubprocess *launcher;
     RsvgHandle *pro_svg,*joycon_left_svg,*joycon_right_svg;
     GtkWidget *mouse_panel,*mouse_area;GtkScale *mouse_gain;
+    GtkWidget *primary_row;GArray *adapter_le2m;
     gboolean mouse_captured,mouse_grabbed,mouse_have_last;
     double mouse_acc_x,mouse_acc_y,mouse_last_x,mouse_last_y,mouse_scroll;
-    int mouse_wheel;guint mouse_buttons;
+    int mouse_wheel;guint mouse_buttons;guint mouse_grab_attempts;
 } Ui;
 typedef struct {char *path,*path2;JsonObject *request;} Request;
 static void refresh_bindings(Ui *u);
 static void request(Ui *u,const char *method);
 static void devices_scan(Ui *u);
 static void adapters_scan(GtkButton *b,Ui *u);
+static void joycon2_adapters(Ui *u);
 static void controller_selected(GObject *o,GParamSpec *p,Ui *u);
 static void update_pro_svg_colors(Ui *u);
 static void apply_profile_state(Ui *u);
@@ -1023,21 +1025,36 @@ static void mouse_capture_stop(Ui *u) {
     gtk_widget_set_cursor(GTK_WIDGET(u->window),NULL);
     mouse_area_update(u);
 }
+/* A grab fails while GTK still holds the implicit grab of the click that
+ * started the capture, so retry for a short while. */
+static gboolean mouse_grab(Ui *u) {
+#ifdef GDK_WINDOWING_X11
+    GdkSurface *s=gtk_native_get_surface(GTK_NATIVE(u->window));
+    if(!x11_surface(s))return TRUE;
+    Display *d=x11_display(s);
+    Window w=x11_window(s);
+    int status=XGrabPointer(d,w,True,ButtonPressMask|ButtonReleaseMask|PointerMotionMask,
+        GrabModeAsync,GrabModeAsync,w,None,CurrentTime);
+    u->mouse_grabbed=status==GrabSuccess;
+    if(u->mouse_grabbed)mouse_warp(u);
+    return u->mouse_grabbed;
+#else
+    (void)u;return TRUE;
+#endif
+}
+static gboolean mouse_grab_retry(gpointer data) {
+    Ui *u=data;
+    if(!u->mouse_captured || u->mouse_grabbed)return G_SOURCE_REMOVE;
+    if(mouse_grab(u))return G_SOURCE_REMOVE;
+    if(++u->mouse_grab_attempts>40){toast(u,"Could not capture the mouse pointer");mouse_capture_stop(u);return G_SOURCE_REMOVE;}
+    return G_SOURCE_CONTINUE;
+}
 static void mouse_capture_start(Ui *u) {
     if(u->mouse_captured || !mouse_enabled(u))return;
     if(!gtk_switch_get_active(GTK_SWITCH(u->arm)))gtk_switch_set_active(GTK_SWITCH(u->arm),TRUE);
-    u->mouse_captured=TRUE;u->mouse_have_last=FALSE;u->mouse_buttons=0;
-#ifdef GDK_WINDOWING_X11
-    GdkSurface *s=gtk_native_get_surface(GTK_NATIVE(u->window));
-    if(x11_surface(s)) {
-        Display *d=x11_display(s);
-        Window w=x11_window(s);
-        u->mouse_grabbed=XGrabPointer(d,w,True,ButtonPressMask|ButtonReleaseMask|PointerMotionMask,
-            GrabModeAsync,GrabModeAsync,w,None,CurrentTime)==GrabSuccess;
-    }
-#endif
+    u->mouse_captured=TRUE;u->mouse_have_last=FALSE;u->mouse_buttons=0;u->mouse_grab_attempts=0;
     gtk_widget_set_cursor_from_name(GTK_WIDGET(u->window),"none");
-    mouse_warp(u);
+    if(!mouse_grab(u))g_timeout_add(50,mouse_grab_retry,u);
     mouse_area_update(u);
 }
 static gboolean mouse_event(GtkEventControllerLegacy *c,GdkEvent *e,Ui *u) {
@@ -1561,6 +1578,7 @@ static void adapters_scan(GtkButton *b,Ui *u) {
     g_ptr_array_set_size(u->adapter_addresses,0);
     g_ptr_array_set_size(u->secondary_ids,0);
     g_ptr_array_set_size(u->secondary_addresses,0);
+    g_array_set_size(u->adapter_le2m,0);
 
     GVariantIter *objects;
     g_variant_get(
@@ -1592,6 +1610,16 @@ static void adapters_scan(GtkButton *b,Ui *u) {
                 &address);
 
             char *id=g_path_get_basename(path);
+            /* Joy-Con 2 needs LE 2M; BlueZ reports it as a secondary channel. */
+            gboolean le2m=FALSE;
+            GVariant *adv=g_variant_lookup_value(interfaces,"org.bluez.LEAdvertisingManager1",G_VARIANT_TYPE_VARDICT);
+            if(adv) {
+                g_autofree const char **channels=NULL;
+                if(g_variant_lookup(adv,"SupportedSecondaryChannels","^a&s",&channels))
+                    le2m=channels && g_strv_contains(channels,"2M");
+                g_variant_unref(adv);
+            }
+            g_array_append_val(u->adapter_le2m,le2m);
 
             /*
              * Deliberately omit Adapter1.Alias here. During emulation the
@@ -1600,9 +1628,10 @@ static void adapters_scan(GtkButton *b,Ui *u) {
              */
             char *name=
                 g_strdup_printf(
-                    "%s · %s",
+                    "%s · %s%s",
                     id,
-                    address);
+                    address,
+                    le2m?" · LE 2M":"");
 
             gtk_string_list_append(
                 u->adapter_names,
@@ -1698,6 +1727,7 @@ static void adapters_scan(GtkButton *b,Ui *u) {
 
     u->loading=previous_loading;
 
+    joycon2_adapters(u);
     update_controls(u);
 }
 
@@ -2167,6 +2197,30 @@ static void launcher_done(GObject *source,GAsyncResult *result,gpointer data) {
 
     ui_unref(u);
 }
+static gboolean adapter_has_le2m(Ui *u,guint i){return i<u->adapter_le2m->len && g_array_index(u->adapter_le2m,gboolean,i);}
+/* Adapter labels per profile, and an LE 2M adapter for the Joy-Con 2 side. */
+static void joycon2_adapters(Ui *u) {
+    if(!u->primary_row || !u->secondary_row)return;
+    const char *pt="Primary adapter",*ps="Pro Controller, or left Joy-Con. Choose by address; hci numbers can change after reboot.";
+    const char *st="Right Joy-Con adapter",*ss="A pair requires a second, distinct Classic Bluetooth identity.";
+    const char *le="Needs Bluetooth LE with LE 2M (marked LE 2M). It is taken over exclusively during the session.";
+    if(mixed_mode(u)){pt="Joy-Con 1 (L) adapter";ps="Classic Bluetooth, for example the adapter used for the Pro Controller.";st="Joy-Con 2 (R) adapter";ss=le;}
+    else if(joycon2_side(u)){pt="Joy-Con 2 adapter";ps=le;}
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(u->primary_row),pt);adw_action_row_set_subtitle(ADW_ACTION_ROW(u->primary_row),ps);
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(u->secondary_row),st);adw_action_row_set_subtitle(ADW_ACTION_ROW(u->secondary_row),ss);
+    if(u->online || u->launcher)return;
+    guint n=u->adapter_ids->len,capable=n;
+    for(guint i=0;i<n && capable==n;i++)if(adapter_has_le2m(u,i))capable=i;
+    if(capable==n)return;
+    if(mixed_mode(u)) {
+        guint j=gtk_drop_down_get_selected(u->secondary);
+        if(!adapter_has_le2m(u,j)){gtk_drop_down_set_selected(u->secondary,capable);j=capable;}
+        if(gtk_drop_down_get_selected(u->adapters)==j)
+            for(guint k=0;k<n;k++)if(k!=j){gtk_drop_down_set_selected(u->adapters,k);break;}
+    } else if(joycon2_side(u) && !adapter_has_le2m(u,gtk_drop_down_get_selected(u->adapters))) {
+        gtk_drop_down_set_selected(u->adapters,capable);
+    }
+}
 static void controller_selected(GObject *o,GParamSpec *p,Ui *u) {
     (void)p;if(u->loading || u->online || u->launcher)return;
     mouse_capture_stop(u);
@@ -2201,6 +2255,7 @@ static void controller_selected(GObject *o,GParamSpec *p,Ui *u) {
         "Start a Bluetooth session to connect your console.");
     gtk_label_set_text(u->error,"");
 
+    joycon2_adapters(u);
     gtk_widget_queue_draw(u->drawing);
     update_controls(u);
     request(u,"status");
@@ -2524,6 +2579,7 @@ static void activate(GtkApplication *app,gpointer unused) {
     u->adapter_addresses=g_ptr_array_new_with_free_func(g_free);
     u->secondary_ids=g_ptr_array_new_with_free_func(g_free);
     u->secondary_addresses=g_ptr_array_new_with_free_func(g_free);
+    u->adapter_le2m=g_array_new(FALSE,TRUE,sizeof(gboolean));
     u->device_ids=g_ptr_array_new();
     g_autofree char *config_root=g_build_filename(g_get_user_config_dir(),"pcble2gamepad",NULL);
     g_mkdir_with_parents(config_root,0700);
@@ -2689,7 +2745,7 @@ static void activate(GtkApplication *app,gpointer unused) {
     gtk_widget_set_cursor_from_name(u->mouse_area,"crosshair");
     gtk_frame_set_child(GTK_FRAME(mouse_frame),u->mouse_area);
     GtkGesture *mouse_click=gtk_gesture_click_new();
-    g_signal_connect(mouse_click,"pressed",G_CALLBACK(mouse_area_clicked),u);
+    g_signal_connect(mouse_click,"released",G_CALLBACK(mouse_area_clicked),u);
     gtk_widget_add_controller(u->mouse_area,GTK_EVENT_CONTROLLER(mouse_click));
     gtk_box_append(GTK_BOX(u->mouse_panel),mouse_frame);
     GtkWidget *gain_row=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,12);
@@ -2774,7 +2830,7 @@ static void activate(GtkApplication *app,gpointer unused) {
     AdwPreferencesGroup *g=group(box,"Bluetooth session","Starting a session requests administrator authentication and temporarily pauses other Bluetooth services.");
     const char *controllers[]={"Nintendo Switch Pro Controller","Nintendo Joy-Con Pair","Nintendo Switch 2 Joy-Con 2 (L) · BLE","Nintendo Switch 2 Joy-Con 2 (R) · BLE","Joy-Con 1 (L) Classic + Joy-Con 2 (R) BLE",NULL};u->controllers=GTK_DROP_DOWN(gtk_drop_down_new_from_strings(controllers));row(g,"Emulated controller","Sony and Microsoft profiles can be added to the same controller catalog later.",GTK_WIDGET(u->controllers));
     u->adapter_names=gtk_string_list_new(NULL);u->adapters=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->adapter_names),NULL));gtk_widget_set_size_request(GTK_WIDGET(u->adapters),280,-1);
-    row(g,"Primary adapter","Pro Controller, or left Joy-Con. Choose by address; hci numbers can change after reboot.",GTK_WIDGET(u->adapters));
+    u->primary_row=row(g,"Primary adapter","Pro Controller, or left Joy-Con. Choose by address; hci numbers can change after reboot.",GTK_WIDGET(u->adapters));
     u->secondary_names=gtk_string_list_new(NULL);u->secondary=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->secondary_names),NULL));gtk_widget_set_size_request(GTK_WIDGET(u->secondary),280,-1);
     u->secondary_row=row(g,"Right Joy-Con adapter","A pair requires a second, distinct Classic Bluetooth identity.",GTK_WIDGET(u->secondary));gtk_widget_set_visible(u->secondary_row,FALSE);
     u->controller_hint=GTK_LABEL(label("Pair / Sync works from Change Grip/Order. Persistent reconnect is experimental because the Switch requests a temporary No Bonding key.","dim-label"));gtk_box_append(GTK_BOX(box),GTK_WIDGET(u->controller_hint));
