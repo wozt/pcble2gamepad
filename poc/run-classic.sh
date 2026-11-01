@@ -304,11 +304,14 @@ if $desktop; then
         "$app" "$adapter" "$sdp" --desktop "$PKEXEC_UID" --type joycon-l "${backend_options[@]}" > "$capture/joycon-left.log" 2>&1 &
         left_pid=$!;backend_pids+=("$left_pid")
         set +e
+        # One half alone is not a usable pair: stop the other when either exits.
+        wait -n "$left_pid" "$right_pid"
+        kill -TERM "$left_pid" "$right_pid" 2>/dev/null
         wait "$left_pid"; left_status=$?
         wait "$right_pid"; right_status=$?
         backend_pids=()
         set -e
-        [[ $left_status == 0 && $right_status == 0 ]]
+        echo "Joy-Con 1 (L) exit $left_status, Joy-Con 2 (R) exit $right_status"
     else
         "$app" "$adapter" "$sdp" --desktop "$PKEXEC_UID" --type joycon-l --allow-adapter "$secondary" "${backend_options[@]}" > "$capture/joycon-left.log" 2>&1 &
         left_pid=$!;backend_pids+=("$left_pid")

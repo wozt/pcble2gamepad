@@ -703,9 +703,6 @@ static gboolean pairing_read_key(const char *remote,PcMgmtLinkKey *key) {
 }
 
 static gboolean pairing_set_controller_device_id(void) {
-    if(controller_type!=CONTROLLER_PRO)
-        return TRUE;
-
     int fd=pairing_mgmt_open(FALSE);
     if(fd<0) {
         log_event("device_id_error",
@@ -719,7 +716,9 @@ static gboolean pairing_set_controller_device_id(void) {
     request.hdr.len=htobs(sizeof(request)-sizeof(request.hdr));
     request.source=htobs(0x0002);
     request.vendor=htobs(0x057e);
-    request.product=htobs(0x2009);
+    /* Nintendo product IDs: Joy-Con (L) 0x2006, Joy-Con (R) 0x2007, Pro 0x2009. */
+    request.product=htobs(controller_type==CONTROLLER_JOYCON_L?0x2006:
+                          controller_type==CONTROLLER_JOYCON_R?0x2007:0x2009);
     request.version=htobs(0x0001);
 
     ssize_t written;
@@ -1754,12 +1753,6 @@ static gboolean reconnect_from_control(const char *address,
                                        gpointer user_data,
                                        GError **error) {
     (void)user_data;
-
-    if(controller_type!=CONTROLLER_PRO) {
-        g_set_error_literal(error,G_IO_ERROR,G_IO_ERROR_NOT_SUPPORTED,
-                            "Reconnect is currently available for Pro Controller only");
-        return FALSE;
-    }
 
     if(!have_selected_local_address) {
         g_set_error_literal(error,G_IO_ERROR,G_IO_ERROR_FAILED,
@@ -3367,12 +3360,6 @@ int main(int argc,char **argv) {
          * Durable reconnect path. Rehydrate the BR/EDR Link Key captured
          * during the one-time Pair / Sync operation before opening HID.
          */
-        if(controller_type!=CONTROLLER_PRO) {
-            log_event("pairing_key_error",
-                "Persistent reconnect is currently implemented for Pro Controller only");
-            goto cleanup;
-        }
-
         if(!pairing_load_into_kernel(reconnect_peer))
             goto cleanup;
 

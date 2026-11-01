@@ -1744,6 +1744,8 @@ static JsonObject *merge_pair(JsonObject *left,JsonObject *right) {
     json_object_set_boolean_member(result,"initialized",json_object_get_boolean_member_with_default(a,"initialized",FALSE)&&json_object_get_boolean_member_with_default(b,"initialized",FALSE));
     json_object_set_boolean_member(result,"simulated",json_object_get_boolean_member_with_default(a,"simulated",FALSE)||json_object_get_boolean_member_with_default(b,"simulated",FALSE));
     g_autofree char *peers=g_strdup_printf("L: %s  ·  R: %s",json_object_get_string_member_with_default(a,"peer","waiting"),json_object_get_string_member_with_default(b,"peer","waiting"));json_object_set_string_member(result,"peer",peers);
+    /* Console address for the paired-Switch record, as seen by the left half. */
+    json_object_set_string_member(result,"console",json_object_get_string_member_with_default(a,"peer",""));
     json_object_set_string_member(result,"profile","Nintendo Joy-Con Pair");
     json_object_set_int_member(result,"tx",json_object_get_int_member_with_default(a,"tx",0)+json_object_get_int_member_with_default(b,"tx",0));
     json_object_set_int_member(result,"rx",json_object_get_int_member_with_default(a,"rx",0)+json_object_get_int_member_with_default(b,"rx",0));
@@ -1924,12 +1926,15 @@ static void complete(GObject *source,
                 u->peer,
                 peer_address);
 
+            const char *console_address=
+                json_object_get_string_member_with_default(state,"console",peer_address);
+
             if(!simulated &&
                (pro_mode(u) || mixed_mode(u)) &&
                !strcmp(session_state,"connected") &&
                g_regex_match_simple(
                     "^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$",
-                    peer_address,
+                    console_address,
                     0,
                     0)) {
                 guint adapter_index=
@@ -1946,7 +1951,7 @@ static void complete(GObject *source,
                         !u->paired_switch_address ||
                         g_ascii_strcasecmp(
                             u->paired_switch_address,
-                            peer_address) ||
+                            console_address) ||
                         !u->paired_adapter_address ||
                         g_ascii_strcasecmp(
                             u->paired_adapter_address,
@@ -1962,7 +1967,7 @@ static void complete(GObject *source,
                         g_free(u->preferred_adapter_address);
 
                         u->paired_switch_address=
-                            g_strdup(peer_address);
+                            g_strdup(console_address);
 
                         u->paired_adapter_address=
                             g_strdup(adapter_address);
