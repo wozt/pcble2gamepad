@@ -31,12 +31,12 @@ static gboolean read_capabilities(int fd, uint16_t command, uint8_t bytes[8])
     return TRUE;
 }
 
-/* LE Read Number of Supported Advertising Sets (0x2043) */
+/* LE Read Number of Supported Advertising Sets (0x203b) */
 static gboolean read_num_adv_sets(int fd, uint8_t *num_sets)
 {
     uint8_t reply[2] = {0};
     struct hci_request request = {
-        .ogf = OGF_LE_CTL, .ocf = 0x0043,
+        .ogf = OGF_LE_CTL, .ocf = 0x003b,
         .rparam = reply, .rlen = sizeof(reply),
     };
     if (hci_send_req(fd, &request, 2000) < 0) {

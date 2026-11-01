@@ -1,6 +1,5 @@
 #include "bluez.h"
 #include "protocol.h"
-#include "mgmt.h"
 #include <string.h>
 
 #define ROOT "/io/github/wozt/pcble2gamepad"
@@ -183,20 +182,7 @@ static void method_call(GDBusConnection *connection G_GNUC_UNUSED, const char *s
             options = g_variant_print(opts, TRUE);
             engine_log(e, "INFO", "gatt_write", "path=%s reference_handle=0x%04x value=%s options=%s", o->path, o->spec->handle, hex, options);
             g_autofree char *command = o->kind == OBJ_CHAR ? jc_describe_command(o->spec->handle, value, length) : NULL;
-            if (command) {
-                engine_log(e, "INFO", "nintendo_command", "%s", command);
-                /* Send minimal ACK response for command characteristics */
-                if (o->spec->handle == 0x14 || o->spec->handle == 0x16) {
-                    gsize resp_len;
-                    guint8 *response = jc_build_command_response(value, length, &resp_len);
-                    if (response) {
-                        g_autofree char *resp_hex = jc_hex(response, resp_len);
-                        engine_log(e, "INFO", "nintendo_response", "Sending minimal ACK: %s", resp_hex);
-                        /* TODO: Send notification via BlueZ to characteristic 0x1a */
-                        g_free(response);
-                    }
-                }
-            }
+            if (command) engine_log(e, "INFO", "nintendo_command", "%s", command);
             engine_log(e, "DEBUG", "gatt_write_ack", "Observation only; no Nintendo response and no state mutation");
             g_dbus_method_invocation_return_value(invocation, NULL);
             return;
@@ -467,15 +453,6 @@ void bluez_start(Bluez *b)
     if (b->engine->advertising) return;
     g_autoptr(GError) error = NULL;
     if (!inspect_adapter(b, &error)) { engine_error(b->engine, error->message); return; }
-
-    /* Attempt to set LE 2M PHY preference via Management API */
-    g_autoptr(GError) phy_error = NULL;
-    if (mgmt_set_preferred_phy(b->engine->adapter_name, TRUE, &phy_error)) {
-        engine_log(b->engine, "INFO", "phy_configured", "LE 2M PHY preferred via Management API");
-    } else {
-        engine_log(b->engine, "WARN", "phy_config_failed", "Could not set LE 2M PHY: %s (continuing with default PHY)", phy_error->message);
-    }
-
     b->engine->busy = TRUE;
     g_autofree char *hex = jc_hex(jc_advertisement, sizeof(jc_advertisement));
     engine_log(b->engine, "INFO", "advertisement_requested", "reference_adv_data=%s (31 bytes); ADV_IND; requested_interval_ms=20; BlueZ may reorder AD structures; no name, UUID list, appearance or TX power", hex);

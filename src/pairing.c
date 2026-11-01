@@ -1,7 +1,6 @@
 #define _GNU_SOURCE
 #include "pairing.h"
 #include <string.h>
-#include <openssl/aes.h>
 #include <openssl/evp.h>
 
 /* Nintendo proprietary Joy-Con 2 BLE pairing implementation
@@ -34,28 +33,44 @@ static gboolean aes_128_ecb_encrypt(const uint8_t *key, const uint8_t *plaintext
         return FALSE;
     }
 
-    int len, ciphertext_len;
+    if (EVP_CIPHER_CTX_set_padding(ctx, 0) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                            "AES padding configuration failed");
+        return FALSE;
+    }
+
+    int len = 0;
     if (EVP_EncryptUpdate(ctx, ciphertext, &len, plaintext, 16) != 1) {
         EVP_CIPHER_CTX_free(ctx);
         g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "AES encrypt failed");
         return FALSE;
     }
-    ciphertext_len = len;
+    if (len != 16) {
+        EVP_CIPHER_CTX_free(ctx);
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                            "AES produced an invalid block length");
+        return FALSE;
+    }
 
-    if (EVP_EncryptFinal_ex(ctx, ciphertext + len, &len) != 1) {
+    int final_len = 0;
+    if (EVP_EncryptFinal_ex(ctx, ciphertext + len, &final_len) != 1) {
         EVP_CIPHER_CTX_free(ctx);
         g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "AES final failed");
         return FALSE;
     }
-    ciphertext_len += len;
-
     EVP_CIPHER_CTX_free(ctx);
+    if (final_len != 0) {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                            "AES produced unexpected trailing data");
+        return FALSE;
+    }
     return TRUE;
 }
 
 /* Compute LTK = A1 XOR B1 */
-static void compute_ltk(const uint8_t *a1, const uint8_t *b1, uint8_t *ltk) G_GNUC_UNUSED;
-static void compute_ltk(const uint8_t *a1, const uint8_t *b1, uint8_t *ltk)
+void pairing_compute_ltk(const uint8_t a1[16], const uint8_t b1[16],
+                         uint8_t ltk[16])
 {
     for (int i = 0; i < 16; i++)
         ltk[i] = a1[i] ^ b1[i];
@@ -79,26 +94,32 @@ gboolean pairing_compute_b2(const uint8_t *ltk, const uint8_t *a2, uint8_t *b2, 
 gboolean pairing_parse_address_exchange(const uint8_t *data, gsize len,
                                         JcAddressExchange *exchange, GError **error)
 {
-    if (len < 14) {
+    if (len != 14) {
         g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                           "Address exchange too short");
+                           "Address exchange must contain 14 bytes");
+        return FALSE;
+    }
+    if (data[0] != 0x00 || data[1] != 0x02) {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                            "Address exchange selector or address count is invalid");
         return FALSE;
     }
 
-    /* Skip selector byte and initial header */
-    exchange->host_addr1[0] = data[6];
-    exchange->host_addr1[1] = data[5];
-    exchange->host_addr1[2] = data[4];
-    exchange->host_addr1[3] = data[3];
-    exchange->host_addr1[4] = data[2];
-    exchange->host_addr1[5] = data[1];
+    /* The two addresses start after the selector and count and are transmitted
+     * least-significant octet first. Store conventional display order. */
+    exchange->host_addr1[0] = data[7];
+    exchange->host_addr1[1] = data[6];
+    exchange->host_addr1[2] = data[5];
+    exchange->host_addr1[3] = data[4];
+    exchange->host_addr1[4] = data[3];
+    exchange->host_addr1[5] = data[2];
 
-    exchange->host_addr2[0] = data[12];
-    exchange->host_addr2[1] = data[11];
-    exchange->host_addr2[2] = data[10];
-    exchange->host_addr2[3] = data[9];
-    exchange->host_addr2[4] = data[8];
-    exchange->host_addr2[5] = data[7];
+    exchange->host_addr2[0] = data[13];
+    exchange->host_addr2[1] = data[12];
+    exchange->host_addr2[2] = data[11];
+    exchange->host_addr2[3] = data[10];
+    exchange->host_addr2[4] = data[9];
+    exchange->host_addr2[5] = data[8];
 
     /* Controller address is in the response, not request */
     memset(exchange->controller_addr, 0, 6 * sizeof(uint8_t));
@@ -110,9 +131,14 @@ gboolean pairing_parse_address_exchange(const uint8_t *data, gsize len,
 gboolean pairing_parse_key_exchange(const uint8_t *data, gsize len,
                                      JcKeyExchange *exchange, GError **error)
 {
-    if (len < 18) {  /* 1 selector + 16 bytes + at least 1 */
+    if (len != 17) {
         g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                           "Key exchange too short");
+                           "Key exchange must contain 17 bytes");
+        return FALSE;
+    }
+    if (data[0] != 0x00) {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                            "Key exchange selector is invalid");
         return FALSE;
     }
 

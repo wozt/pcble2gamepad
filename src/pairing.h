@@ -13,6 +13,8 @@ typedef struct {
     uint8_t b1[16];
 } JcKeyExchange;
 
+void pairing_compute_ltk(const uint8_t a1[16], const uint8_t b1[16],
+                         uint8_t ltk[16]);
 gboolean pairing_compute_b2(const uint8_t *ltk, const uint8_t *a2, uint8_t *b2, GError **error);
 gboolean pairing_parse_address_exchange(const uint8_t *data, gsize len,
                                         JcAddressExchange *exchange, GError **error);
