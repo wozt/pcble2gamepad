@@ -91,6 +91,20 @@ static uint16_t axis16(uint16_t value, uint16_t center, bool invert) {
 }
 
 size_t pro_stream_input(const ProState *s, uint8_t timer, uint8_t out[50]) {
+    if (s->type != CONTROLLER_PRO && s->mode == 0x3f) {
+        /* Joy-Con L/R, simple mode before subcommand 0x03.
+         * Bluetooth HID framing: 0xa1 + report 0x3f, two button bytes,
+         * neutral hat (0x08), and the eight Joy-Con filler bytes.
+         * This mode is used only in dual-Classic reconnection; existing
+         * pairing, hybrid and Pro modes keep their established format. */
+        memset(out, 0, 50);
+        out[0] = 0xa1;
+        out[1] = 0x3f;
+        out[4] = 0x08;
+        for (int i = 0; i < 4; ++i)
+            out[6 + i * 2] = 0x80;
+        return 13;
+    }
     if (s->type != CONTROLLER_PRO || s->mode == 0x30) {
         pro_input(s, timer, out);
         return 50;

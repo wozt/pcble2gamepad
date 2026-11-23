@@ -1701,9 +1701,15 @@ static gboolean connect_outbound(const bdaddr_t *local,
      * device-info/output initialization. The older 1-Hz pre-RX cadence can
      * miss the entire ~250-ms lifetime observed for the second Joy-Con. */
     if(dual_classic_joycon_pair() && reconnect_mode) {
+        /* Real Joy-Con 1 starts in simple HID mode (0x3f) and changes to
+         * full input mode (0x30) when the Switch sends subcommand 0x03.
+         * Do not stream full-mode reports before the console requests them.
+         * The fast V2 0x30 burst did not prevent the remote 0x13 disconnect. */
+        state.mode=0x3f;
         paired_classic_probe_until=g_get_monotonic_time()+1500000;
-        log_event("pair_reconnect_probe",
-            "Classic pair: report burst at ~60 Hz, max 1.5 s, stops at first Switch HID report");
+        log_event("pair_reconnect_simple_hid",
+            "Classic pair: starting with 0x3f simple input reports at 10 Hz; "
+            "switches to 0x30 only after Switch HID subcommand 0x03");
     } else {
         paired_classic_probe_until=0;
     }
@@ -1984,7 +1990,7 @@ static gboolean tick(gpointer unused) {
                        dual_classic_joycon_pair() && reconnect_mode &&
                        paired_classic_probe_until &&
                        now<paired_classic_probe_until)
-                        interval=15000;
+                        interval=100000;
                     else
                         interval=saw_interrupt_output ? 66667 :
                             controller_type==CONTROLLER_PRO ? 100000 : 1000000;
