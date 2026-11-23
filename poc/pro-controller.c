@@ -29,6 +29,7 @@ static char adapter[64], allowed_adapter[64], peer[18], last_peer[18];
 static ControllerType controller_type=CONTROLLER_PRO;
 static const char *controller_alias="Pro Controller",*control_socket="pro.sock";
 static gboolean shared_profile;
+static gboolean dual_classic_joycon_pair(void); /* Used by early HCI monitor callback. */
 static gboolean verbose_traffic;
 static gboolean reconnect_mode;
 static char reconnect_peer[18];
@@ -380,11 +381,28 @@ static gboolean pairing_hci_event(gint fd,
         buffer+sizeof(PcMonitorHdr);
 
     if(opcode==PC_MONITOR_COMMAND_PKT) {
-        if(packet_size<HCI_COMMAND_HDR_SIZE+IO_CAPABILITY_REPLY_CP_SIZE)
+        if(packet_size<HCI_COMMAND_HDR_SIZE)
             return G_SOURCE_CONTINUE;
 
         const hci_command_hdr *command=
             (const hci_command_hdr *)packet;
+        /* Record host-initiated disconnects, without logging any keys. An
+         * HCI Disconnection Complete event alone does not show the initiator. */
+        if(dual_classic_joycon_pair() &&
+           btohs(command->opcode)==cmd_opcode_pack(OGF_LINK_CTL,OCF_DISCONNECT) &&
+           packet_size>=HCI_COMMAND_HDR_SIZE+3) {
+            const uint8_t *cp=packet+HCI_COMMAND_HDR_SIZE;
+            unsigned handle=cp[0]|((unsigned)cp[1]<<8);
+            char detail[128];
+            snprintf(detail,sizeof(detail),
+                "local_host_disconnection_request handle=0x%04x reason=0x%02x",
+                handle,cp[2]);
+            log_event("hci_disconnect_command",detail);
+            return G_SOURCE_CONTINUE;
+        }
+
+        if(packet_size<HCI_COMMAND_HDR_SIZE+IO_CAPABILITY_REPLY_CP_SIZE)
+            return G_SOURCE_CONTINUE;
 
         if(btohs(command->opcode)!=
            cmd_opcode_pack(OGF_LINK_CTL,OCF_IO_CAPABILITY_REPLY))
@@ -421,6 +439,41 @@ static gboolean pairing_hci_event(gint fd,
 
     const uint8_t *payload=
         packet+HCI_EVENT_HDR_SIZE;
+
+    /* Passive HCI reason tracing: one monitor per selected adapter. Allows
+     * us to tell a remote termination (0x13), local termination (0x16),
+     * timeout (0x08), and unknown reasons apart. No secrets are exposed. */
+    if(dual_classic_joycon_pair() &&
+       header->evt==EVT_DISCONN_COMPLETE &&
+       header->plen>=4 && packet_size>=HCI_EVENT_HDR_SIZE+4) {
+        unsigned handle=payload[1]|((unsigned)payload[2]<<8);
+        unsigned reason=payload[3];
+        const char *label=reason==0x13?"remote_user_terminated":
+            reason==0x16?"local_host_terminated":
+            reason==0x08?"connection_timeout":
+            reason==0x22?"lmp_response_timeout":"other";
+        char detail[160];
+        snprintf(detail,sizeof(detail),
+            "handle=0x%04x status=0x%02x reason=0x%02x (%s)",
+            handle,payload[0],reason,label);
+        log_event("hci_disconnected",detail);
+        return G_SOURCE_CONTINUE;
+    }
+    if(dual_classic_joycon_pair() &&
+       header->evt==EVT_CONN_COMPLETE &&
+       header->plen>=11 && packet_size>=HCI_EVENT_HDR_SIZE+11) {
+        bdaddr_t remote={0};
+        memcpy(&remote,payload+3,sizeof(remote));
+        char address[18];
+        ba2str(&remote,address);
+        unsigned handle=payload[1]|((unsigned)payload[2]<<8);
+        char detail[160];
+        snprintf(detail,sizeof(detail),
+            "peer=%s handle=0x%04x status=0x%02x link_type=0x%02x",
+            address,handle,payload[0],payload[9]);
+        log_event("hci_connection_complete",detail);
+        return G_SOURCE_CONTINUE;
+    }
 
     if(header->evt==EVT_IO_CAPABILITY_RESPONSE) {
         if(packet_size<
@@ -1059,6 +1112,10 @@ static gboolean dual_classic_joycon_pair(void) {
 
 /* Do not continuously page a Switch that has intentionally disconnected. */
 static unsigned pairing_link_recoveries;
+/* One short initial input-report burst on the two-Classic-Joy-Con profile,
+ * only during a reconnect and only before the first Switch interrupt report.
+ * Other profiles retain their validated legacy cadence. */
+static gint64 paired_classic_probe_until;
 
 static void reset_link(void) {
     for(int i=0;i<2;i++) {
@@ -1081,6 +1138,7 @@ static void reset_link(void) {
     slow_exit_until=0;
     slow_input_frequency=FALSE;
     saw_interrupt_output=FALSE;
+    paired_classic_probe_until=0;
 
     uint8_t addr[6];
     memcpy(addr,state.address,6);
@@ -1638,6 +1696,17 @@ static gboolean connect_outbound(const bdaddr_t *local,
     saw_interrupt_output=FALSE;
     next_report_at=0;
     slow_exit_until=0;
+    /* A successful ACL/L2CAP connection is not the end of the Switch's HID
+     * handshake. Send repeated neutral input reports briefly to encourage
+     * device-info/output initialization. The older 1-Hz pre-RX cadence can
+     * miss the entire ~250-ms lifetime observed for the second Joy-Con. */
+    if(dual_classic_joycon_pair() && reconnect_mode) {
+        paired_classic_probe_until=g_get_monotonic_time()+1500000;
+        log_event("pair_reconnect_probe",
+            "Classic pair: report burst at ~60 Hz, max 1.5 s, stops at first Switch HID report");
+    } else {
+        paired_classic_probe_until=0;
+    }
 
     uint8_t out[50];
     size_t length=pro_stream_input(&state,timer_byte(),out);
@@ -1910,10 +1979,16 @@ static gboolean tick(gpointer unused) {
             } else {
                 gint64 interval;
 
-                if(slow_input_frequency)
-                    interval=saw_interrupt_output ? 66667 :
-                        controller_type==CONTROLLER_PRO ? 100000 : 1000000;
-                else
+                if(slow_input_frequency) {
+                    if(!saw_interrupt_output &&
+                       dual_classic_joycon_pair() && reconnect_mode &&
+                       paired_classic_probe_until &&
+                       now<paired_classic_probe_until)
+                        interval=15000;
+                    else
+                        interval=saw_interrupt_output ? 66667 :
+                            controller_type==CONTROLLER_PRO ? 100000 : 1000000;
+                } else
                     interval=15000;
 
                 next_report_at=now+interval;
