@@ -790,8 +790,11 @@ static gboolean pairing_set_controller_device_id(void) {
 
         if(result->status==0) {
             success=TRUE;
-            log_event("device_id_set",
-                "EIR identity source=USB vendor=0x057e product=0x2009 version=0x0001");
+            char identity_detail[128];
+            snprintf(identity_detail,sizeof(identity_detail),
+                "EIR identity source=USB vendor=0x057e product=0x%04x version=0x0001",
+                btohs(request.product));
+            log_event("device_id_set",identity_detail);
         } else {
             char detail[96];
             snprintf(detail,sizeof(detail),
@@ -807,7 +810,7 @@ static gboolean pairing_set_controller_device_id(void) {
 
     if(!success)
         log_event("device_id_error",
-            "Kernel did not accept the Pro Controller Device ID");
+            "Kernel did not accept the requested Nintendo controller Device ID");
 
     return success;
 }
@@ -1047,16 +1050,30 @@ static void changed(GDBusConnection *c,const char *sender,const char *path,const
 
 static gboolean pairing_handoff_reconnect(gpointer unused);
 
+/* Only the two Classic Joy-Con backends in the same session use a shared
+ * adapter profile/agent. Pro Controller and hybrid sessions are unchanged. */
+static gboolean dual_classic_joycon_pair(void) {
+    return controller_type!=CONTROLLER_PRO &&
+        (shared_profile || allowed_adapter[0]);
+}
+
+/* Do not continuously page a Switch that has intentionally disconnected. */
+static unsigned pairing_link_recoveries;
+
 static void reset_link(void) {
     for(int i=0;i<2;i++) {
         if(watches[i]) {g_source_remove(watches[i]);watches[i]=0;}
         if(channels[i]>=0) close(channels[i]);
         channels[i]=-1;
     }
+    gboolean recovery=
+        dual_classic_joycon_pair() &&
+        reconnect_mode &&
+        pairing_link_recoveries<2;
     gboolean should_handoff=
         !shutting_down &&
-        !reconnect_mode &&
-        last_peer[0];
+        last_peer[0] &&
+        (!reconnect_mode || recovery);
 
     peer[0]=0;
     initialized=FALSE;
@@ -1081,14 +1098,28 @@ static void reset_link(void) {
      */
     if(should_handoff && !pairing_reconnect_source) {
         pairing_handoff_attempts=0;
+        if(recovery)
+            pairing_link_recoveries++;
+        else if(!reconnect_mode)
+            pairing_link_recoveries=0;
 
-        log_event(
-            "pairing_handoff",
-            "Pairing completed; scheduling persistent reconnect");
+        /* Nintendo may release both Classic links at once. Let the left
+         * half finish its ACL/authentication before the right begins paging. */
+        guint delay_ms=dual_classic_joycon_pair() &&
+            controller_type==CONTROLLER_JOYCON_R ? 2800 :
+            recovery ? 1500 : 500;
+        char detail[180];
+        snprintf(detail,sizeof(detail),
+            "peer=%s side=%s delay_ms=%u recovery=%u/2",
+            last_peer,
+            controller_type==CONTROLLER_JOYCON_R ? "R" :
+            controller_type==CONTROLLER_JOYCON_L ? "L" : "Pro",
+            delay_ms,pairing_link_recoveries);
+        log_event(recovery?"pairing_link_recovery":"pairing_handoff",detail);
 
         pairing_reconnect_source=
             g_timeout_add(
-                500,
+                delay_ms,
                 pairing_handoff_reconnect,
                 NULL);
     }
@@ -1223,7 +1254,12 @@ static gboolean secure_reconnect_acl(const bdaddr_t *remote,
     request->type=ACL_LINK;
 
     gint64 started=g_get_monotonic_time();
-    gint64 deadline=started+500000;
+    /* The second Classic half may be paged after the Switch has finished
+     * its first controller handoff. Do not misclassify that delay as a
+     * rejected Link Key. The Pro and hybrid timeout remains unchanged. */
+    gint64 acl_wait_us=dual_classic_joycon_pair() &&
+        controller_type==CONTROLLER_JOYCON_R ? 1800000 : 500000;
+    gint64 deadline=started+acl_wait_us;
     gboolean found=FALSE;
     gboolean saw_pending=FALSE;
 
@@ -1699,23 +1735,27 @@ static gboolean pairing_handoff_reconnect(gpointer unused) {
      * Retry a few times automatically instead of exposing this transition
      * to the user.
      */
-    if(pairing_handoff_attempts<5 && !shutting_down) {
+    gboolean right_pair=dual_classic_joycon_pair() &&
+        controller_type==CONTROLLER_JOYCON_R;
+    const guint retry_limit=5;
+    if(pairing_handoff_attempts<retry_limit && !shutting_down) {
+        guint retry_ms=right_pair?1500:1000;
         pairing_reconnect_source=
             g_timeout_add(
-                1000,
+                retry_ms,
                 pairing_handoff_reconnect,
                 NULL);
 
-        log_event(
-            "pairing_handoff_retry",
-            "Switch not ready yet; retrying persistent reconnect");
+        char retry_detail[144];
+        snprintf(retry_detail,sizeof(retry_detail),
+            "attempt=%u/%u next_try_ms=%u peer=%s",
+            pairing_handoff_attempts,retry_limit,retry_ms,last_peer);
+        log_event("pairing_handoff_retry",retry_detail);
     } else {
         /*
-         * Switch 2 advertises No Bonding during Change Grip/Order and rejects
-         * the locally retained key. Keep the already-open listeners usable and
-         * return to inbound SSP instead of leaving the adapter hidden. The
-         * console can then establish a fresh temporary session without asking
-         * the user to restart Controller Studio.
+         * An outbound ACL timeout is not evidence that the Link Key was
+         * rejected. Preserve the private key and leave inbound SSP available
+         * so the Switch can establish another session without a restart.
          */
         gboolean inbound_ready=TRUE;
 
@@ -1744,8 +1784,8 @@ static gboolean pairing_handoff_reconnect(gpointer unused) {
                 ?"pairing_handoff_fallback"
                 :"pairing_handoff_error",
             inbound_ready
-                ?"Stored key rejected; waiting for a fresh inbound Switch pairing"
-                :"Stored key rejected and inbound pairing could not be restored");
+                ?"Automatic handoff failed (see reconnect_*); saved key kept, awaiting inbound pairing"
+                :"Automatic handoff failed and inbound pairing could not be restored");
     }
 
     return G_SOURCE_REMOVE;
