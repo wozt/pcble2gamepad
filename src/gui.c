@@ -44,7 +44,8 @@ typedef struct {
     double mouse_acc_x,mouse_acc_y,mouse_last_x,mouse_last_y,mouse_scroll;
     int mouse_wheel;guint mouse_buttons;guint mouse_grab_attempts;guint mouse_source_side,finish_frames;
 } Ui;
-typedef struct {char *path,*path2;JsonObject *request,*request2;} Request;
+typedef struct {char *path,*path2;JsonObject *request,*request2;
+    const char *left_label,*right_label;} Request;
 static void refresh_bindings(Ui *u);
 static void request(Ui *u,const char *method);
 static void devices_scan(Ui *u);
@@ -1773,7 +1774,8 @@ static void adapters_scan(GtkButton *b,Ui *u) {
 }
 
 static void request_free(gpointer data){Request *r=data;g_free(r->path);g_free(r->path2);json_object_unref(r->request);if(r->request2)json_object_unref(r->request2);g_free(r);}
-static JsonObject *merge_pair(JsonObject *left,JsonObject *right) {
+static JsonObject *merge_pair(JsonObject *left,JsonObject *right,
+                              const char *left_label,const char *right_label) {
     if(!json_object_get_boolean_member_with_default(left,"ok",FALSE))return json_object_ref(left);
     if(!json_object_get_boolean_member_with_default(right,"ok",FALSE))return json_object_ref(right);
     JsonObject *a=json_object_get_object_member(left,"result"),*b=json_object_get_object_member(right,"result");
@@ -1782,7 +1784,9 @@ static JsonObject *merge_pair(JsonObject *left,JsonObject *right) {
     json_object_set_string_member(result,"state",!strcmp(as,"connected")&&!strcmp(bs,"connected")?"connected":"waiting");
     json_object_set_boolean_member(result,"initialized",json_object_get_boolean_member_with_default(a,"initialized",FALSE)&&json_object_get_boolean_member_with_default(b,"initialized",FALSE));
     json_object_set_boolean_member(result,"simulated",json_object_get_boolean_member_with_default(a,"simulated",FALSE)||json_object_get_boolean_member_with_default(b,"simulated",FALSE));
-    g_autofree char *peers=g_strdup_printf("L: %s  ·  R: %s",json_object_get_string_member_with_default(a,"peer","waiting"),json_object_get_string_member_with_default(b,"peer","waiting"));json_object_set_string_member(result,"peer",peers);
+    g_autofree char *peers=g_strdup_printf("%s: %s  ·  %s: %s",
+        left_label,json_object_get_string_member_with_default(a,"peer","waiting"),
+        right_label,json_object_get_string_member_with_default(b,"peer","waiting"));json_object_set_string_member(result,"peer",peers);
     /* Console address for the paired-Switch record, as seen by the left half. */
     json_object_set_string_member(result,"console",json_object_get_string_member_with_default(a,"peer",""));
     json_object_set_string_member(result,"profile","Nintendo Joy-Con Pair");
@@ -1790,14 +1794,20 @@ static JsonObject *merge_pair(JsonObject *left,JsonObject *right) {
     json_object_set_int_member(result,"rx",json_object_get_int_member_with_default(a,"rx",0)+json_object_get_int_member_with_default(b,"rx",0));
     json_object_set_int_member(result,"player_lights",json_object_get_int_member_with_default(a,"player_lights",0)|json_object_get_int_member_with_default(b,"player_lights",0));
     for(int field=0;field<2;field++) {const char *name=field?"sticks":"buttons";JsonArray *source=json_object_get_array_member(a,name),*copy=json_array_new();if(source)for(guint i=0;i<json_array_get_length(source);i++)json_array_add_int_element(copy,json_array_get_int_element(source,i));json_object_set_array_member(result,name,copy);}
-    JsonArray *logs=json_array_new();JsonObject *sides[]={a,b};const char *prefix[]={"L","R"};
+    JsonArray *logs=json_array_new();JsonObject *sides[]={a,b};
+    const char *prefix[]={left_label,right_label};
     for(int side=0;side<2;side++){JsonArray *source=json_object_get_array_member(sides[side],"logs");if(source)for(guint i=0;i<json_array_get_length(source);i++){g_autofree char *line=g_strdup_printf("[%s] %s",prefix[side],json_array_get_string_element(source,i));json_array_add_string_element(logs,line);}}
     json_object_set_array_member(result,"logs",logs);return root;
 }
 static void worker(GTask *task,gpointer source,gpointer data,GCancellable *cancel) {
     (void)source;(void)cancel;Request *r=data;GError *e=NULL;JsonObject *o=jc_client_request_object(r->path,r->request,&e);
-    if(!o){g_task_return_error(task,e);return;}
-    if(r->path2){GError *second_error=NULL;JsonObject *second=jc_client_request_object(r->path2,r->request2?r->request2:r->request,&second_error);if(!second){json_object_unref(o);g_task_return_error(task,second_error);return;}JsonObject *merged=merge_pair(o,second);json_object_unref(o);json_object_unref(second);o=merged;}
+    if(!o){
+        if(e && r->left_label)g_prefix_error(&e,"%s IPC: ",r->left_label);
+        g_task_return_error(task,e);return;
+    }
+    if(r->path2){GError *second_error=NULL;JsonObject *second=jc_client_request_object(r->path2,r->request2?r->request2:r->request,&second_error);if(!second){json_object_unref(o);
+        if(second_error && r->right_label)g_prefix_error(&second_error,"%s IPC: ",r->right_label);
+        g_task_return_error(task,second_error);return;}JsonObject *merged=merge_pair(o,second,r->left_label,r->right_label);json_object_unref(o);json_object_unref(second);o=merged;}
     g_task_return_pointer(task,o,(GDestroyNotify)json_object_unref);
 }
 static gboolean shutdown_error_is_expected(const GError *error) {
@@ -2141,6 +2151,11 @@ static void request(Ui *u,const char *method) {
     if(u->closed)return;
     if(u->busy){if(strcmp(method,"status") && strcmp(method,"input")){g_free(u->pending);u->pending=g_strdup(method);}return;}
     u->busy=TRUE;Request *r=g_new0(Request,1);r->path=g_strdup(u->socket);r->path2=g_strdup(u->socket2);r->request=json_object_new();
+    if(r->path2){
+        guint id=controller_id(u);
+        r->left_label=(id==UI_JC2_PAIR || id==UI_HYBRID_REVERSE)?"JC2-L":"JC1-L";
+        r->right_label=(id==UI_JC2_PAIR || id==UI_HYBRID)?"JC2-R":"JC1-R";
+    }
     if(joycon2_pair_mode(u))r->request2=json_object_new();
     json_object_set_int_member(r->request,"version",1);json_object_set_string_member(r->request,"method",method);
     if(r->request2){json_object_set_int_member(r->request2,"version",1);json_object_set_string_member(r->request2,"method",method);}
@@ -2173,8 +2188,11 @@ static void request(Ui *u,const char *method) {
     } else if(!strcmp(method,"reconnect")) {
         if(u->paired_switch_address)
             json_object_set_string_member(r->request,"address",u->paired_switch_address);
-    } else if(!strcmp(method,"logging"))
-        json_object_set_boolean_member(r->request,"enabled",gtk_switch_get_active(u->traffic_logs));
+    } else if(!strcmp(method,"logging")) {
+        gboolean enabled=gtk_switch_get_active(u->traffic_logs);
+        json_object_set_boolean_member(r->request,"enabled",enabled);
+        if(r->request2)json_object_set_boolean_member(r->request2,"enabled",enabled);
+    }
     u->refs++;GTask *task=g_task_new(NULL,NULL,complete,u);g_task_set_task_data(task,r,request_free);g_task_run_in_thread(task,worker);g_object_unref(task);
 }
 static gboolean tick(gpointer data) {

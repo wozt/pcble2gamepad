@@ -184,7 +184,9 @@ static void log_event(const char *event, const char *detail) {
     }
     GDateTime *now=g_date_time_new_now_utc();
     char *time=g_date_time_format_iso8601(now);
-    g_print("%s %s %s\n",time,event,detail); fflush(stdout);
+    g_print("%s [%s adapter=%s] %s %s\n",time,controller_alias,
+        pairing_local_address[0]?pairing_local_address:"pending",event,detail);
+    fflush(stdout);
     g_free(time); g_date_time_unref(now);
 }
 
@@ -1895,7 +1897,11 @@ static void status_event(void) {
     log_event("status",msg);
 }
 static gboolean stats(gpointer unused) {
-    (void)unused;if(verbose_traffic)status_event();return G_SOURCE_CONTINUE;
+    (void)unused;
+    /* Five-second heartbeat with actual HID TX/RX counters even without
+     * detailed packet tracing. A disconnected Joy-Con stays quiet. */
+    if(verbose_traffic || peer[0])status_event();
+    return G_SOURCE_CONTINUE;
 }
 static gboolean quit(gpointer unused) {(void)unused;g_main_loop_quit(loop);return G_SOURCE_CONTINUE;}
 static gboolean input(GIOChannel *io,GIOCondition cond,gpointer unused) {

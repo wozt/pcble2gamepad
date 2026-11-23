@@ -113,6 +113,10 @@ verify_adapter() {
 }
 verify_adapter "$adapter" "$expected_primary"
 if [[ -n $secondary ]]; then verify_adapter "$secondary" "$expected_secondary"; fi
+printf '[ROUTE] profile=%s primary=%s mac=%s secondary=%s mac=%s mode=%s\n' \
+    "$profile" "$adapter" "${expected_primary:-unknown}" \
+    "${secondary:-none}" "${expected_secondary:-none}" \
+    "$(if [[ -n $reconnect ]]; then printf reconnect; else printf pairing; fi)"
 if [[ $profile == joycon2-left || $profile == joycon2-right ]]; then
     # Joy-Con 2 runs its own BLE stack on an exclusive HCI user channel. It
     # does not touch the bluetoothd configuration; the kernel hands the
@@ -176,9 +180,13 @@ if [[ $profile == joycon2-pair ]]; then
     options=(--vertical --desktop "$PKEXEC_UID")
     [[ -z $reconnect ]] || options+=(--reconnect)
     $verbose && options+=(--verbose)
-    "$jc2" "$adapter" --side left --socket joycon-left.sock "${options[@]}" > "$capture/joycon2-left.log" 2>&1 &
+    echo "[ROUTE] JC2-L BLE adapter=$adapter mac=${expected_primary:-unknown} socket=joycon-left.sock"
+    "$jc2" "$adapter" --side left --socket joycon-left.sock "${options[@]}" \
+        > >(sed -u "s/^/[JC2-L BLE $adapter] /" | tee "$capture/joycon2-left.log") 2>&1 &
     left_pid=$!
-    "$jc2" "$secondary" --side right --socket joycon-right.sock "${options[@]}" > "$capture/joycon2-right.log" 2>&1 &
+    echo "[ROUTE] JC2-R BLE adapter=$secondary mac=${expected_secondary:-unknown} socket=joycon-right.sock"
+    "$jc2" "$secondary" --side right --socket joycon-right.sock "${options[@]}" \
+        > >(sed -u "s/^/[JC2-R BLE $secondary] /" | tee "$capture/joycon2-right.log") 2>&1 &
     right_pid=$!
     left_socket="/run/pcble2gamepad/$PKEXEC_UID/joycon-left.sock"
     right_socket="/run/pcble2gamepad/$PKEXEC_UID/joycon-right.sock"
@@ -191,9 +199,17 @@ if [[ $profile == joycon2-pair ]]; then
     # A pair is a single logical controller: when one backend exits,
     # terminate its partner and let the trap restore both radios.
     set +e
-    wait -n "$left_pid" "$right_pid"
-    status=$?
+    first_pid=
+    if wait -n -p first_pid "$left_pid" "$right_pid"; then
+        status=0
+    else
+        status=$?
+    fi
     set -e
+    first_label=unknown
+    [[ ${first_pid:-} != "$left_pid" ]] || first_label=JC2-L
+    [[ ${first_pid:-} != "$right_pid" ]] || first_label=JC2-R
+    echo "[EXIT] profile=joycon2-pair first=$first_label pid=${first_pid:-none} status=$status"
     exit "$status"
 fi
 [[ $profile == pro || $profile == joycon-pair || $profile == joycon-mixed || $profile == joycon-mixed-reverse ]] || { echo 'Profile must be pro, joycon-pair, joycon-mixed, joycon2-left or joycon2-right' >&2; exit 2; }
@@ -389,37 +405,68 @@ if $desktop; then
         jc2_options=(--side "$jc2_side" --vertical --socket "joycon-$jc2_side.sock" --desktop "$PKEXEC_UID")
         [[ -n $reconnect ]] && jc2_options+=(--reconnect)
         $verbose && jc2_options+=(--verbose)
-        "$jc2" "$secondary" "${jc2_options[@]}" > "$capture/joycon2-$jc2_side.log" 2>&1 &
+        echo "[ROUTE] JC2-${jc2_side^^} BLE adapter=$secondary socket=joycon-$jc2_side.sock"
+        "$jc2" "$secondary" "${jc2_options[@]}" \
+            > >(sed -u "s/^/[JC2-${jc2_side^^} BLE $secondary] /" | tee "$capture/joycon2-$jc2_side.log") 2>&1 &
         jc2_pid=$!;backend_pids+=("$jc2_pid")
         jc2_socket="/run/pcble2gamepad/$PKEXEC_UID/joycon-$jc2_side.sock"
         for _ in {1..100}; do [[ -S $jc2_socket ]] && break; kill -0 "$jc2_pid" 2>/dev/null || break; sleep .05; done
         [[ -S $jc2_socket ]] || { echo 'Joy-Con 2 backend failed to start' >&2; wait "$jc2_pid" || true; exit 1; }
-        "$app" "$adapter" "$sdp" --desktop "$PKEXEC_UID" --type "joycon-$classic_side" "${backend_options[@]}" > "$capture/joycon-$classic_side.log" 2>&1 &
+        echo "[ROUTE] JC1-${classic_side^^} CLASSIC adapter=$adapter socket=joycon-$classic_side.sock"
+        "$app" "$adapter" "$sdp" --desktop "$PKEXEC_UID" --type "joycon-${classic_side:0:1}" "${backend_options[@]}" \
+            > >(sed -u "s/^/[JC1-${classic_side^^} CLASSIC $adapter] /" | tee "$capture/joycon-$classic_side.log") 2>&1 &
         classic_pid=$!;backend_pids+=("$classic_pid")
         set +e
-        wait -n "$classic_pid" "$jc2_pid"
-        first_status=$?
+        first_pid=
+        if wait -n -p first_pid "$classic_pid" "$jc2_pid"; then
+            first_status=0
+        else
+            first_status=$?
+        fi
+        first_label=unknown
+        [[ ${first_pid:-} != "$classic_pid" ]] || first_label="JC1-${classic_side^^} CLASSIC"
+        [[ ${first_pid:-} != "$jc2_pid" ]] || first_label="JC2-${jc2_side^^} BLE"
+        echo "[EXIT] profile=$profile first=$first_label pid=${first_pid:-none} status=$first_status"
         kill -TERM "$classic_pid" "$jc2_pid" 2>/dev/null
-        wait "$classic_pid" 2>/dev/null || true
-        wait "$jc2_pid" 2>/dev/null || true
+        wait "$classic_pid" 2>/dev/null; classic_status=$?
+        wait "$jc2_pid" 2>/dev/null; ble_status=$?
         backend_pids=()
         set -e
-        echo "Hybrid Classic $classic_side / BLE $jc2_side stopped (first exit $first_status)"
-        [[ $first_status == 0 ]]
+        echo "[EXIT] final JC1-${classic_side^^}=$classic_status JC2-${jc2_side^^}=$ble_status"
+        if (( first_status != 0 )); then
+            echo "[DIAG] First backend failed. See its tagged output above and private session logs: $capture"
+        fi
+        exit "$first_status"
     else
-        "$app" "$adapter" "$sdp" --desktop "$PKEXEC_UID" --type joycon-l --allow-adapter "$secondary" "${backend_options[@]}" > "$capture/joycon-left.log" 2>&1 &
+        echo "[ROUTE] JC1-L CLASSIC adapter=$adapter socket=joycon-left.sock"
+        "$app" "$adapter" "$sdp" --desktop "$PKEXEC_UID" --type joycon-l --allow-adapter "$secondary" "${backend_options[@]}" \
+            > >(sed -u "s/^/[JC1-L CLASSIC $adapter] /" | tee "$capture/joycon-left.log") 2>&1 &
         left_pid=$!;backend_pids+=("$left_pid")
         left_socket="/run/pcble2gamepad/$PKEXEC_UID/joycon-left.sock"
         for _ in {1..100}; do [[ -S $left_socket ]] && break; kill -0 "$left_pid" 2>/dev/null || break; sleep .05; done
         [[ -S $left_socket ]] || { echo 'Left Joy-Con backend failed to start' >&2; wait "$left_pid" || true; exit 1; }
-        "$app" "$secondary" "$sdp" --desktop "$PKEXEC_UID" --type joycon-r --allow-adapter "$adapter" --shared-profile "${backend_options[@]}" > "$capture/joycon-right.log" 2>&1 &
+        echo "[ROUTE] JC1-R CLASSIC adapter=$secondary socket=joycon-right.sock"
+        "$app" "$secondary" "$sdp" --desktop "$PKEXEC_UID" --type joycon-r --allow-adapter "$adapter" --shared-profile "${backend_options[@]}" \
+            > >(sed -u "s/^/[JC1-R CLASSIC $secondary] /" | tee "$capture/joycon-right.log") 2>&1 &
         right_pid=$!;backend_pids+=("$right_pid")
         set +e
-        wait "$left_pid"; left_status=$?
-        wait "$right_pid"; right_status=$?
+        first_pid=
+        if wait -n -p first_pid "$left_pid" "$right_pid"; then
+            first_status=0
+        else
+            first_status=$?
+        fi
+        first_label=unknown
+        [[ ${first_pid:-} != "$left_pid" ]] || first_label=JC1-L
+        [[ ${first_pid:-} != "$right_pid" ]] || first_label=JC1-R
+        echo "[EXIT] profile=joycon-pair first=$first_label pid=${first_pid:-none} status=$first_status"
+        kill -TERM "$left_pid" "$right_pid" 2>/dev/null
+        wait "$left_pid" 2>/dev/null; left_status=$?
+        wait "$right_pid" 2>/dev/null; right_status=$?
         backend_pids=()
         set -e
-        [[ $left_status == 0 && $right_status == 0 ]]
+        echo "[EXIT] final JC1-L=$left_status JC1-R=$right_status"
+        exit "$first_status"
     fi
 else
     echo 'Open Change Grip/Order. Commands: buttons HEX HEX HEX; sticks LX LY RX RY; release; status; quit.'

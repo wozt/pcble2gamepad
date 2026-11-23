@@ -74,7 +74,12 @@ static void logf_event(Backend *b, const char *event, const char *format, ...)
     va_start(args, format);
     g_autofree char *detail = g_strdup_vprintf(format, args);
     va_end(args);
-    g_print("%s %s\n", event, detail);
+    GDateTime *now = g_date_time_new_now_utc();
+    char *timestamp = g_date_time_format_iso8601(now);
+    g_print("%s [JC2-%s hci%d] %s %s\n", timestamp,
+            b->side == JC2_LEFT ? "L" : "R", b->device_id, event, detail);
+    g_free(timestamp);
+    g_date_time_unref(now);
     if (b->control)
         pro_control_log(b->control, event, detail);
 }
