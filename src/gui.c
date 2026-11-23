@@ -152,7 +152,7 @@ static void update_controls(Ui *u) {
     if(u->pro_right_grip_color_button)
         gtk_widget_set_sensitive(GTK_WIDGET(u->pro_right_grip_color_button),colors_enabled);
 }
-static void toast(Ui *u,const char *message) {adw_toast_overlay_add_toast(u->toast,adw_toast_new(message));}
+static void toast(Ui *u,const char *message) {adw_toast_overlay_add_toast(u->toast,adw_toast_new(wozt_ui_translate(u->wozt,message)));}
 static void ui_unref(Ui *u) {
     if(--u->refs)return;
     if(u->pad)SDL_GameControllerClose(u->pad);
@@ -187,29 +187,29 @@ static void margin(GtkWidget *w,int m) {gtk_widget_set_margin_start(w,m);gtk_wid
 static GtkWidget *label(const char *s,const char *css) {GtkWidget *w=gtk_label_new(s);gtk_label_set_xalign(GTK_LABEL(w),0);gtk_label_set_wrap(GTK_LABEL(w),TRUE);if(css)gtk_widget_add_css_class(w,css);if(active_wozt)wozt_ui_bind_text(active_wozt,G_OBJECT(w),"label",s);return w;}
 static GtkWidget *row(AdwPreferencesGroup *g,const char *title,const char *subtitle,GtkWidget *suffix) {
     GtkWidget *r=adw_action_row_new();adw_preferences_row_set_title(ADW_PREFERENCES_ROW(r),title);
-    if(subtitle)adw_action_row_set_subtitle(ADW_ACTION_ROW(r),subtitle);
-    if(active_wozt) {
-        wozt_ui_bind_text(active_wozt,G_OBJECT(r),"title",title);
-        if(subtitle)wozt_ui_bind_text(active_wozt,G_OBJECT(r),"subtitle",subtitle);
+    if(subtitle && *subtitle) {
+        gtk_widget_set_tooltip_text(r,subtitle);
+        if(active_wozt)wozt_ui_bind_text(active_wozt,G_OBJECT(r),"tooltip-text",subtitle);
     }
+    if(active_wozt)wozt_ui_bind_text(active_wozt,G_OBJECT(r),"title",title);
     if(suffix){gtk_widget_set_valign(suffix,GTK_ALIGN_CENTER);adw_action_row_add_suffix(ADW_ACTION_ROW(r),suffix);}
     adw_preferences_group_add(g,r);return r;
 }
 static AdwPreferencesGroup *group(GtkWidget *box,const char *title,const char *description) {
     AdwPreferencesGroup *g=ADW_PREFERENCES_GROUP(adw_preferences_group_new());adw_preferences_group_set_title(g,title);
-    if(description)adw_preferences_group_set_description(g,description);
-    if(active_wozt) {
-        wozt_ui_bind_text(active_wozt,G_OBJECT(g),"title",title);
-        if(description)wozt_ui_bind_text(active_wozt,G_OBJECT(g),"description",description);
+    if(description && *description) {
+        gtk_widget_set_tooltip_text(GTK_WIDGET(g),description);
+        if(active_wozt)wozt_ui_bind_text(active_wozt,G_OBJECT(g),"tooltip-text",description);
     }
+    if(active_wozt)wozt_ui_bind_text(active_wozt,G_OBJECT(g),"title",title);
     gtk_box_append(GTK_BOX(box),GTK_WIDGET(g));return g;
 }
 static GtkWidget *page(Ui *u,const char *id,const char *title,const char *subtitle) {
-    GtkWidget *scroll=gtk_scrolled_window_new(),*clamp=adw_clamp_new(),*box=gtk_box_new(GTK_ORIENTATION_VERTICAL,8);
-    adw_clamp_set_maximum_size(ADW_CLAMP(clamp),1100);margin(box,9);
+    GtkWidget *scroll=gtk_scrolled_window_new(),*clamp=adw_clamp_new(),*box=gtk_box_new(GTK_ORIENTATION_VERTICAL,4);
+    adw_clamp_set_maximum_size(ADW_CLAMP(clamp),1280);margin(box,6);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
         GTK_POLICY_NEVER,GTK_POLICY_AUTOMATIC);
-    gtk_box_append(GTK_BOX(box),label(title,"title-1"));gtk_box_append(GTK_BOX(box),label(subtitle,"dim-label"));
+    gtk_box_append(GTK_BOX(box),label(title,"title-1"));gtk_widget_set_tooltip_text(scroll,subtitle);if(active_wozt)wozt_ui_bind_text(active_wozt,G_OBJECT(scroll),"tooltip-text",subtitle);
     adw_clamp_set_child(ADW_CLAMP(clamp),box);gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll),clamp);
     gtk_stack_add_titled(u->stack,scroll,id,title);
     if(active_wozt)wozt_ui_bind_text(active_wozt,
@@ -3107,7 +3107,7 @@ static void activate(GtkApplication *app,gpointer unused) {
     u->status=GTK_LABEL(label("OFFLINE","connection-badge"));gtk_box_append(GTK_BOX(hero),GTK_WIDGET(u->status));u->hero_title=GTK_LABEL(label("Nintendo Switch Pro Controller","title-2"));gtk_box_append(GTK_BOX(hero),GTK_WIDGET(u->hero_title));
     u->peer=GTK_LABEL(label("Start a Bluetooth session to connect your console.","dim-label"));gtk_box_append(GTK_BOX(hero),GTK_WIDGET(u->peer));
     u->drawing=gtk_drawing_area_new();
-    gtk_widget_set_size_request(u->drawing,-1,260);
+    gtk_widget_set_size_request(u->drawing,-1,175);
     gtk_widget_set_focusable(u->drawing,TRUE);
     gtk_drawing_area_set_draw_func(
         GTK_DRAWING_AREA(u->drawing),
@@ -3221,9 +3221,9 @@ static void activate(GtkApplication *app,gpointer unused) {
     const char *controllers[]={"Nintendo Switch Pro Controller","Nintendo Joy-Con Pair","Nintendo Switch 2 Joy-Con 2 (L) · BLE","Nintendo Switch 2 Joy-Con 2 (R) · BLE","Joy-Con 1 (L) Classic + Joy-Con 2 (R) BLE",
         "Nintendo Switch 2 Joy-Con 2 Pair (L/R) · BLE",
         "Joy-Con 2 (L) BLE + Joy-Con 1 (R) Classic",NULL};u->controllers=GTK_DROP_DOWN(gtk_drop_down_new_from_strings(controllers));row(g,"Emulated controller","Sony and Microsoft profiles can be added to the same controller catalog later.",GTK_WIDGET(u->controllers));
-    u->adapter_names=gtk_string_list_new(NULL);u->adapters=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->adapter_names),NULL));gtk_widget_set_size_request(GTK_WIDGET(u->adapters),180,-1);
+    u->adapter_names=gtk_string_list_new(NULL);u->adapters=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->adapter_names),NULL));gtk_widget_set_size_request(GTK_WIDGET(u->adapters),150,-1);
     u->primary_row=row(g,"Primary adapter","Pro Controller, or left Joy-Con. Choose by address; hci numbers can change after reboot.",GTK_WIDGET(u->adapters));
-    u->secondary_names=gtk_string_list_new(NULL);u->secondary=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->secondary_names),NULL));gtk_widget_set_size_request(GTK_WIDGET(u->secondary),180,-1);
+    u->secondary_names=gtk_string_list_new(NULL);u->secondary=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->secondary_names),NULL));gtk_widget_set_size_request(GTK_WIDGET(u->secondary),150,-1);
     u->secondary_row=row(g,"Right Joy-Con adapter","A pair requires a second, distinct Classic Bluetooth identity.",GTK_WIDGET(u->secondary));gtk_widget_set_visible(u->secondary_row,FALSE);
     u->controller_hint=GTK_LABEL(label("Pair / Sync works from Change Grip/Order. Persistent reconnect is experimental because the Switch requests a temporary No Bonding key.","dim-label"));gtk_box_append(GTK_BOX(controls_col),GTK_WIDGET(u->controller_hint));
 
@@ -3266,8 +3266,8 @@ static void activate(GtkApplication *app,gpointer unused) {
     for(int i=0;i<INPUT_BUTTONS;i++){GtkWidget *b=button("",G_CALLBACK(bind_pad),u);u->pad_buttons[i]=GTK_BUTTON(b);g_object_set_data(G_OBJECT(b),"index",GINT_TO_POINTER(i));gtk_widget_add_css_class(b,"binding");row(g,input_action_names[i],NULL,b);}
     box=page(u,"settings","Settings","Fine-tune input response and configure the emulated controller.");
     g=group(box,"Stick response","A radial dead zone avoids drift while preserving direction.");
-    u->deadzone=GTK_SCALE(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,0,50,1));gtk_widget_set_size_request(GTK_WIDGET(u->deadzone),170,-1);gtk_scale_set_digits(u->deadzone,0);row(g,"Dead zone (%)",NULL,GTK_WIDGET(u->deadzone));
-    u->sensitivity=GTK_SCALE(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,25,200,5));gtk_widget_set_size_request(GTK_WIDGET(u->sensitivity),170,-1);gtk_scale_set_digits(u->sensitivity,0);row(g,"Sensitivity (%)",NULL,GTK_WIDGET(u->sensitivity));
+    u->deadzone=GTK_SCALE(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,0,50,1));gtk_widget_set_size_request(GTK_WIDGET(u->deadzone),140,-1);gtk_scale_set_digits(u->deadzone,0);row(g,"Dead zone (%)",NULL,GTK_WIDGET(u->deadzone));
+    u->sensitivity=GTK_SCALE(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,25,200,5));gtk_widget_set_size_request(GTK_WIDGET(u->sensitivity),140,-1);gtk_scale_set_digits(u->sensitivity,0);row(g,"Sensitivity (%)",NULL,GTK_WIDGET(u->sensitivity));
     const char *axes[]={"Invert left X","Invert left Y","Invert right X","Invert right Y"};
     for(int i=0;i<4;i++){u->invert[i]=GTK_SWITCH(gtk_switch_new());row(g,axes[i],NULL,GTK_WIDGET(u->invert[i]));g_signal_connect(u->invert[i],"notify::active",G_CALLBACK(settings_changed),u);}
     u->swap=GTK_SWITCH(gtk_switch_new());row(g,"Swap sticks","Swap the two physical gamepad sticks.",GTK_WIDGET(u->swap));
@@ -3301,6 +3301,6 @@ static void activate(GtkApplication *app,gpointer unused) {
     GtkEventController *mouse=gtk_event_controller_legacy_new();gtk_event_controller_set_propagation_phase(mouse,GTK_PHASE_CAPTURE);
     g_signal_connect(mouse,"event",G_CALLBACK(mouse_event),u);gtk_widget_add_controller(GTK_WIDGET(u->window),mouse);
     GtkEventController *keys=gtk_event_controller_key_new();gtk_event_controller_set_propagation_phase(keys,GTK_PHASE_CAPTURE);g_signal_connect(keys,"key-pressed",G_CALLBACK(key_pressed),u);g_signal_connect(keys,"key-released",G_CALLBACK(key_released),u);gtk_widget_add_controller(GTK_WIDGET(u->window),keys);
-    controller_selected(NULL,NULL,u);u->timer=g_timeout_add(16,tick,u);request(u,"status");gtk_window_present(u->window);
+    controller_selected(NULL,NULL,u);u->timer=g_timeout_add(16,tick,u);request(u,"status");if(u->wozt)wozt_ui_autobind_tree(u->wozt,GTK_WIDGET(u->window));gtk_window_present(u->window);
 }
 int main(int argc,char **argv){AdwApplication *app=adw_application_new("io.github.wozt.pcble2gamepad",G_APPLICATION_DEFAULT_FLAGS);g_signal_connect(app,"activate",G_CALLBACK(activate),NULL);int result=g_application_run(G_APPLICATION(app),argc,argv);g_object_unref(app);SDL_Quit();return result;}

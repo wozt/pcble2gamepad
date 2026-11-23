@@ -198,34 +198,38 @@ static const char *translated(WoztUi *ui,const char *english) {
     }
     return english;
 }
+const char *wozt_ui_translate(WoztUi *ui,const char *english) {
+    return ui?translated(ui,english):english;
+}
 static void apply_theme(WoztUi *ui) {
     const WoztTheme *theme=selected_theme(ui);
     if(!theme)return;
     const char *const *p=(const char *const *)theme->colors;
     g_autofree char *css=g_strdup_printf(
-        "window.wozt-root, .wozt-root { background-color:%s; color:%s; }"
+        "window.wozt-root, .wozt-root { background-color:%s; color:%s; border-radius:0; }"
         ".wozt-root * { font-size:11px; }"
-        ".wozt-root .wozt-bar { background-color:%s; border-bottom:1px solid %s; padding:3px 8px; }"
+        ".wozt-root .wozt-bar { background-color:%s; border-bottom:1px solid %s; padding:2px 6px; }"
         ".wozt-root .wozt-brand { color:%s; font-size:12px; font-weight:700; }"
-        ".wozt-root .studio-nav { background-color:%s; padding:4px; }"
-        ".wozt-root .studio-nav row { padding:2px; margin:1px; border-radius:5px; }"
-        ".wozt-root .hero { background-color:%s; border:1px solid %s; border-radius:8px; padding:8px; }"
+        ".wozt-root .studio-nav { background-color:%s; padding:2px; }"
+        ".wozt-root .studio-nav row { padding:0; margin:0; border-radius:0; }"
+        ".wozt-root .hero { background-color:%s; border:1px solid %s; border-radius:0; padding:4px; }"
         ".wozt-root .title-1, .wozt-root .title-2 { color:%s; font-size:12px; font-weight:700; }"
         ".wozt-root .connection-badge { color:%s; font-size:11px; font-weight:700; }"
         ".wozt-root .dim-label { color:%s; }"
         ".wozt-root button { background-color:%s; color:%s; border:1px solid %s;"
-        " border-radius:5px; min-height:17px; padding:1px 6px; }"
+        " border-radius:0; min-height:17px; padding:1px 5px; }"
         ".wozt-root button:hover { background-color:%s; }"
         ".wozt-root button:active, .wozt-root button:checked { background-color:%s; }"
         ".wozt-root button:focus-visible, .wozt-root entry:focus-visible { outline-color:%s; }"
         ".wozt-root button.suggested-action { background-color:%s; color:%s; }"
-        ".wozt-root .wozt-window-button { min-width:24px; min-height:22px; padding:1px; }"
+        ".wozt-root .wozt-window-button { min-width:24px; min-height:22px; padding:1px; border-radius:0; }"
         ".wozt-root .wozt-close:hover { background-color:%s; }"
         ".wozt-root entry, .wozt-root dropdown, .wozt-root spinbutton {"
-        " background-color:%s; color:%s; border:1px solid %s; border-radius:4px;"
-        " min-height:17px; padding:1px 4px; }"
+        " background-color:%s; color:%s; border:1px solid %s; border-radius:0;"
+        " min-height:17px; padding:0 3px; }"
+        ".wozt-root preferencesgroup dropdown, .wozt-root .card dropdown { border:0; background-color:transparent; }"
         ".wozt-root frame, .wozt-root preferencesgroup, .wozt-root .card {"
-        " border-radius:8px; border-color:%s; margin:1px; padding:2px; }"
+        " border-radius:0; border-color:%s; margin:0; padding:1px; }"
         ".wozt-root .binding { min-width:72px; }"
         ".wozt-root .error { color:%s; }"
         "popover > contents, tooltip, dialog { background-color:%s; color:%s; }"
@@ -247,6 +251,46 @@ void wozt_ui_bind_text(WoztUi *ui,GObject *object,
     binding->property=g_strdup(property);
     binding->original=g_strdup(english);
     g_ptr_array_add(ui->bindings,binding);
+}
+static void refresh_translations(WoztUi *ui);
+static gboolean binding_exists(WoztUi *ui,GObject *object,const char *property) {
+    for(guint i=0;i<ui->bindings->len;i++) {
+        WoztBinding *b=g_ptr_array_index(ui->bindings,i);
+        GObject *bound=g_weak_ref_get(&b->object);
+        if(bound==object && !g_strcmp0(b->property,property)) {
+            if(bound)g_object_unref(bound);
+            return TRUE;
+        }
+        if(bound)g_object_unref(bound);
+    }
+    return FALSE;
+}
+static void maybe_bind_property(WoztUi *ui,GObject *object,const char *property) {
+    if(!ui || !object || !property || !*property)return;
+    if(binding_exists(ui,object,property))return;
+    GParamSpec *pspec=g_object_class_find_property(G_OBJECT_GET_CLASS(object),property);
+    if(!pspec || !(pspec->flags&G_PARAM_READABLE) || !(pspec->flags&G_PARAM_WRITABLE) ||
+       !G_IS_PARAM_SPEC_STRING(pspec))return;
+    char *value=NULL;
+    g_object_get(object,property,&value,NULL);
+    if(value && *value)wozt_ui_bind_text(ui,object,property,value);
+    g_free(value);
+}
+static void autobind_widget(WoztUi *ui,GtkWidget *widget) {
+    if(!ui || !widget)return;
+    GObject *object=G_OBJECT(widget);
+    maybe_bind_property(ui,object,"label");
+    maybe_bind_property(ui,object,"title");
+    maybe_bind_property(ui,object,"subtitle");
+    maybe_bind_property(ui,object,"description");
+    maybe_bind_property(ui,object,"tooltip-text");
+    maybe_bind_property(ui,object,"placeholder-text");
+    for(GtkWidget *child=gtk_widget_get_first_child(widget);child;child=gtk_widget_get_next_sibling(child))
+        autobind_widget(ui,child);
+}
+void wozt_ui_autobind_tree(WoztUi *ui,GtkWidget *root) {
+    autobind_widget(ui,root);
+    refresh_translations(ui);
 }
 static void refresh_translations(WoztUi *ui) {
     for(guint i=0;i<ui->bindings->len;i++) {
@@ -546,7 +590,7 @@ void wozt_ui_tick(WoztUi *ui,int width) {
         ui->last_width_class=layout_class+1;
         if(ui->columns)
             gtk_orientable_set_orientation(GTK_ORIENTABLE(ui->columns),
-                width<930?GTK_ORIENTATION_VERTICAL:GTK_ORIENTATION_HORIZONTAL);
+                GTK_ORIENTATION_VERTICAL);
         if(ui->sidebar)gtk_widget_set_visible(ui->sidebar,width>=1050);
         if(ui->compact_navigation)
             gtk_widget_set_visible(ui->compact_navigation,width<1050);

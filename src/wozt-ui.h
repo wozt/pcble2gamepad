@@ -16,3 +16,5 @@ void wozt_ui_set_responsive(WoztUi *ui, GtkWidget *columns,
 void wozt_ui_tick(WoztUi *ui, int width);
 void wozt_ui_bind_text(WoztUi *ui, GObject *object,
                        const char *property, const char *english);
+void wozt_ui_autobind_tree(WoztUi *ui, GtkWidget *root);
+const char *wozt_ui_translate(WoztUi *ui,const char *english);
