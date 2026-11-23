@@ -1112,6 +1112,97 @@ static gboolean dual_classic_joycon_pair(void) {
         (shared_profile || allowed_adapter[0]);
 }
 
+/* The dual-Classic profile needs two distinct discoverable *gamepads*.
+ * After one SDP registration, bluetoothd can recalculate the other HCI
+ * controller's class; a previous trace reported hci1 Adapter1.Class=0x700000
+ * rather than 0x002508. Check the physical HCI value, not only D-Bus.
+ *
+ * Keep Bluetooth service-class bits (upper byte) untouched, reassert only
+ * the gamepad/device-class bits, and never loop indefinitely against BlueZ.
+ * This is a discovery-only guard: do not modify an active HID connection.
+ */
+static guint pair_cod_guard_source;
+static unsigned pair_cod_guard_repairs;
+static gboolean pair_cod_guard_sampled;
+
+static gboolean pair_cod_guard(gpointer unused) {
+    (void)unused;
+    if(shutting_down || !dual_classic_joycon_pair()) {
+        pair_cod_guard_source=0;
+        return G_SOURCE_REMOVE;
+    }
+
+    /* No mutation during an ACL/L2CAP connection or outgoing handoff. */
+    if(reconnect_mode || channels[0]>=0 || channels[1]>=0 ||
+       pairing_mgmt_index<0)
+        return G_SOURCE_CONTINUE;
+
+    int fd=hci_open_dev(pairing_mgmt_index);
+    if(fd<0) {
+        if(!pair_cod_guard_sampled) {
+            log_event("pair_cod_probe_error",g_strerror(errno));
+            pair_cod_guard_sampled=TRUE;
+        }
+        return G_SOURCE_CONTINUE;
+    }
+
+    uint8_t bytes[3]={0};
+    if(hci_read_class_of_dev(fd,bytes,800)<0) {
+        if(!pair_cod_guard_sampled) {
+            log_event("pair_cod_probe_error",g_strerror(errno));
+            pair_cod_guard_sampled=TRUE;
+        }
+        hci_close_dev(fd);
+        return G_SOURCE_CONTINUE;
+    }
+
+    unsigned actual=(unsigned)bytes[0] |
+                    ((unsigned)bytes[1]<<8) |
+                    ((unsigned)bytes[2]<<16);
+
+    if(!pair_cod_guard_sampled) {
+        GVariant *reported=property("Class");
+        unsigned bluez_class=reported?g_variant_get_uint32(reported):0;
+        char msg[160];
+        snprintf(msg,sizeof(msg),
+            "side=%s HCI=0x%06x BlueZ=0x%06x desired_device=0x2508",
+            controller_type==CONTROLLER_JOYCON_L?"L":"R",
+            actual,bluez_class);
+        log_event("pair_cod_comparison",msg);
+        if(reported)g_variant_unref(reported);
+        pair_cod_guard_sampled=TRUE;
+    }
+
+    if((actual&0x00ffffu)!=0x002508u) {
+        if(pair_cod_guard_repairs>=5) {
+            log_event("pair_cod_guard_exhausted",
+                "HCI class repeatedly overwritten; no more writes in this session");
+            hci_close_dev(fd);
+            pair_cod_guard_source=0;
+            return G_SOURCE_REMOVE;
+        }
+
+        /* Preserve service-class flags; do not advertise services by guess. */
+        unsigned desired=(actual&0xff0000u)|0x002508u;
+        char msg[160];
+        if(hci_write_class_of_dev(fd,desired,800)<0) {
+            snprintf(msg,sizeof(msg),
+                "HCI class update 0x%06x -> 0x%06x failed: %s",
+                actual,desired,g_strerror(errno));
+            log_event("pair_cod_repair_error",msg);
+        } else {
+            pair_cod_guard_repairs++;
+            snprintf(msg,sizeof(msg),
+                "HCI class corrected 0x%06x -> 0x%06x (%u/5)",
+                actual,desired,pair_cod_guard_repairs);
+            log_event("pair_cod_repaired",msg);
+        }
+    }
+
+    hci_close_dev(fd);
+    return G_SOURCE_CONTINUE;
+}
+
 /* Do not continuously page a Switch that has intentionally disconnected. */
 static unsigned pairing_link_recoveries;
 /* One short initial input-report burst on the two-Classic-Joy-Con profile,
@@ -3628,6 +3719,14 @@ int main(int argc,char **argv) {
         }
     }
     g_timeout_add(15,tick,NULL);g_timeout_add_seconds(5,stats,NULL);
+    if(dual_classic_joycon_pair() && !reconnect_mode) {
+        /* The two independent backends can start in either order. Observe
+         * any post-SDP BlueZ device-class reconfiguration on each adapter. */
+        log_event("pair_cod_guard_armed",
+            "Compare HCI and BlueZ class; repair gamepad device bits if needed");
+        pair_cod_guard(NULL);
+        pair_cod_guard_source=g_timeout_add(400,pair_cod_guard,NULL);
+    }
     if(!desktop_mode)g_timeout_add_seconds(600,quit,NULL);
     GIOChannel *io=g_io_channel_unix_new(STDIN_FILENO);
     g_io_channel_set_flags(io,g_io_channel_get_flags(io)|G_IO_FLAG_NONBLOCK,NULL);
@@ -3635,6 +3734,11 @@ int main(int argc,char **argv) {
     g_main_loop_run(loop);g_io_channel_unref(io);g_main_loop_unref(loop);result=0;
 cleanup:
     shutting_down=TRUE;
+
+    if(pair_cod_guard_source) {
+        g_source_remove(pair_cod_guard_source);
+        pair_cod_guard_source=0;
+    }
 
     if(pairing_reconnect_source) {
         g_source_remove(pairing_reconnect_source);
