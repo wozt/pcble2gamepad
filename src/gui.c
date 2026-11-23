@@ -45,7 +45,7 @@ typedef struct {
     int mouse_wheel;guint mouse_buttons;guint mouse_grab_attempts;guint mouse_source_side,finish_frames;
 } Ui;
 typedef struct {char *path,*path2;JsonObject *request,*request2;
-    const char *left_label,*right_label;} Request;
+    const char *left_label,*right_label;gboolean parallel_pair;} Request;
 static void refresh_bindings(Ui *u);
 static void request(Ui *u,const char *method);
 static void devices_scan(Ui *u);
@@ -1799,15 +1799,65 @@ static JsonObject *merge_pair(JsonObject *left,JsonObject *right,
     for(int side=0;side<2;side++){JsonArray *source=json_object_get_array_member(sides[side],"logs");if(source)for(guint i=0;i<json_array_get_length(source);i++){g_autofree char *line=g_strdup_printf("[%s] %s",prefix[side],json_array_get_string_element(source,i));json_array_add_string_element(logs,line);}}
     json_object_set_array_member(result,"logs",logs);return root;
 }
+/* Joy-Con 1 pair: independent IPC sockets can block for up to two
+ * seconds each. Dispatch the right socket in parallel with the left one,
+ * but keep a single GTask and merge only after both replies are received. */
+typedef struct {
+    const char *path;
+    JsonObject *request;
+    JsonObject *response;
+    GError *error;
+} ClassicPairCall;
+static gpointer classic_pair_call(gpointer data) {
+    ClassicPairCall *call=data;
+    call->response=jc_client_request_object(call->path,call->request,&call->error);
+    return NULL;
+}
 static void worker(GTask *task,gpointer source,gpointer data,GCancellable *cancel) {
-    (void)source;(void)cancel;Request *r=data;GError *e=NULL;JsonObject *o=jc_client_request_object(r->path,r->request,&e);
-    if(!o){
-        if(e && r->left_label)g_prefix_error(&e,"%s IPC: ",r->left_label);
-        g_task_return_error(task,e);return;
+    (void)source;(void)cancel;
+    Request *r=data;
+    ClassicPairCall right={0};
+    GThread *parallel=NULL;
+    if(r->parallel_pair && r->path2) {
+        right.path=r->path2;
+        right.request=r->request2;
+        parallel=g_thread_new("jc1-right-ipc",classic_pair_call,&right);
     }
-    if(r->path2){GError *second_error=NULL;JsonObject *second=jc_client_request_object(r->path2,r->request2?r->request2:r->request,&second_error);if(!second){json_object_unref(o);
-        if(second_error && r->right_label)g_prefix_error(&second_error,"%s IPC: ",r->right_label);
-        g_task_return_error(task,second_error);return;}JsonObject *merged=merge_pair(o,second,r->left_label,r->right_label);json_object_unref(o);json_object_unref(second);o=merged;}
+    GError *e=NULL;
+    JsonObject *o=jc_client_request_object(r->path,r->request,&e);
+    if(parallel)g_thread_join(parallel);
+    if(!o) {
+        if(right.response)json_object_unref(right.response);
+        g_clear_error(&right.error);
+        if(!e)g_set_error_literal(&e,G_IO_ERROR,G_IO_ERROR_FAILED,"JC1-L IPC failed");
+        if(r->left_label)g_prefix_error(&e,"%s IPC: ",r->left_label);
+        g_task_return_error(task,e);
+        return;
+    }
+    if(r->path2) {
+        GError *second_error=NULL;
+        JsonObject *second=NULL;
+        if(parallel) {
+            second=right.response;
+            second_error=right.error;
+        } else {
+            second=jc_client_request_object(
+                r->path2,r->request2?r->request2:r->request,&second_error);
+        }
+        if(!second) {
+            json_object_unref(o);
+            if(!second_error)
+                g_set_error_literal(&second_error,G_IO_ERROR,G_IO_ERROR_FAILED,"JC1-R IPC failed");
+            if(r->right_label)g_prefix_error(&second_error,"%s IPC: ",r->right_label);
+            g_task_return_error(task,second_error);
+            return;
+        }
+        g_clear_error(&second_error);
+        JsonObject *merged=merge_pair(o,second,r->left_label,r->right_label);
+        json_object_unref(o);
+        json_object_unref(second);
+        o=merged;
+    }
     g_task_return_pointer(task,o,(GDestroyNotify)json_object_unref);
 }
 static gboolean shutdown_error_is_expected(const GError *error) {
@@ -2155,8 +2205,10 @@ static void request(Ui *u,const char *method) {
         guint id=controller_id(u);
         r->left_label=(id==UI_JC2_PAIR || id==UI_HYBRID_REVERSE)?"JC2-L":"JC1-L";
         r->right_label=(id==UI_JC2_PAIR || id==UI_HYBRID)?"JC2-R":"JC1-R";
+        r->parallel_pair=(id==UI_JC1_PAIR);
     }
-    if(joycon2_pair_mode(u))r->request2=json_object_new();
+    /* Separate JSON objects are immutable while the two worker threads read. */
+    if(joycon2_pair_mode(u) || r->parallel_pair)r->request2=json_object_new();
     json_object_set_int_member(r->request,"version",1);json_object_set_string_member(r->request,"method",method);
     if(r->request2){json_object_set_int_member(r->request2,"version",1);json_object_set_string_member(r->request2,"method",method);}
     if(!strcmp(method,"input")){
@@ -2223,10 +2275,15 @@ static gboolean tick(gpointer data) {
             u->auto_validate=FALSE;
             toast(u,"L+R sent. Press A to finish Change Grip/Order.");
         } else if(u->online && u->connected && u->remote_initialized) {
-            /* Hold L+R (SL+SR on a sideways Joy-Con 2) for 1.5 s, twice, 6 s apart. */
+            /* Faster only for the dual-Classic profile. Keep the
+             * validated timing of BLE pair / hybrid profiles unchanged. */
             gint64 now=g_get_monotonic_time();
-            if(!u->validate_at)u->validate_at=now+1500000;
-            if(now>=u->validate_at+1500000){u->validate_attempts++;u->validate_at=now+4500000;}
+            gboolean fast_classic=controller_id(u)==UI_JC1_PAIR;
+            gint64 prepare_us=fast_classic?400000:1500000;
+            gint64 hold_us=fast_classic?950000:1500000;
+            gint64 gap_us=fast_classic?1100000:4500000;
+            if(!u->validate_at)u->validate_at=now+prepare_us;
+            if(now>=u->validate_at+hold_us){u->validate_attempts++;u->validate_at=now+gap_us;}
             else if(now>=u->validate_at){u->frame.buttons[0]|=0x40;u->frame.buttons[2]|=0x40;force=TRUE;}
         }
     }

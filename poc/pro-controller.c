@@ -29,6 +29,8 @@ static char adapter[64], allowed_adapter[64], peer[18], last_peer[18];
 static ControllerType controller_type=CONTROLLER_PRO;
 static const char *controller_alias="Pro Controller",*control_socket="pro.sock";
 static gboolean shared_profile;
+/* Pair-only: JC1-L is the single BlueZ default agent for hci0+hci1. */
+static gboolean shared_agent;
 static gboolean dual_classic_joycon_pair(void); /* Used by early HCI monitor callback. */
 static gboolean verbose_traffic;
 static gboolean reconnect_mode;
@@ -1161,11 +1163,12 @@ static void reset_link(void) {
         else if(!reconnect_mode)
             pairing_link_recoveries=0;
 
-        /* Nintendo may release both Classic links at once. Let the left
-         * half finish its ACL/authentication before the right begins paging. */
-        guint delay_ms=dual_classic_joycon_pair() &&
-            controller_type==CONTROLLER_JOYCON_R ? 2800 :
-            recovery ? 1500 : 500;
+        /* Both radios are independent. Resume promptly once Change
+         * Grip/Order closes its temporary links. A small right-hand
+         * offset reduces ACL collisions without a 2.8-second stall. */
+        guint delay_ms=dual_classic_joycon_pair()
+            ? (controller_type==CONTROLLER_JOYCON_R ? 550 : 250)
+            : (recovery ? 1500 : 500);
         char detail[180];
         snprintf(detail,sizeof(detail),
             "peer=%s side=%s delay_ms=%u recovery=%u/2",
@@ -1701,15 +1704,13 @@ static gboolean connect_outbound(const bdaddr_t *local,
      * device-info/output initialization. The older 1-Hz pre-RX cadence can
      * miss the entire ~250-ms lifetime observed for the second Joy-Con. */
     if(dual_classic_joycon_pair() && reconnect_mode) {
-        /* Real Joy-Con 1 starts in simple HID mode (0x3f) and changes to
-         * full input mode (0x30) when the Switch sends subcommand 0x03.
-         * Do not stream full-mode reports before the console requests them.
-         * The fast V2 0x30 burst did not prevent the remote 0x13 disconnect. */
-        state.mode=0x3f;
+        /* V3 0x3f startup regressed real-world pairing. Restore
+         * the validated Joy-Con 0x30 HID format while improving
+         * handoff orchestration. Keep the short 10-Hz probe. */
+        state.mode=0x30;
         paired_classic_probe_until=g_get_monotonic_time()+1500000;
-        log_event("pair_reconnect_simple_hid",
-            "Classic pair: starting with 0x3f simple input reports at 10 Hz; "
-            "switches to 0x30 only after Switch HID subcommand 0x03");
+        log_event("pair_reconnect_hid",
+            "Classic pair: restored 0x30 report format, 10-Hz initial handshake");
     } else {
         paired_classic_probe_until=0;
     }
@@ -1765,13 +1766,16 @@ static gboolean pairing_handoff_reconnect(gpointer unused) {
         return G_SOURCE_REMOVE;
     }
 
-    set_property(
-        "Pairable",
-        g_variant_new_boolean(FALSE));
-
-    set_property(
-        "Discoverable",
-        g_variant_new_boolean(FALSE));
+    if(dual_classic_joycon_pair()) {
+        /* Discoverable=false also makes the adapters
+         * Connectable=false on our BlueZ stack. Keep both
+         * Classic halves reachable throughout the handoff. */
+        log_event("pair_handoff_visibility",
+            "Keeping both Joy-Con Classic adapters connectable during handoff");
+    } else {
+        set_property("Pairable",g_variant_new_boolean(FALSE));
+        set_property("Discoverable",g_variant_new_boolean(FALSE));
+    }
 
     reconnect_mode=TRUE;
     g_strlcpy(
@@ -1814,7 +1818,8 @@ static gboolean pairing_handoff_reconnect(gpointer unused) {
         controller_type==CONTROLLER_JOYCON_R;
     const guint retry_limit=5;
     if(pairing_handoff_attempts<retry_limit && !shutting_down) {
-        guint retry_ms=right_pair?1500:1000;
+        guint retry_ms=dual_classic_joycon_pair()
+            ? (right_pair ? 900 : 750) : 1000;
         pairing_reconnect_source=
             g_timeout_add(
                 retry_ms,
@@ -3303,6 +3308,7 @@ int main(int argc,char **argv) {
         } else if(!strcmp(argv[i],"--allow-adapter") && i+1<argc && g_regex_match_simple("^hci[0-9]+$",argv[i+1],0,0)) {
             snprintf(allowed_adapter,sizeof(allowed_adapter),"/org/bluez/%s/dev_",argv[++i]);
         } else if(!strcmp(argv[i],"--shared-profile"))shared_profile=TRUE;
+        else if(!strcmp(argv[i],"--shared-agent"))shared_agent=TRUE;
         else if(!strcmp(argv[i],"--verbose"))verbose_traffic=TRUE;
         else if(!strcmp(argv[i],"--body-color") && i+1<argc) {
             if(!parse_rgb_color(argv[++i],configured_body_color)) {
@@ -3334,7 +3340,7 @@ int main(int argc,char **argv) {
     }
     desktop_requested=desktop_mode;
     if(argc<3 || !g_regex_match_simple("^hci[0-9]+$",argv[1],0,0) || (desktop_mode && getuid()!=0)) {
-        fprintf(stderr,"Usage: %s hciN SDP_XML [--desktop UID] [--type pro|joycon-l|joycon-r] [--allow-adapter hciN] [--shared-profile] [--verbose] [--body-color RRGGBB] [--button-color RRGGBB] [--left-grip-color RRGGBB] [--right-grip-color RRGGBB] [--reconnect MAC]\n",argv[0]);return 2;
+        fprintf(stderr,"Usage: %s hciN SDP_XML [--desktop UID] [--type pro|joycon-l|joycon-r] [--allow-adapter hciN] [--shared-profile] [--shared-agent] [--verbose] [--body-color RRGGBB] [--button-color RRGGBB] [--left-grip-color RRGGBB] [--right-grip-color RRGGBB] [--reconnect MAC]\n",argv[0]);return 2;
     }
     int result=1,dd=-1;uint8_t old_class[3]={0};gboolean have_class=FALSE;
     GVariant *saved[6]={0};const char *keys[]={"Powered","Alias","Pairable","Discoverable","PairableTimeout","DiscoverableTimeout"};
@@ -3431,12 +3437,19 @@ int main(int argc,char **argv) {
             goto cleanup;
         registered_agent=TRUE;
 
-        if(!invoke("/org/bluez","org.bluez.AgentManager1","RequestDefaultAgent",
-                   g_variant_new("(o)",ROOT "/agent")))
-            goto cleanup;
-
-        log_event("agent_registered",
-            "NoInputNoOutput; Just Works SSP like a real Pro Controller");
+        if(!shared_agent) {
+            /* Only JC1-L requests the system-wide BlueZ default
+             * agent. Its --allow-adapter hci1 authorizes both
+             * controller identities. JC1-R must not replace it. */
+            if(!invoke("/org/bluez","org.bluez.AgentManager1","RequestDefaultAgent",
+                       g_variant_new("(o)",ROOT "/agent")))
+                goto cleanup;
+            log_event("agent_registered",
+                "NoInputNoOutput; default agent for the selected Classic controllers");
+        } else {
+            log_event("agent_shared",
+                "Registered secondary agent, leaving BlueZ default agent owned by JC1-L");
+        }
 
         char *record=NULL;
         if(!g_file_get_contents(argv[2],&record,NULL,&err))

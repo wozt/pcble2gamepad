@@ -438,17 +438,29 @@ if $desktop; then
         fi
         exit "$first_status"
     else
-        echo "[ROUTE] JC1-L CLASSIC adapter=$adapter socket=joycon-left.sock"
+        # Both Classic radios initialize concurrently, like the two
+        # independent BLE radios in the working Joy-Con 2 profile. JC1-L
+        # owns the global BlueZ default agent and the shared SDP record.
+        echo "[ROUTE] JC1-L CLASSIC adapter=$adapter socket=joycon-left.sock role=default-agent+SDP"
         "$app" "$adapter" "$sdp" --desktop "$PKEXEC_UID" --type joycon-l --allow-adapter "$secondary" "${backend_options[@]}" \
             > >(sed -u "s/^/[JC1-L CLASSIC $adapter] /" | tee "$capture/joycon-left.log") 2>&1 &
         left_pid=$!;backend_pids+=("$left_pid")
-        left_socket="/run/pcble2gamepad/$PKEXEC_UID/joycon-left.sock"
-        for _ in {1..100}; do [[ -S $left_socket ]] && break; kill -0 "$left_pid" 2>/dev/null || break; sleep .05; done
-        [[ -S $left_socket ]] || { echo 'Left Joy-Con backend failed to start' >&2; wait "$left_pid" || true; exit 1; }
-        echo "[ROUTE] JC1-R CLASSIC adapter=$secondary socket=joycon-right.sock"
-        "$app" "$secondary" "$sdp" --desktop "$PKEXEC_UID" --type joycon-r --allow-adapter "$adapter" --shared-profile "${backend_options[@]}" \
+        echo "[ROUTE] JC1-R CLASSIC adapter=$secondary socket=joycon-right.sock role=shared-agent+SDP"
+        "$app" "$secondary" "$sdp" --desktop "$PKEXEC_UID" --type joycon-r --allow-adapter "$adapter" --shared-profile --shared-agent "${backend_options[@]}" \
             > >(sed -u "s/^/[JC1-R CLASSIC $secondary] /" | tee "$capture/joycon-right.log") 2>&1 &
         right_pid=$!;backend_pids+=("$right_pid")
+        left_socket="/run/pcble2gamepad/$PKEXEC_UID/joycon-left.sock"
+        right_socket="/run/pcble2gamepad/$PKEXEC_UID/joycon-right.sock"
+        for _ in {1..100}; do
+            [[ -S $left_socket && -S $right_socket ]] && break
+            if ! kill -0 "$left_pid" 2>/dev/null || ! kill -0 "$right_pid" 2>/dev/null; then break; fi
+            sleep .05
+        done
+        [[ -S $left_socket && -S $right_socket ]] || {
+            echo 'Joy-Con 1 pair startup failed: one of the two IPC sockets is missing' >&2
+            exit 1
+        }
+        echo '[ROUTE] JC1-L and JC1-R IPC ready (parallel startup)'
         set +e
         first_pid=
         if wait -n -p first_pid "$left_pid" "$right_pid"; then
