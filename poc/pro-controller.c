@@ -1211,6 +1211,13 @@ static unsigned pairing_link_recoveries;
 static gint64 paired_classic_probe_until;
 
 static void reset_link(void) {
+    /* V7: An outbound ACL can authenticate and open both HID sockets, yet
+     * the Switch may close it before sending a single Nintendo command.
+     * This is not a usable reconnect. Do not page it again immediately:
+     * keep the saved key and incoming listeners for Switch-led pairing. */
+    gboolean rejected_before_hid=
+        dual_classic_joycon_pair() && reconnect_mode &&
+        channels[0]>=0 && channels[1]>=0 && !saw_interrupt_output;
     for(int i=0;i<2;i++) {
         if(watches[i]) {g_source_remove(watches[i]);watches[i]=0;}
         if(channels[i]>=0) close(channels[i]);
@@ -1219,6 +1226,7 @@ static void reset_link(void) {
     gboolean recovery=
         dual_classic_joycon_pair() &&
         reconnect_mode &&
+        !rejected_before_hid &&
         pairing_link_recoveries<2;
     gboolean should_handoff=
         !shutting_down &&
@@ -1241,6 +1249,16 @@ static void reset_link(void) {
     log_event("link_closed",reconnect_mode
         ?"Paired Switch disconnected; start Reconnect again to initiate a new connection"
         :"Initial pairing link closed");
+
+    if(rejected_before_hid) {
+        /* Preserve the same discoverable/Pairable settings from the V5
+         * handoff. Do not toggle Class of Device or clear stored Link Keys. */
+        pairing_link_recoveries=2;
+        reconnect_mode=FALSE;
+        log_event("pair_resume_passive",
+            "Outbound HID link closed before first Switch report; "
+            "no further automatic paging, waiting for inbound Switch connection");
+    }
 
     /*
      * Nintendo completes the temporary Change Grip/Order link and can then

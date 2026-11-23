@@ -10,6 +10,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <glib/gstdio.h>
+#include <string.h>
 
 typedef struct {
     int refs;gboolean closed,closing,stopping,busy,online,connected,loading;
@@ -43,6 +44,10 @@ typedef struct {
     gboolean mouse_captured,mouse_grabbed,mouse_have_last;
     double mouse_acc_x,mouse_acc_y,mouse_last_x,mouse_last_y,mouse_scroll;
     int mouse_wheel;guint mouse_buttons;guint mouse_grab_attempts;guint mouse_source_side,finish_frames;
+    /* Joy-Con 1 only: per-adapter status/heartbeat, independent of u->busy. */
+    gboolean jc1_watch_seen[2],jc1_watch_busy[2],jc1_watch_online[2];
+    gboolean jc1_watch_connected[2],jc1_watch_initialized[2];
+    guint jc1_watch_ticks,jc1_watch_generation;
 } Ui;
 typedef struct {char *path,*path2;JsonObject *request,*request2;
     const char *left_label,*right_label;gboolean parallel_pair;} Request;
@@ -1813,6 +1818,124 @@ static gpointer classic_pair_call(gpointer data) {
     call->response=jc_client_request_object(call->path,call->request,&call->error);
     return NULL;
 }
+/* V7: The classic Joy-Con pair is two independent IPC endpoints. The existing
+ * merged UI input request must never be the only heartbeat for both devices.
+ * Keep one in-flight status request per socket, entirely outside u->busy. */
+typedef struct {
+    Ui *ui;
+    guint generation;
+    guint side;
+    char *path;
+} Jc1WatchRequest;
+
+static void jc1_watch_request_free(gpointer data) {
+    Jc1WatchRequest *request=data;
+    g_free(request->path);
+    g_free(request);
+}
+
+static void jc1_watch_refresh(Ui *u) {
+    if(u->closed || u->closing || u->stopping || !u->launcher ||
+       controller_id(u)!=UI_JC1_PAIR ||
+       (!u->jc1_watch_seen[0] && !u->jc1_watch_seen[1]))return;
+
+    const gboolean left=u->jc1_watch_connected[0];
+    const gboolean right=u->jc1_watch_connected[1];
+    u->online=u->jc1_watch_online[0] || u->jc1_watch_online[1];
+    u->connected=left && right;
+    u->remote_initialized=u->jc1_watch_initialized[0] &&
+                          u->jc1_watch_initialized[1];
+
+    gtk_label_set_text(u->status,
+        left && right ? "CONNECTED" :
+        left ? "JC1-L CONNECTED | JC1-R WAITING" :
+        right ? "JC1-L WAITING | JC1-R CONNECTED" :
+        u->online ? "WAITING FOR JOY-CON LINKS" :
+                    "WAITING FOR JOY-CON BACKENDS");
+}
+
+static void jc1_watch_worker(GTask *task,gpointer source,gpointer data,
+                             GCancellable *cancel) {
+    (void)source;(void)cancel;
+    Jc1WatchRequest *req=data;
+    JsonObject *status=json_object_new();
+    json_object_set_int_member(status,"version",1);
+    json_object_set_string_member(status,"method","status");
+    GError *error=NULL;
+    JsonObject *answer=jc_client_request_object(req->path,status,&error);
+    json_object_unref(status);
+    if(answer)
+        g_task_return_pointer(task,answer,(GDestroyNotify)json_object_unref);
+    else if(error)
+        g_task_return_error(task,error);
+    else
+        g_task_return_new_error(task,G_IO_ERROR,G_IO_ERROR_FAILED,
+                                "Joy-Con status IPC returned no response");
+}
+
+static void jc1_watch_complete(GObject *source,GAsyncResult *result,
+                               gpointer data) {
+    (void)source;(void)data;
+    GTask *task=G_TASK(result);
+    Jc1WatchRequest *req=g_task_get_task_data(task);
+    Ui *u=req->ui;
+    g_autoptr(GError) error=NULL;
+    g_autoptr(JsonObject) answer=g_task_propagate_pointer(task,&error);
+
+    if(req->generation==u->jc1_watch_generation) {
+        u->jc1_watch_busy[req->side]=FALSE;
+        if(!u->closed && !u->closing && !u->stopping && u->launcher &&
+           controller_id(u)==UI_JC1_PAIR) {
+            gboolean online=answer &&
+                json_object_get_boolean_member_with_default(answer,"ok",FALSE);
+            gboolean connected=FALSE,initialized=FALSE;
+            if(online) {
+                JsonObject *state=json_object_get_object_member(answer,"result");
+                if(state) {
+                    const char *value=json_object_get_string_member_with_default(
+                        state,"state","waiting");
+                    connected=!strcmp(value,"connected");
+                    initialized=json_object_get_boolean_member_with_default(
+                        state,"initialized",FALSE);
+                }
+            }
+            u->jc1_watch_seen[req->side]=TRUE;
+            u->jc1_watch_online[req->side]=online;
+            u->jc1_watch_connected[req->side]=connected;
+            u->jc1_watch_initialized[req->side]=initialized;
+            jc1_watch_refresh(u);
+            update_controls(u);
+        }
+    }
+    /* The async task owns a UI reference until its callback completes. */
+    ui_unref(u);
+}
+
+static void jc1_watch_tick(Ui *u) {
+    if(controller_id(u)!=UI_JC1_PAIR || !u->launcher || u->stopping ||
+       u->closing || u->closed)return;
+    /* Approximately 0.8 seconds with the GUI's 16-ms tick. Each side has
+     * its own bounded two-second IPC timeout and in-flight guard. */
+    if(++u->jc1_watch_ticks<50)return;
+    u->jc1_watch_ticks=0;
+    for(guint side=0;side<2;side++) {
+        if(u->jc1_watch_busy[side])continue;
+        const char *path=side?u->socket2:u->socket;
+        if(!path || !*path)continue;
+        Jc1WatchRequest *req=g_new0(Jc1WatchRequest,1);
+        req->ui=u;
+        req->generation=u->jc1_watch_generation;
+        req->side=side;
+        req->path=g_strdup(path);
+        u->jc1_watch_busy[side]=TRUE;
+        u->refs++;
+        GTask *task=g_task_new(NULL,NULL,jc1_watch_complete,NULL);
+        g_task_set_task_data(task,req,jc1_watch_request_free);
+        g_task_run_in_thread(task,jc1_watch_worker);
+        g_object_unref(task);
+    }
+}
+
 static void worker(GTask *task,gpointer source,gpointer data,GCancellable *cancel) {
     (void)source;(void)cancel;
     Request *r=data;
@@ -2168,6 +2291,7 @@ static void complete(GObject *source,
         }
     }
 
+    jc1_watch_refresh(u);
     update_controls(u);
 
     /*
@@ -2287,6 +2411,7 @@ static gboolean tick(gpointer data) {
             else if(now>=u->validate_at){u->frame.buttons[0]|=0x40;u->frame.buttons[2]|=0x40;force=TRUE;}
         }
     }
+    jc1_watch_tick(u);
     if(u->online && ((gtk_switch_get_active(GTK_SWITCH(u->arm)) && allowed) || force))request(u,"input");
     else if(++u->ticks%20==0)request(u,"status");
     return G_SOURCE_CONTINUE;
@@ -2296,6 +2421,8 @@ static void launcher_done(GObject *source,GAsyncResult *result,gpointer data) {
     GSubprocess *process=G_SUBPROCESS(source);
     gboolean ok=g_subprocess_wait_check_finish(process,result,&e);
     g_clear_object(&u->launcher);
+    if(controller_id(u)==UI_JC1_PAIR)
+        u->jc1_watch_generation++;
 
     if(u->closing) {
         finish_close(u);
@@ -2669,6 +2796,16 @@ static void launch_switch_session(Ui *u,gboolean reconnect) {
         return;
     }
 
+    if(controller_id(u)==UI_JC1_PAIR) {
+        u->jc1_watch_generation++;
+        memset(u->jc1_watch_seen,0,sizeof(u->jc1_watch_seen));
+        memset(u->jc1_watch_busy,0,sizeof(u->jc1_watch_busy));
+        memset(u->jc1_watch_online,0,sizeof(u->jc1_watch_online));
+        memset(u->jc1_watch_connected,0,sizeof(u->jc1_watch_connected));
+        memset(u->jc1_watch_initialized,0,sizeof(u->jc1_watch_initialized));
+        u->jc1_watch_ticks=0;
+    }
+
     u->refs++;
     g_subprocess_wait_check_async(u->launcher,NULL,launcher_done,u);
     update_controls(u);
@@ -2725,6 +2862,7 @@ static void stop_clicked(GtkButton *b,Ui *u) {
     g_clear_pointer(&u->pending,g_free);
 
     u->stopping=TRUE;
+    u->jc1_watch_generation++; /* invalidate in-flight Joy-Con status tasks */
     u->finish_frames=0;
 
     gtk_label_set_text(
@@ -2747,6 +2885,7 @@ static gboolean close_window(GtkWindow *w,Ui *u) {
 
     u->closing=TRUE;
     u->stopping=TRUE;
+    u->jc1_watch_generation++;
 
     if(u->timer) {
         g_source_remove(u->timer);
