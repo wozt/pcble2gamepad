@@ -620,6 +620,13 @@ static void apply_mouse(Backend *b, Jc2Input *input)
 {
     ProState *s = &b->state;
     input->mouse = s->mouse_active;
+    if (!input->mouse) {
+        /* Do not replay wheel state after switching the active mouse side. */
+        s->mouse_dx = s->mouse_dy = s->mouse_wheel = 0;
+        b->wheel_reports = 0;
+        b->wheel_direction = 0;
+        return;
+    }
     if (input->mouse) {
         input->mouse_dx = (int16_t)CLAMP(s->mouse_dx, -32768, 32767);
         input->mouse_dy = (int16_t)CLAMP(s->mouse_dy, -32768, 32767);

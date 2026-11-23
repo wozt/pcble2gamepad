@@ -15,7 +15,7 @@ typedef struct {
     int refs;gboolean closed,closing,stopping,busy,online,connected,loading;
     GtkApplication *app;GtkWindow *window;AdwToastOverlay *toast;
     GtkStack *stack;GtkLabel *status,*peer,*error,*metrics,*source_hint,*controller_hint,*hero_title,*paired_console;
-    GtkWidget *drawing,*start,*sync,*stop,*arm,*capture_hint,*secondary_row,*pro_color_panel;
+    GtkWidget *drawing,*start,*sync,*stop,*finish,*arm,*capture_hint,*secondary_row,*pro_color_panel;
     GtkDropDown *controllers,*adapters,*secondary,*devices,*source,*profiles;
     GtkStringList *adapter_names,*secondary_names,*device_names,*profile_names;
     GPtrArray *adapter_ids,*adapter_addresses,*secondary_ids,*secondary_addresses,*device_ids;
@@ -38,30 +38,43 @@ typedef struct {
     gboolean auto_validate,remote_initialized;int player_lights,validate_attempts;gint64 validate_at;
     GSubprocess *launcher;
     RsvgHandle *pro_svg,*joycon_left_svg,*joycon_right_svg;
-    GtkWidget *mouse_panel,*mouse_area;GtkScale *mouse_gain;
+    GtkWidget *mouse_panel,*mouse_area,*mouse_side_row;GtkScale *mouse_gain;GtkDropDown *mouse_side;
     GtkWidget *primary_row;GArray *adapter_le2m;
     gboolean mouse_captured,mouse_grabbed,mouse_have_last;
     double mouse_acc_x,mouse_acc_y,mouse_last_x,mouse_last_y,mouse_scroll;
-    int mouse_wheel;guint mouse_buttons;guint mouse_grab_attempts;
+    int mouse_wheel;guint mouse_buttons;guint mouse_grab_attempts;guint mouse_source_side,finish_frames;
 } Ui;
-typedef struct {char *path,*path2;JsonObject *request;} Request;
+typedef struct {char *path,*path2;JsonObject *request,*request2;} Request;
 static void refresh_bindings(Ui *u);
 static void request(Ui *u,const char *method);
 static void devices_scan(Ui *u);
 static void adapters_scan(GtkButton *b,Ui *u);
 static void joycon2_adapters(Ui *u);
+static gboolean adapter_has_le2m(Ui *u,guint i);
 static void controller_selected(GObject *o,GParamSpec *p,Ui *u);
 static void update_pro_svg_colors(Ui *u);
 static void apply_profile_state(Ui *u);
-/* Index 1: Joy-Con 1 pair (Classic). Index 4: Joy-Con 1 (L) Classic + Joy-Con 2 (R) BLE. */
-static gboolean mixed_mode(Ui *u){return u->controllers && gtk_drop_down_get_selected(u->controllers)==4;}
-static gboolean pair_mode(Ui *u){return u->controllers && (gtk_drop_down_get_selected(u->controllers)==1 || mixed_mode(u));}
-/* Joy-Con 2 (BLE) profiles: 0 when not selected, 1 for left, 2 for right. */
-static int joycon2_side(Ui *u) {
-    guint i=u->controllers?gtk_drop_down_get_selected(u->controllers):0;
-    return i==2?1:i==3?2:0;
+/* Append new catalog values; existing numeric IDs are persisted in INI files. */
+enum {
+    UI_PRO = 0, UI_JC1_PAIR = 1, UI_JC2_LEFT = 2, UI_JC2_RIGHT = 3,
+    UI_HYBRID = 4, UI_JC2_PAIR = 5, UI_HYBRID_REVERSE = 6
+};
+static guint controller_id(Ui *u) {
+    return u->controllers ? gtk_drop_down_get_selected(u->controllers) : UI_PRO;
 }
-static gboolean pro_mode(Ui *u){return !pair_mode(u) && !joycon2_side(u);}
+static gboolean mixed_mode(Ui *u){return controller_id(u)==UI_HYBRID;}
+static gboolean reverse_mixed_mode(Ui *u){return controller_id(u)==UI_HYBRID_REVERSE;}
+static gboolean joycon2_pair_mode(Ui *u){return controller_id(u)==UI_JC2_PAIR;}
+static gboolean pair_mode(Ui *u){
+    guint id=controller_id(u);
+    return id==UI_JC1_PAIR || id==UI_HYBRID || id==UI_JC2_PAIR || id==UI_HYBRID_REVERSE;
+}
+/* Standalone Joy-Con 2 is deliberately independent of paired profiles. */
+static int joycon2_side(Ui *u) {
+    guint id=controller_id(u);
+    return id==UI_JC2_LEFT?1:id==UI_JC2_RIGHT?2:0;
+}
+static gboolean pro_mode(Ui *u){return controller_id(u)==UI_PRO;}
 static gboolean paired_adapter_selected(Ui *u) {
     if(!u->adapters || !u->paired_adapter_address || !*u->paired_adapter_address)return FALSE;
     guint i=gtk_drop_down_get_selected(u->adapters);
@@ -76,8 +89,16 @@ static void update_paired_console(Ui *u) {
             :"Not paired yet");
 }
 static void update_controls(Ui *u) {
-    gboolean adapters_ok=u->adapter_ids->len>0 && (!pair_mode(u) || u->secondary_ids->len>1);
-    gboolean can_reconnect=(pro_mode(u) || mixed_mode(u)) &&
+    guint a=gtk_drop_down_get_selected(u->adapters);
+    guint b=gtk_drop_down_get_selected(u->secondary);
+    gboolean distinct=a<u->adapter_ids->len && b<u->secondary_ids->len &&
+        strcmp(g_ptr_array_index(u->adapter_ids,a),g_ptr_array_index(u->secondary_ids,b));
+    gboolean le_ok=(!joycon2_side(u) && !joycon2_pair_mode(u) &&
+        !mixed_mode(u) && !reverse_mixed_mode(u)) ||
+        (joycon2_pair_mode(u) ? (adapter_has_le2m(u,a) && adapter_has_le2m(u,b)) :
+         ((mixed_mode(u) ? adapter_has_le2m(u,b) : adapter_has_le2m(u,a))));
+    gboolean adapters_ok=u->adapter_ids->len>0 && (!pair_mode(u) || distinct) && le_ok;
+    gboolean can_reconnect=(pro_mode(u) || mixed_mode(u) || reverse_mixed_mode(u)) &&
         u->paired_switch_address && *u->paired_switch_address &&
         paired_adapter_selected(u);
     gboolean reconnect_existing=
@@ -101,6 +122,9 @@ static void update_controls(Ui *u) {
         u->stop,
         u->online &&
         !u->stopping);
+    if(u->finish)
+        gtk_widget_set_sensitive(u->finish,u->online && u->connected &&
+                                 u->remote_initialized && !u->stopping);
     gtk_widget_set_sensitive(GTK_WIDGET(u->controllers),!u->online && !u->launcher);
     gtk_widget_set_sensitive(GTK_WIDGET(u->adapters),!u->online && !u->launcher);
     gtk_widget_set_sensitive(GTK_WIDGET(u->secondary),!u->online && !u->launcher);
@@ -235,6 +259,7 @@ static void save_optional_string(GKeyFile *file,
 }
 
 static void profile_state_defaults(Ui *u) {
+    u->mouse_source_side=1; /* right Joy-Con 2 is the default optical mouse */
     u->saved_source=0;
     u->saved_arm=FALSE;
     u->saved_auto_select=TRUE;
@@ -337,6 +362,10 @@ static gboolean profile_state_load_path(Ui *u,const char *path) {
                 "detailed_hid",
                 NULL);
 
+    if(g_key_file_has_key(k,"Studio","mouse_source_side",NULL)) {
+        int side=g_key_file_get_integer(k,"Studio","mouse_source_side",NULL);
+        if(side==0 || side==1)u->mouse_source_side=(guint)side;
+    }
     load_color_setting(k,"pro_body",&u->pro_body_color);
     load_color_setting(k,"pro_buttons",&u->pro_button_color);
     load_color_setting(k,"pro_left_grip",&u->pro_left_grip_color);
@@ -361,6 +390,7 @@ static gboolean profile_state_save_path(Ui *u,
             NULL);
 
     g_key_file_set_boolean(k,"Studio","active",active);
+    g_key_file_set_integer(k,"Studio","mouse_source_side",(gint)u->mouse_source_side);
     g_key_file_set_integer(
         k,
         "Studio",
@@ -918,6 +948,8 @@ static void apply_profile_state(Ui *u) {
         gtk_switch_set_active(
             u->traffic_logs,
             u->saved_traffic);
+    if(u->mouse_side)
+        gtk_drop_down_set_selected(u->mouse_side,u->mouse_source_side);
 
     if(u->pro_body_color_button)
         gtk_color_dialog_button_set_rgba(
@@ -989,7 +1021,14 @@ static Display *x11_display(GdkSurface *s){return gdk_x11_display_get_xdisplay(g
 static Window x11_window(GdkSurface *s){return gdk_x11_surface_get_xid(s);}
 G_GNUC_END_IGNORE_DEPRECATIONS
 #endif
-static gboolean mouse_enabled(Ui *u){return joycon2_side(u) || mixed_mode(u);}
+static gboolean mouse_enabled(Ui *u){return joycon2_side(u) || mixed_mode(u) ||
+    joycon2_pair_mode(u) || reverse_mixed_mode(u);}
+static void mouse_side_changed(GObject *object,GParamSpec *pspec,Ui *u) {
+    (void)object;(void)pspec;
+    if(u->loading)return;
+    u->mouse_source_side=gtk_drop_down_get_selected(u->mouse_side);
+    save_profile_quiet(u);
+}
 static void mouse_area_update(Ui *u) {
     if(u->mouse_area)
         gtk_label_set_text(GTK_LABEL(u->mouse_area),u->mouse_captured?
@@ -1733,7 +1772,7 @@ static void adapters_scan(GtkButton *b,Ui *u) {
     update_controls(u);
 }
 
-static void request_free(gpointer data){Request *r=data;g_free(r->path);g_free(r->path2);json_object_unref(r->request);g_free(r);}
+static void request_free(gpointer data){Request *r=data;g_free(r->path);g_free(r->path2);json_object_unref(r->request);if(r->request2)json_object_unref(r->request2);g_free(r);}
 static JsonObject *merge_pair(JsonObject *left,JsonObject *right) {
     if(!json_object_get_boolean_member_with_default(left,"ok",FALSE))return json_object_ref(left);
     if(!json_object_get_boolean_member_with_default(right,"ok",FALSE))return json_object_ref(right);
@@ -1758,7 +1797,7 @@ static JsonObject *merge_pair(JsonObject *left,JsonObject *right) {
 static void worker(GTask *task,gpointer source,gpointer data,GCancellable *cancel) {
     (void)source;(void)cancel;Request *r=data;GError *e=NULL;JsonObject *o=jc_client_request_object(r->path,r->request,&e);
     if(!o){g_task_return_error(task,e);return;}
-    if(r->path2){GError *second_error=NULL;JsonObject *second=jc_client_request_object(r->path2,r->request,&second_error);if(!second){json_object_unref(o);g_task_return_error(task,second_error);return;}JsonObject *merged=merge_pair(o,second);json_object_unref(o);json_object_unref(second);o=merged;}
+    if(r->path2){GError *second_error=NULL;JsonObject *second=jc_client_request_object(r->path2,r->request2?r->request2:r->request,&second_error);if(!second){json_object_unref(o);g_task_return_error(task,second_error);return;}JsonObject *merged=merge_pair(o,second);json_object_unref(o);json_object_unref(second);o=merged;}
     g_task_return_pointer(task,o,(GDestroyNotify)json_object_unref);
 }
 static gboolean shutdown_error_is_expected(const GError *error) {
@@ -1930,7 +1969,7 @@ static void complete(GObject *source,
                 json_object_get_string_member_with_default(state,"console",peer_address);
 
             if(!simulated &&
-               (pro_mode(u) || mixed_mode(u)) &&
+               (pro_mode(u) || mixed_mode(u) || reverse_mixed_mode(u)) &&
                !strcmp(session_state,"connected") &&
                g_regex_match_simple(
                     "^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$",
@@ -2102,10 +2141,16 @@ static void request(Ui *u,const char *method) {
     if(u->closed)return;
     if(u->busy){if(strcmp(method,"status") && strcmp(method,"input")){g_free(u->pending);u->pending=g_strdup(method);}return;}
     u->busy=TRUE;Request *r=g_new0(Request,1);r->path=g_strdup(u->socket);r->path2=g_strdup(u->socket2);r->request=json_object_new();
+    if(joycon2_pair_mode(u))r->request2=json_object_new();
     json_object_set_int_member(r->request,"version",1);json_object_set_string_member(r->request,"method",method);
+    if(r->request2){json_object_set_int_member(r->request2,"version",1);json_object_set_string_member(r->request2,"method",method);}
     if(!strcmp(method,"input")){
-        JsonArray *a=json_array_new();for(int i=0;i<3;i++)json_array_add_int_element(a,u->frame.buttons[i]);json_object_set_array_member(r->request,"buttons",a);
-        a=json_array_new();for(int i=0;i<4;i++)json_array_add_int_element(a,u->frame.sticks[i]);json_object_set_array_member(r->request,"sticks",a);
+        JsonArray *a=json_array_new();for(int i=0;i<3;i++)json_array_add_int_element(a,u->frame.buttons[i]);
+        if(r->request2)json_object_set_array_member(r->request2,"buttons",json_array_ref(a));
+        json_object_set_array_member(r->request,"buttons",a);
+        a=json_array_new();for(int i=0;i<4;i++)json_array_add_int_element(a,u->frame.sticks[i]);
+        if(r->request2)json_object_set_array_member(r->request2,"sticks",json_array_ref(a));
+        json_object_set_array_member(r->request,"sticks",a);
         if(mouse_enabled(u)) {
             double gain=u->mouse_gain?gtk_range_get_value(GTK_RANGE(u->mouse_gain)):1.5;
             long dx=lrint(CLAMP(u->mouse_acc_x*gain,-32768.,32767.)),dy=lrint(CLAMP(u->mouse_acc_y*gain,-32768.,32767.));
@@ -2113,7 +2158,17 @@ static void request(Ui *u,const char *method) {
             int wheel=CLAMP(u->mouse_wheel,-100,100);u->mouse_wheel-=wheel;
             a=json_array_new();json_array_add_int_element(a,dx);json_array_add_int_element(a,dy);
             json_array_add_int_element(a,wheel);json_array_add_int_element(a,u->mouse_captured?u->mouse_buttons:0);
-            json_array_add_int_element(a,u->mouse_captured);json_object_set_array_member(r->request,"mouse",a);
+            json_array_add_int_element(a,u->mouse_captured);
+            if(r->request2){
+                JsonArray *zero=json_array_new();for(int k=0;k<5;k++)json_array_add_int_element(zero,0);
+                if(u->mouse_source_side==0){
+                    json_object_set_array_member(r->request,"mouse",a);
+                    json_object_set_array_member(r->request2,"mouse",zero);
+                } else {
+                    json_object_set_array_member(r->request,"mouse",zero);
+                    json_object_set_array_member(r->request2,"mouse",a);
+                }
+            } else json_object_set_array_member(r->request,"mouse",a);
         }
     } else if(!strcmp(method,"reconnect")) {
         if(u->paired_switch_address)
@@ -2137,6 +2192,10 @@ static gboolean tick(gpointer data) {
     input_compose(&u->profile,pressed,axes,&u->frame);gtk_widget_queue_draw(u->drawing);
     gboolean allowed=gtk_window_is_active(u->window) || (u->profile.background && gtk_drop_down_get_selected(u->source)==1);
     gboolean force=FALSE;
+    if(u->finish_frames){
+        u->frame.buttons[0]|=0x08; /* A exits Change Grip/Order via the right half. */
+        u->finish_frames--;force=TRUE;
+    }
     if(u->auto_validate) {
         if(!u->launcher && !u->online) {
             u->auto_validate=FALSE;
@@ -2231,7 +2290,9 @@ static void joycon2_adapters(Ui *u) {
     const char *pt="Primary adapter",*ps="Pro Controller, or left Joy-Con. Choose by address; hci numbers can change after reboot.";
     const char *st="Right Joy-Con adapter",*ss="A pair requires a second, distinct Classic Bluetooth identity.";
     const char *le="Needs Bluetooth LE with LE 2M (marked LE 2M). It is taken over exclusively during the session.";
-    if(mixed_mode(u)){pt="Joy-Con 1 (L) adapter";ps="Classic Bluetooth, for example the adapter used for the Pro Controller.";st="Joy-Con 2 (R) adapter";ss=le;}
+    if(mixed_mode(u)){pt="Joy-Con 1 (L) adapter";ps="Classic HID, assigned exclusively to the left half.";st="Joy-Con 2 (R) adapter";ss=le;}
+    else if(reverse_mixed_mode(u)){pt="Joy-Con 2 (L) adapter";ps=le;st="Joy-Con 1 (R) adapter";ss="Classic HID, assigned exclusively to the right half.";}
+    else if(joycon2_pair_mode(u)){pt="Joy-Con 2 (L) adapter";ps=le;st="Joy-Con 2 (R) adapter";ss=le;}
     else if(joycon2_side(u)){pt="Joy-Con 2 adapter";ps=le;}
     adw_preferences_row_set_title(ADW_PREFERENCES_ROW(u->primary_row),pt);adw_action_row_set_subtitle(ADW_ACTION_ROW(u->primary_row),ps);
     adw_preferences_row_set_title(ADW_PREFERENCES_ROW(u->secondary_row),st);adw_action_row_set_subtitle(ADW_ACTION_ROW(u->secondary_row),ss);
@@ -2244,6 +2305,12 @@ static void joycon2_adapters(Ui *u) {
         if(!adapter_has_le2m(u,j)){gtk_drop_down_set_selected(u->secondary,capable);j=capable;}
         if(gtk_drop_down_get_selected(u->adapters)==j)
             for(guint k=0;k<n;k++)if(k!=j){gtk_drop_down_set_selected(u->adapters,k);break;}
+    } else if(reverse_mixed_mode(u) || joycon2_pair_mode(u)) {
+        guint i=gtk_drop_down_get_selected(u->adapters);
+        if(!adapter_has_le2m(u,i)){gtk_drop_down_set_selected(u->adapters,capable);i=capable;}
+        guint j=gtk_drop_down_get_selected(u->secondary);
+        if(j==i || (joycon2_pair_mode(u) && !adapter_has_le2m(u,j)))
+            for(guint k=0;k<n;k++)if(k!=i && (!joycon2_pair_mode(u) || adapter_has_le2m(u,k))){gtk_drop_down_set_selected(u->secondary,k);break;}
     } else if(joycon2_side(u) && !adapter_has_le2m(u,gtk_drop_down_get_selected(u->adapters))) {
         gtk_drop_down_set_selected(u->adapters,capable);
     }
@@ -2252,6 +2319,7 @@ static void controller_selected(GObject *o,GParamSpec *p,Ui *u) {
     (void)p;if(u->loading || u->online || u->launcher)return;
     mouse_capture_stop(u);
     if(u->mouse_panel)gtk_widget_set_visible(u->mouse_panel,mouse_enabled(u));
+    if(u->mouse_side_row)gtk_widget_set_visible(u->mouse_side_row,joycon2_pair_mode(u));
     if(o)release_input(u);
     u->profile.emulated_controller=(int)gtk_drop_down_get_selected(u->controllers);
     save_profile_quiet(u);
@@ -2259,8 +2327,17 @@ static void controller_selected(GObject *o,GParamSpec *p,Ui *u) {
     if(pair_mode(u)) {
         const char *mock_dir=g_getenv("PCBLE2GAMEPAD_JOYCON_SOCKET_DIR");g_autofree char *runtime=mock_dir?g_strdup(mock_dir):g_strdup_printf("/run/pcble2gamepad/%u",(unsigned)getuid());
         u->socket=g_build_filename(runtime,"joycon-left.sock",NULL);u->socket2=g_build_filename(runtime,"joycon-right.sock",NULL);
-        gtk_widget_set_visible(u->secondary_row,TRUE);gtk_label_set_text(u->hero_title,mixed_mode(u)?"Joy-Con 1 (L) + Joy-Con 2 (R)":"Nintendo Joy-Con Pair");
-        gtk_label_set_text(u->controller_hint,u->adapter_ids->len<2?"A Joy-Con pair needs two Bluetooth identities. Connect a second adapter to enable this profile.":mixed_mode(u)?"Primary adapter: Joy-Con 1 (L) over Classic Bluetooth. Right adapter: Joy-Con 2 (R) over Bluetooth LE, taken over exclusively (use the Bluetooth 6.0 dongle). In Change Grip/Order press L+R.":"Left and right Joy-Con use separate Bluetooth adapters and one combined input profile.");
+        gtk_widget_set_visible(u->secondary_row,TRUE);
+        const char *title=mixed_mode(u)?"Joy-Con 1 (L) + Joy-Con 2 (R)":
+            reverse_mixed_mode(u)?"Joy-Con 2 (L) + Joy-Con 1 (R)":
+            joycon2_pair_mode(u)?"Nintendo Joy-Con 2 Pair":"Nintendo Joy-Con 1 Pair";
+        gtk_label_set_text(u->hero_title,title);
+        const char *hint=u->adapter_ids->len<2?"Two distinct Bluetooth adapters are required.":
+            mixed_mode(u)?"Left: Classic HID. Right: BLE Joy-Con 2. Both use their own radio and controller protocol.":
+            reverse_mixed_mode(u)?"Left: BLE Joy-Con 2 (optical mouse). Right: Classic HID Joy-Con 1.":
+            joycon2_pair_mode(u)?"Two separate BLE adapters, one per Joy-Con 2. Select which side supplies the optical mouse below.":
+            "Each Joy-Con 1 has its own Classic HID adapter.";
+        gtk_label_set_text(u->controller_hint,hint);
     } else {
         const char *override=g_getenv("PCBLE2GAMEPAD_PRO_SOCKET");u->socket=override?g_strdup(override):g_strdup_printf("/run/pcble2gamepad/%u/pro.sock",(unsigned)getuid());
         gtk_widget_set_visible(u->secondary_row,FALSE);
@@ -2276,6 +2353,7 @@ static void controller_selected(GObject *o,GParamSpec *p,Ui *u) {
             u->pro_color_panel,
             pro_mode(u));
 
+    u->finish_frames=0;
     gtk_label_set_text(u->status,"OFFLINE");
     gtk_label_set_text(
         u->peer,
@@ -2378,7 +2456,7 @@ static void launch_switch_session(Ui *u,gboolean reconnect) {
     if(i>=u->adapter_ids->len){toast(u,"Select a Bluetooth adapter first");return;}
 
     if(reconnect) {
-        if(!pro_mode(u) && !mixed_mode(u)) {
+        if(!pro_mode(u) && !mixed_mode(u) && !reverse_mixed_mode(u)) {
             toast(u,"Automatic reconnect is currently implemented for Pro Controller first");
             return;
         }
@@ -2401,6 +2479,11 @@ static void launch_switch_session(Ui *u,gboolean reconnect) {
         return;
     }
 
+    if((joycon2_pair_mode(u) && (!adapter_has_le2m(u,i) || !adapter_has_le2m(u,j))) ||
+       ((joycon2_side(u) || reverse_mixed_mode(u)) && !adapter_has_le2m(u,i)) ||
+       (mixed_mode(u) && !adapter_has_le2m(u,j))){
+        toast(u,"Joy-Con 2 requires an LE 2M-capable Bluetooth adapter for its assigned side");return;
+    }
     const char *override=g_getenv("PCBLE2GAMEPAD_RUNNER");
     g_autofree char *exe=g_file_read_link("/proc/self/exe",NULL),
         *build=exe?g_path_get_dirname(exe):NULL,
@@ -2464,13 +2547,19 @@ static void launch_switch_session(Ui *u,gboolean reconnect) {
     args[n++]="pkexec";
     args[n++]=runner;
     args[n++]=g_ptr_array_index(u->adapter_ids,i);
+    args[n++]="--expect-primary-address";
+    args[n++]=g_ptr_array_index(u->adapter_addresses,i);
     args[n++]="--desktop";
     args[n++]="--profile";
 
     if(pair_mode(u)) {
-        args[n++]=mixed_mode(u)?"joycon-mixed":"joycon-pair";
+        args[n++]=mixed_mode(u)?"joycon-mixed":
+            reverse_mixed_mode(u)?"joycon-mixed-reverse":
+            joycon2_pair_mode(u)?"joycon2-pair":"joycon-pair";
         args[n++]="--secondary";
         args[n++]=g_ptr_array_index(u->secondary_ids,j);
+        args[n++]="--expect-secondary-address";
+        args[n++]=g_ptr_array_index(u->secondary_addresses,j);
     } else if(joycon2_side(u)) {
         args[n++]=joycon2_side(u)==1?"joycon2-left":"joycon2-right";
     } else {
@@ -2540,6 +2629,13 @@ static void sync_clicked(GtkButton *b,Ui *u) {
         u->player_lights=0;u->remote_initialized=FALSE;
     }
 }
+static void finish_grip_clicked(GtkButton *button,Ui *u) {
+    (void)button;
+    if(!u->connected || !u->remote_initialized){toast(u,"Wait for Nintendo input initialization");return;}
+    if(u->auto_validate){toast(u,"Wait for the L+R pairing sequence to finish");return;}
+    u->finish_frames=15; /* 240 ms, enough at Change Grip/Order's lower cadence. */
+    toast(u,"Sending A to finish Change Grip/Order");
+}
 static void stop_clicked(GtkButton *b,Ui *u) {
     (void)b;
 
@@ -2554,6 +2650,7 @@ static void stop_clicked(GtkButton *b,Ui *u) {
     g_clear_pointer(&u->pending,g_free);
 
     u->stopping=TRUE;
+    u->finish_frames=0;
 
     gtk_label_set_text(
         u->status,
@@ -2786,6 +2883,14 @@ static void activate(GtkApplication *app,gpointer unused) {
     gtk_widget_set_hexpand(GTK_WIDGET(u->mouse_gain),TRUE);
     gtk_box_append(GTK_BOX(gain_row),GTK_WIDGET(u->mouse_gain));
     gtk_box_append(GTK_BOX(u->mouse_panel),gain_row);
+    u->mouse_side_row=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,12);
+    gtk_box_append(GTK_BOX(u->mouse_side_row),gtk_label_new("Optical mouse side"));
+    const char *mouse_sides[]={"Joy-Con 2 (L)","Joy-Con 2 (R)",NULL};
+    u->mouse_side=GTK_DROP_DOWN(gtk_drop_down_new_from_strings(mouse_sides));
+    gtk_drop_down_set_selected(u->mouse_side,u->mouse_source_side);
+    g_signal_connect(u->mouse_side,"notify::selected",G_CALLBACK(mouse_side_changed),u);
+    gtk_box_append(GTK_BOX(u->mouse_side_row),GTK_WIDGET(u->mouse_side));
+    gtk_box_append(GTK_BOX(u->mouse_panel),u->mouse_side_row);
     gtk_box_append(GTK_BOX(hero),u->mouse_panel);
     mouse_area_update(u);
 
@@ -2859,7 +2964,9 @@ static void activate(GtkApplication *app,gpointer unused) {
 
     gtk_box_append(GTK_BOX(box),hero);
     AdwPreferencesGroup *g=group(box,"Bluetooth session","Starting a session requests administrator authentication and temporarily pauses other Bluetooth services.");
-    const char *controllers[]={"Nintendo Switch Pro Controller","Nintendo Joy-Con Pair","Nintendo Switch 2 Joy-Con 2 (L) · BLE","Nintendo Switch 2 Joy-Con 2 (R) · BLE","Joy-Con 1 (L) Classic + Joy-Con 2 (R) BLE",NULL};u->controllers=GTK_DROP_DOWN(gtk_drop_down_new_from_strings(controllers));row(g,"Emulated controller","Sony and Microsoft profiles can be added to the same controller catalog later.",GTK_WIDGET(u->controllers));
+    const char *controllers[]={"Nintendo Switch Pro Controller","Nintendo Joy-Con Pair","Nintendo Switch 2 Joy-Con 2 (L) · BLE","Nintendo Switch 2 Joy-Con 2 (R) · BLE","Joy-Con 1 (L) Classic + Joy-Con 2 (R) BLE",
+        "Nintendo Switch 2 Joy-Con 2 Pair (L/R) · BLE",
+        "Joy-Con 2 (L) BLE + Joy-Con 1 (R) Classic",NULL};u->controllers=GTK_DROP_DOWN(gtk_drop_down_new_from_strings(controllers));row(g,"Emulated controller","Sony and Microsoft profiles can be added to the same controller catalog later.",GTK_WIDGET(u->controllers));
     u->adapter_names=gtk_string_list_new(NULL);u->adapters=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->adapter_names),NULL));gtk_widget_set_size_request(GTK_WIDGET(u->adapters),280,-1);
     u->primary_row=row(g,"Primary adapter","Pro Controller, or left Joy-Con. Choose by address; hci numbers can change after reboot.",GTK_WIDGET(u->adapters));
     u->secondary_names=gtk_string_list_new(NULL);u->secondary=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->secondary_names),NULL));gtk_widget_set_size_request(GTK_WIDGET(u->secondary),280,-1);
@@ -2874,11 +2981,13 @@ static void activate(GtkApplication *app,gpointer unused) {
     u->start=button("Reconnect paired Switch (experimental)",G_CALLBACK(start),u);
     gtk_widget_add_css_class(u->start,"suggested-action");
     u->sync=button("Pair / Sync new Switch",G_CALLBACK(sync_clicked),u);
+    u->finish=button("Finish order/style (A)",G_CALLBACK(finish_grip_clicked),u);
     u->stop=button("Stop session",G_CALLBACK(stop_clicked),u);
     gtk_widget_set_sensitive(u->stop,FALSE);
 
     gtk_box_append(GTK_BOX(actions),u->start);
     gtk_box_append(GTK_BOX(actions),u->sync);
+    gtk_box_append(GTK_BOX(actions),u->finish);
     gtk_box_append(GTK_BOX(actions),u->stop);
     gtk_box_append(GTK_BOX(actions),button("Refresh adapters",G_CALLBACK(adapters_scan),u));
     gtk_box_append(GTK_BOX(box),actions);
