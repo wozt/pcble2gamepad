@@ -1,0 +1,77 @@
+name: Build, test, AppImage, release
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pcble2gamepad-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build pkg-config gcc \
+            libglib2.0-dev libjson-glib-dev libbluetooth-dev libssl-dev \
+            libgtk-4-dev libadwaita-1-dev librsvg2-dev libsdl2-dev libx11-dev
+      - name: Compile (including GUI)
+        run: |
+          meson setup build-ci -Dgui=enabled --prefix=/usr
+          meson compile -C build-ci
+      - name: Hardware-safe unit tests
+        run: meson test -C build-ci --print-errorlogs
+  appimage:
+    needs: [test]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build and bundling dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build pkg-config gcc curl file \
+            libglib2.0-dev libjson-glib-dev libbluetooth-dev libssl-dev \
+            libgtk-4-dev libadwaita-1-dev librsvg2-dev libsdl2-dev libx11-dev \
+            libfuse2
+      - name: Fetch linuxdeploy
+        run: |
+          curl --fail --location --silent --show-error \
+            -o /tmp/linuxdeploy-x86_64.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod 755 /tmp/linuxdeploy-x86_64.AppImage
+      - name: Build and validate AppDir
+        env:
+          LINUXDEPLOY: /tmp/linuxdeploy-x86_64.AppImage
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+        run: bash tools/build-appimage.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pcble2gamepad-x86_64
+          path: |
+            dist/pcble2gamepad-x86_64.AppImage
+            dist/pcble2gamepad-x86_64.AppImage.sha256
+          if-no-files-found: error
+  release:
+    needs: [appimage]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.ENABLE_AUTO_RELEASE == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    environment: release-approval
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: pcble2gamepad-x86_64
+          path: dist/
+      - name: Publish unique four-component release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash tools/publish-incremental-release.sh dist/pcble2gamepad-x86_64.AppImage

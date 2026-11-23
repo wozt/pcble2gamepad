@@ -1,0 +1,27 @@
+{
+  "id": "ocean",
+  "name": "Ocean",
+  "colors": {
+    "background": "#111923",
+    "panel": "#192532",
+    "entry": "#0f1b27",
+    "border": "#35485b",
+    "text": "#dce7f1",
+    "muted": "#9fb5c8",
+    "accent": "#96cdf9",
+    "button": "#253547",
+    "hover": "#334c66",
+    "active": "#285277",
+    "negative": "#ffa052"
+  },
+  "gamepad": {
+    "background": "#101824",
+    "shell": "#263647",
+    "screen": "#0d2133",
+    "border": "#738899",
+    "text": "#daeaf5",
+    "muted": "#97b0c6",
+    "accent": "#4bb4ff",
+    "negative": "#ffa052"
+  }
+}

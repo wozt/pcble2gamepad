@@ -1,0 +1,27 @@
+{
+  "id": "emerald",
+  "name": "Emerald",
+  "colors": {
+    "background": "#101b17",
+    "panel": "#172a22",
+    "entry": "#0b1c17",
+    "border": "#315e4b",
+    "text": "#e0f3e9",
+    "muted": "#a3c6b4",
+    "accent": "#65ddb0",
+    "button": "#244537",
+    "hover": "#315d49",
+    "active": "#226a4b",
+    "negative": "#ffad58"
+  },
+  "gamepad": {
+    "background": "#10211a",
+    "shell": "#284637",
+    "screen": "#102e27",
+    "border": "#68a08a",
+    "text": "#e2f5e8",
+    "muted": "#b3d3c1",
+    "accent": "#67e6b1",
+    "negative": "#ffad58"
+  }
+}

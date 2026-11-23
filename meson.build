@@ -10,6 +10,7 @@ asset_dir = get_option('prefix') / get_option('datadir') / 'pcble2gamepad' / 'sv
 configuration.set_quoted('PCBLE2GAMEPAD_PRO_RUNNER', runner_path)
 configuration.set('PCBLE2GAMEPAD_RUNNER_PATH', runner_path)
 configuration.set_quoted('PCBLE2GAMEPAD_ASSET_DIR', asset_dir)
+configuration.set_quoted('PCBLE2GAMEPAD_WOZT_DATA_DIR', get_option('prefix') / get_option('datadir') / 'pcble2gamepad' / 'wozt')
 configure_file(output: 'config.h', configuration: configuration)
 polkit_policy = configure_file(
   input: 'data/io.github.wozt.pcble2gamepad.policy.in',
@@ -41,7 +42,7 @@ if gtk.found() and adw.found() and rsvg.found()
   x11 = dependency('x11', required: false)
   math = meson.get_compiler('c').find_library('m')
   executable('pcble2gamepad-ble-lab', 'src/gui-ble.c', link_with: client, dependencies: [gio, json, gtk, adw], install: true)
-  executable('pcble2gamepad', ['src/gui.c', 'src/input-model.c'], link_with: client, dependencies: [gio, json, gtk, adw, rsvg, sdl, math, x11], install: true)
+  executable('pcble2gamepad', ['src/gui.c', 'src/input-model.c', 'src/wozt-ui.c'], link_with: client, dependencies: [gio, json, gtk, adw, rsvg, sdl, math, x11], install: true)
   install_data(
     [
       'assets/svg/pro-controller.svg',
@@ -51,6 +52,8 @@ if gtk.found() and adw.found() and rsvg.found()
     install_dir: asset_dir)
   test('input-model', executable('test-input-model', ['tests/test-input-model.c', 'src/input-model.c'],
     include_directories: inc, dependencies: [gio, sdl, math]))
+  install_subdir('data/wozt', install_dir: get_option('datadir') / 'pcble2gamepad')
+  install_data('data/io.github.wozt.pcble2gamepad.svg', install_dir: get_option('datadir') / 'icons/hicolor/scalable/apps')
   install_data('data/io.github.wozt.pcble2gamepad.desktop', install_dir: get_option('datadir') / 'applications')
 endif
 test('protocol', executable('test-protocol', 'tests/test-protocol.c', include_directories: inc, link_with: protocol, dependencies: gio))

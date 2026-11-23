@@ -1,0 +1,27 @@
+{
+  "id": "light",
+  "name": "Light",
+  "colors": {
+    "background": "#f0f1f3",
+    "panel": "#ffffff",
+    "entry": "#f8f9fb",
+    "border": "#c5ccd4",
+    "text": "#20252d",
+    "muted": "#586575",
+    "accent": "#2463a6",
+    "button": "#e7ebf0",
+    "hover": "#d9e1ea",
+    "active": "#b8d7f5",
+    "negative": "#bd6437"
+  },
+  "gamepad": {
+    "background": "#eef0f3",
+    "shell": "#e3e6ea",
+    "screen": "#f9fafc",
+    "border": "#929da9",
+    "text": "#2f3640",
+    "muted": "#697583",
+    "accent": "#2677b9",
+    "negative": "#cd6b30"
+  }
+}

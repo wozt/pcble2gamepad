@@ -1,4 +1,5 @@
 #include "client.h"
+#include "wozt-ui.h"
 #include "input-model.h"
 #include "config.h"
 #include <adwaita.h>
@@ -48,7 +49,9 @@ typedef struct {
     gboolean jc1_watch_seen[2],jc1_watch_busy[2],jc1_watch_online[2];
     gboolean jc1_watch_connected[2],jc1_watch_initialized[2];
     guint jc1_watch_ticks,jc1_watch_generation;
+    WoztUi *wozt;
 } Ui;
+static WoztUi *active_wozt;
 typedef struct {char *path,*path2;JsonObject *request,*request2;
     const char *left_label,*right_label;gboolean parallel_pair;} Request;
 static void refresh_bindings(Ui *u);
@@ -172,6 +175,8 @@ static void ui_unref(Ui *u) {
     g_free(u->paired_switch_address);
     g_free(u->paired_adapter_address);
 
+    if(active_wozt==u->wozt)active_wozt=NULL;
+    wozt_ui_free(u->wozt);
     g_clear_object(&u->color_dialog);
     g_clear_object(&u->pro_svg);
     g_clear_object(&u->joycon_left_svg);
@@ -179,24 +184,37 @@ static void ui_unref(Ui *u) {
     g_free(u);
 }
 static void margin(GtkWidget *w,int m) {gtk_widget_set_margin_start(w,m);gtk_widget_set_margin_end(w,m);gtk_widget_set_margin_top(w,m);gtk_widget_set_margin_bottom(w,m);}
-static GtkWidget *label(const char *s,const char *css) {GtkWidget *w=gtk_label_new(s);gtk_label_set_xalign(GTK_LABEL(w),0);gtk_label_set_wrap(GTK_LABEL(w),TRUE);if(css)gtk_widget_add_css_class(w,css);return w;}
+static GtkWidget *label(const char *s,const char *css) {GtkWidget *w=gtk_label_new(s);gtk_label_set_xalign(GTK_LABEL(w),0);gtk_label_set_wrap(GTK_LABEL(w),TRUE);if(css)gtk_widget_add_css_class(w,css);if(active_wozt)wozt_ui_bind_text(active_wozt,G_OBJECT(w),"label",s);return w;}
 static GtkWidget *row(AdwPreferencesGroup *g,const char *title,const char *subtitle,GtkWidget *suffix) {
     GtkWidget *r=adw_action_row_new();adw_preferences_row_set_title(ADW_PREFERENCES_ROW(r),title);
     if(subtitle)adw_action_row_set_subtitle(ADW_ACTION_ROW(r),subtitle);
+    if(active_wozt) {
+        wozt_ui_bind_text(active_wozt,G_OBJECT(r),"title",title);
+        if(subtitle)wozt_ui_bind_text(active_wozt,G_OBJECT(r),"subtitle",subtitle);
+    }
     if(suffix){gtk_widget_set_valign(suffix,GTK_ALIGN_CENTER);adw_action_row_add_suffix(ADW_ACTION_ROW(r),suffix);}
     adw_preferences_group_add(g,r);return r;
 }
 static AdwPreferencesGroup *group(GtkWidget *box,const char *title,const char *description) {
     AdwPreferencesGroup *g=ADW_PREFERENCES_GROUP(adw_preferences_group_new());adw_preferences_group_set_title(g,title);
     if(description)adw_preferences_group_set_description(g,description);
+    if(active_wozt) {
+        wozt_ui_bind_text(active_wozt,G_OBJECT(g),"title",title);
+        if(description)wozt_ui_bind_text(active_wozt,G_OBJECT(g),"description",description);
+    }
     gtk_box_append(GTK_BOX(box),GTK_WIDGET(g));return g;
 }
 static GtkWidget *page(Ui *u,const char *id,const char *title,const char *subtitle) {
-    GtkWidget *scroll=gtk_scrolled_window_new(),*clamp=adw_clamp_new(),*box=gtk_box_new(GTK_ORIENTATION_VERTICAL,24);
-    adw_clamp_set_maximum_size(ADW_CLAMP(clamp),860);margin(box,28);
+    GtkWidget *scroll=gtk_scrolled_window_new(),*clamp=adw_clamp_new(),*box=gtk_box_new(GTK_ORIENTATION_VERTICAL,8);
+    adw_clamp_set_maximum_size(ADW_CLAMP(clamp),1100);margin(box,9);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+        GTK_POLICY_NEVER,GTK_POLICY_AUTOMATIC);
     gtk_box_append(GTK_BOX(box),label(title,"title-1"));gtk_box_append(GTK_BOX(box),label(subtitle,"dim-label"));
     adw_clamp_set_child(ADW_CLAMP(clamp),box);gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll),clamp);
-    gtk_stack_add_titled(u->stack,scroll,id,title);return box;
+    gtk_stack_add_titled(u->stack,scroll,id,title);
+    if(active_wozt)wozt_ui_bind_text(active_wozt,
+        G_OBJECT(gtk_stack_get_page(u->stack,scroll)),"title",title);
+    return box;
 }
 static void release_input(Ui *u) {
     g_hash_table_remove_all(u->keys);
@@ -1257,6 +1275,13 @@ static char *controller_asset_path(const char *name) {
         g_free(path);
     }
 
+    const char *appdir=g_getenv("APPDIR");
+    if(appdir && *appdir) {
+        char *path=g_build_filename(appdir,"usr","share","pcble2gamepad",
+                                          "svg",name,NULL);
+        if(g_file_test(path,G_FILE_TEST_IS_REGULAR))return path;
+        g_free(path);
+    }
     /*
      * Development build:
      *
@@ -2373,6 +2398,8 @@ static void request(Ui *u,const char *method) {
 }
 static gboolean tick(gpointer data) {
     Ui *u=data;if(u->closed || u->closing)return G_SOURCE_REMOVE;
+    if(u->wozt)wozt_ui_tick(u->wozt,
+        gtk_widget_get_width(GTK_WIDGET(u->window)));
     SDL_Event event;gboolean rescan=FALSE;while(SDL_PollEvent(&event))if(event.type==SDL_CONTROLLERDEVICEADDED || event.type==SDL_CONTROLLERDEVICEREMOVED)rescan=TRUE;
     if(rescan || SDL_NumJoysticks()!=u->joystick_count)devices_scan(u);
     gboolean pressed[INPUT_ACTIONS]={0};double axes[4]={0};
@@ -2912,7 +2939,7 @@ static gboolean close_window(GtkWindow *w,Ui *u) {
 }
 static void copy_logs(GtkButton *b,Ui *u){(void)b;GtkTextIter a,z;gtk_text_buffer_get_bounds(u->logs,&a,&z);char *text=gtk_text_buffer_get_text(u->logs,&a,&z,FALSE);gdk_clipboard_set_text(gtk_widget_get_clipboard(GTK_WIDGET(u->window)),text);g_free(text);toast(u,"Diagnostics copied");}
 static void defaults(GtkButton *b,Ui *u){neutral(u);int controller=u->profile.emulated_controller;input_profile_defaults(&u->profile,GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b),"azerty")));u->profile.emulated_controller=controller;refresh_bindings(u);toast(u,"Defaults restored; save to keep them");}
-static GtkWidget *button(const char *text,GCallback callback,Ui *u){GtkWidget *b=gtk_button_new_with_label(text);g_signal_connect(b,"clicked",callback,u);return b;}
+static GtkWidget *button(const char *text,GCallback callback,Ui *u){GtkWidget *b=gtk_button_new_with_label(text);if(active_wozt)wozt_ui_bind_text(active_wozt,G_OBJECT(b),"label",text);g_signal_connect(b,"clicked",callback,u);return b;}
 static void activate(GtkApplication *app,gpointer unused) {
     (void)unused;GtkWindow *existing=gtk_application_get_active_window(app);if(existing){gtk_window_present(existing);return;}
     Ui *u=g_new0(Ui,1);u->refs=1;u->app=app;u->learn_key=u->learn_pad=-1;u->joystick_count=-1;
@@ -3050,21 +3077,32 @@ static void activate(GtkApplication *app,gpointer unused) {
         FALSE);
     const char *override=g_getenv("PCBLE2GAMEPAD_PRO_SOCKET");u->socket=override?g_strdup(override):g_strdup_printf("/run/pcble2gamepad/%u/pro.sock",(unsigned)getuid());
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,"1");SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER);
-    u->window=GTK_WINDOW(adw_application_window_new(app));gtk_window_set_title(u->window,"pcble2gamepad — Controller Studio");gtk_window_set_default_size(u->window,1120,840);
-    adw_style_manager_set_color_scheme(adw_style_manager_get_default(),ADW_COLOR_SCHEME_PREFER_DARK);
-    GtkCssProvider *css=gtk_css_provider_new();
-    gtk_css_provider_load_from_string(css,".studio-nav { background: alpha(@window_fg_color,.035); padding: 12px; } .studio-nav row { border-radius: 10px; margin: 3px 0; padding: 8px; } .connection-badge { color: #54d6ac; font-size: 12px; font-weight: 800; letter-spacing: 1px; } .hero { background: alpha(@window_fg_color,.025); border: 1px solid alpha(@window_fg_color,.07); border-radius: 22px; padding: 18px; } .title-1 { font-size: 30px; } .binding { min-width: 105px; }");
-    gtk_style_context_add_provider_for_display(gtk_widget_get_display(GTK_WIDGET(u->window)),GTK_STYLE_PROVIDER(css),GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);g_object_unref(css);
-    GtkWidget *outer=gtk_box_new(GTK_ORIENTATION_VERTICAL,0),*header=adw_header_bar_new();
-    adw_header_bar_set_title_widget(ADW_HEADER_BAR(header),adw_window_title_new("pcble2gamepad","Controller Studio"));gtk_box_append(GTK_BOX(outer),header);
+    u->window=GTK_WINDOW(adw_application_window_new(app));
+    gtk_window_set_title(u->window,"pcble2gamepad — Controller Studio");
+    u->wozt=wozt_ui_new(u->window);
+    active_wozt=u->wozt;
+    GtkWidget *outer=gtk_box_new(GTK_ORIENTATION_VERTICAL,0);
+    GtkWidget *header=wozt_ui_header(u->wozt);
+    gtk_box_append(GTK_BOX(outer),header);
     GtkWidget *profile_bar=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);u->profile_names=gtk_string_list_new(NULL);u->profiles=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->profile_names),NULL));
     gtk_widget_set_tooltip_text(GTK_WIDGET(u->profiles),"Saved input profile");gtk_box_append(GTK_BOX(profile_bar),GTK_WIDGET(u->profiles));
-    gtk_box_append(GTK_BOX(profile_bar),button("Save",G_CALLBACK(profile_saved),u));gtk_box_append(GTK_BOX(profile_bar),button("Save as…",G_CALLBACK(new_profile),u));adw_header_bar_pack_end(ADW_HEADER_BAR(header),profile_bar);
+    gtk_box_append(GTK_BOX(profile_bar),button("Save",G_CALLBACK(profile_saved),u));gtk_box_append(GTK_BOX(profile_bar),button("Save as…",G_CALLBACK(new_profile),u));wozt_ui_pack_header(u->wozt,profile_bar);
     GtkWidget *content=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,0);gtk_widget_set_vexpand(content,TRUE);gtk_box_append(GTK_BOX(outer),content);
     u->stack=GTK_STACK(gtk_stack_new());gtk_stack_set_transition_type(u->stack,GTK_STACK_TRANSITION_TYPE_CROSSFADE);gtk_widget_set_hexpand(GTK_WIDGET(u->stack),TRUE);
-    GtkWidget *sidebar=gtk_stack_sidebar_new();gtk_stack_sidebar_set_stack(GTK_STACK_SIDEBAR(sidebar),u->stack);gtk_widget_set_size_request(sidebar,190,-1);gtk_widget_add_css_class(sidebar,"studio-nav");gtk_box_append(GTK_BOX(content),sidebar);gtk_box_append(GTK_BOX(content),GTK_WIDGET(u->stack));
-    u->toast=ADW_TOAST_OVERLAY(adw_toast_overlay_new());adw_toast_overlay_set_child(u->toast,outer);adw_application_window_set_content(ADW_APPLICATION_WINDOW(u->window),GTK_WIDGET(u->toast));
+    GtkWidget *compact_nav=wozt_ui_compact_navigation(u->wozt,u->stack);
+    gtk_box_insert_child_after(GTK_BOX(outer),compact_nav,header);
+    GtkWidget *sidebar=gtk_stack_sidebar_new();gtk_stack_sidebar_set_stack(GTK_STACK_SIDEBAR(sidebar),u->stack);gtk_widget_set_size_request(sidebar,145,-1);gtk_widget_add_css_class(sidebar,"studio-nav");gtk_box_append(GTK_BOX(content),sidebar);gtk_box_append(GTK_BOX(content),GTK_WIDGET(u->stack));
+    u->toast=ADW_TOAST_OVERLAY(adw_toast_overlay_new());adw_toast_overlay_set_child(u->toast,wozt_ui_wrap(u->wozt,outer));adw_application_window_set_content(ADW_APPLICATION_WINDOW(u->window),GTK_WIDGET(u->toast));
     GtkWidget *box=page(u,"overview","Connection","Choose the controller presented by your PC, connect it to Switch 2, then route keyboard or gamepad input.");
+    GtkWidget *overview_columns=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);
+    GtkWidget *preview_col=gtk_box_new(GTK_ORIENTATION_VERTICAL,8);
+    GtkWidget *controls_col=gtk_box_new(GTK_ORIENTATION_VERTICAL,8);
+    gtk_widget_set_hexpand(preview_col,TRUE);
+    gtk_widget_set_hexpand(controls_col,TRUE);
+    gtk_box_append(GTK_BOX(box),overview_columns);
+    gtk_box_append(GTK_BOX(overview_columns),preview_col);
+    gtk_box_append(GTK_BOX(overview_columns),controls_col);
+    wozt_ui_set_responsive(u->wozt,overview_columns,sidebar,compact_nav);
     GtkWidget *hero=gtk_box_new(GTK_ORIENTATION_VERTICAL,6);gtk_widget_add_css_class(hero,"hero");
     u->status=GTK_LABEL(label("OFFLINE","connection-badge"));gtk_box_append(GTK_BOX(hero),GTK_WIDGET(u->status));u->hero_title=GTK_LABEL(label("Nintendo Switch Pro Controller","title-2"));gtk_box_append(GTK_BOX(hero),GTK_WIDGET(u->hero_title));
     u->peer=GTK_LABEL(label("Start a Bluetooth session to connect your console.","dim-label"));gtk_box_append(GTK_BOX(hero),GTK_WIDGET(u->peer));
@@ -3091,14 +3129,14 @@ static void activate(GtkApplication *app,gpointer unused) {
     gtk_widget_add_controller(u->mouse_area,GTK_EVENT_CONTROLLER(mouse_click));
     gtk_box_append(GTK_BOX(u->mouse_panel),mouse_frame);
     GtkWidget *gain_row=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,12);
-    gtk_box_append(GTK_BOX(gain_row),gtk_label_new("Mouse sensitivity"));
+    gtk_box_append(GTK_BOX(gain_row),label("Mouse sensitivity",NULL));
     u->mouse_gain=GTK_SCALE(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,.25,5,.05));
     gtk_range_set_value(GTK_RANGE(u->mouse_gain),1.5);
     gtk_widget_set_hexpand(GTK_WIDGET(u->mouse_gain),TRUE);
     gtk_box_append(GTK_BOX(gain_row),GTK_WIDGET(u->mouse_gain));
     gtk_box_append(GTK_BOX(u->mouse_panel),gain_row);
     u->mouse_side_row=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,12);
-    gtk_box_append(GTK_BOX(u->mouse_side_row),gtk_label_new("Optical mouse side"));
+    gtk_box_append(GTK_BOX(u->mouse_side_row),label("Optical mouse side",NULL));
     const char *mouse_sides[]={"Joy-Con 2 (L)","Joy-Con 2 (R)",NULL};
     u->mouse_side=GTK_DROP_DOWN(gtk_drop_down_new_from_strings(mouse_sides));
     gtk_drop_down_set_selected(u->mouse_side,u->mouse_source_side);
@@ -3108,8 +3146,10 @@ static void activate(GtkApplication *app,gpointer unused) {
     gtk_box_append(GTK_BOX(hero),u->mouse_panel);
     mouse_area_update(u);
 
-    u->pro_color_panel=
-        gtk_box_new(GTK_ORIENTATION_HORIZONTAL,24);
+    u->pro_color_panel=gtk_flow_box_new();
+    gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(u->pro_color_panel),GTK_SELECTION_NONE);
+    gtk_flow_box_set_row_spacing(GTK_FLOW_BOX(u->pro_color_panel),3);
+    gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(u->pro_color_panel),4);
 
     gtk_widget_set_halign(
         u->pro_color_panel,
@@ -3139,29 +3179,29 @@ static void activate(GtkApplication *app,gpointer unused) {
             &u->pro_right_grip_color,
             u);
 
-    gtk_box_append(
-        GTK_BOX(u->pro_color_panel),
+    gtk_flow_box_insert(
+        GTK_FLOW_BOX(u->pro_color_panel),
         color_control(
             "Body",
-            u->pro_body_color_button));
+            u->pro_body_color_button),-1);
 
-    gtk_box_append(
-        GTK_BOX(u->pro_color_panel),
+    gtk_flow_box_insert(
+        GTK_FLOW_BOX(u->pro_color_panel),
         color_control(
             "Buttons",
-            u->pro_button_color_button));
+            u->pro_button_color_button),-1);
 
-    gtk_box_append(
-        GTK_BOX(u->pro_color_panel),
+    gtk_flow_box_insert(
+        GTK_FLOW_BOX(u->pro_color_panel),
         color_control(
             "Left grip",
-            u->pro_left_grip_color_button));
+            u->pro_left_grip_color_button),-1);
 
-    gtk_box_append(
-        GTK_BOX(u->pro_color_panel),
+    gtk_flow_box_insert(
+        GTK_FLOW_BOX(u->pro_color_panel),
         color_control(
             "Right grip",
-            u->pro_right_grip_color_button));
+            u->pro_right_grip_color_button),-1);
 
     gtk_box_append(
         GTK_BOX(hero),
@@ -3176,22 +3216,26 @@ static void activate(GtkApplication *app,gpointer unused) {
         GTK_BOX(hero),
         GTK_WIDGET(u->metrics));
 
-    gtk_box_append(GTK_BOX(box),hero);
-    AdwPreferencesGroup *g=group(box,"Bluetooth session","Starting a session requests administrator authentication and temporarily pauses other Bluetooth services.");
+    gtk_box_append(GTK_BOX(preview_col),hero);
+    AdwPreferencesGroup *g=group(controls_col,"Bluetooth session","Starting a session requests administrator authentication and temporarily pauses other Bluetooth services.");
     const char *controllers[]={"Nintendo Switch Pro Controller","Nintendo Joy-Con Pair","Nintendo Switch 2 Joy-Con 2 (L) · BLE","Nintendo Switch 2 Joy-Con 2 (R) · BLE","Joy-Con 1 (L) Classic + Joy-Con 2 (R) BLE",
         "Nintendo Switch 2 Joy-Con 2 Pair (L/R) · BLE",
         "Joy-Con 2 (L) BLE + Joy-Con 1 (R) Classic",NULL};u->controllers=GTK_DROP_DOWN(gtk_drop_down_new_from_strings(controllers));row(g,"Emulated controller","Sony and Microsoft profiles can be added to the same controller catalog later.",GTK_WIDGET(u->controllers));
-    u->adapter_names=gtk_string_list_new(NULL);u->adapters=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->adapter_names),NULL));gtk_widget_set_size_request(GTK_WIDGET(u->adapters),280,-1);
+    u->adapter_names=gtk_string_list_new(NULL);u->adapters=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->adapter_names),NULL));gtk_widget_set_size_request(GTK_WIDGET(u->adapters),180,-1);
     u->primary_row=row(g,"Primary adapter","Pro Controller, or left Joy-Con. Choose by address; hci numbers can change after reboot.",GTK_WIDGET(u->adapters));
-    u->secondary_names=gtk_string_list_new(NULL);u->secondary=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->secondary_names),NULL));gtk_widget_set_size_request(GTK_WIDGET(u->secondary),280,-1);
+    u->secondary_names=gtk_string_list_new(NULL);u->secondary=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->secondary_names),NULL));gtk_widget_set_size_request(GTK_WIDGET(u->secondary),180,-1);
     u->secondary_row=row(g,"Right Joy-Con adapter","A pair requires a second, distinct Classic Bluetooth identity.",GTK_WIDGET(u->secondary));gtk_widget_set_visible(u->secondary_row,FALSE);
-    u->controller_hint=GTK_LABEL(label("Pair / Sync works from Change Grip/Order. Persistent reconnect is experimental because the Switch requests a temporary No Bonding key.","dim-label"));gtk_box_append(GTK_BOX(box),GTK_WIDGET(u->controller_hint));
+    u->controller_hint=GTK_LABEL(label("Pair / Sync works from Change Grip/Order. Persistent reconnect is experimental because the Switch requests a temporary No Bonding key.","dim-label"));gtk_box_append(GTK_BOX(controls_col),GTK_WIDGET(u->controller_hint));
 
     u->paired_console=GTK_LABEL(label("Not paired yet","dim-label"));
     row(g,"Paired Switch","Stored after the first successful pairing. Reconnect uses the same Bluetooth adapter identity and console address.",GTK_WIDGET(u->paired_console));
     update_paired_console(u);
 
-    GtkWidget *actions=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);
+    GtkWidget *actions=gtk_flow_box_new();
+    gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(actions),GTK_SELECTION_NONE);
+    gtk_flow_box_set_row_spacing(GTK_FLOW_BOX(actions),3);
+    gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(actions),3);
+    gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(actions),3);
     u->start=button("Reconnect paired Switch (experimental)",G_CALLBACK(start),u);
     gtk_widget_add_css_class(u->start,"suggested-action");
     u->sync=button("Pair / Sync new Switch",G_CALLBACK(sync_clicked),u);
@@ -3199,17 +3243,17 @@ static void activate(GtkApplication *app,gpointer unused) {
     u->stop=button("Stop session",G_CALLBACK(stop_clicked),u);
     gtk_widget_set_sensitive(u->stop,FALSE);
 
-    gtk_box_append(GTK_BOX(actions),u->start);
-    gtk_box_append(GTK_BOX(actions),u->sync);
-    gtk_box_append(GTK_BOX(actions),u->finish);
-    gtk_box_append(GTK_BOX(actions),u->stop);
-    gtk_box_append(GTK_BOX(actions),button("Refresh adapters",G_CALLBACK(adapters_scan),u));
-    gtk_box_append(GTK_BOX(box),actions);
-    u->error=GTK_LABEL(label("","error"));gtk_box_append(GTK_BOX(box),GTK_WIDGET(u->error));
-    g=group(box,"Input routing","Pair / Sync is validated. Reconnect remains available for diagnostics while persistent bonding is unresolved.");
+    gtk_flow_box_insert(GTK_FLOW_BOX(actions),u->start,-1);
+    gtk_flow_box_insert(GTK_FLOW_BOX(actions),u->sync,-1);
+    gtk_flow_box_insert(GTK_FLOW_BOX(actions),u->finish,-1);
+    gtk_flow_box_insert(GTK_FLOW_BOX(actions),u->stop,-1);
+    gtk_flow_box_insert(GTK_FLOW_BOX(actions),button("Refresh adapters",G_CALLBACK(adapters_scan),u),-1);
+    gtk_box_append(GTK_BOX(controls_col),actions);
+    u->error=GTK_LABEL(label("","error"));gtk_box_append(GTK_BOX(controls_col),GTK_WIDGET(u->error));
+    g=group(controls_col,"Input routing","Pair / Sync is validated. Reconnect remains available for diagnostics while persistent bonding is unresolved.");
     const char *sources[]={"Keyboard","PC controller",NULL};u->source=GTK_DROP_DOWN(gtk_drop_down_new_from_strings(sources));gtk_drop_down_set_selected(u->source,u->saved_source);row(g,"Input source",NULL,GTK_WIDGET(u->source));
     u->arm=gtk_switch_new();gtk_switch_set_active(GTK_SWITCH(u->arm),u->saved_arm);row(g,"Enable input","Remembered between launches. Escape pauses keyboard input.",u->arm);
-    u->source_hint=GTK_LABEL(label(u->saved_source==0?"Keyboard input works while this window is focused. Escape pauses input.":"Standard SDL gamepad mapping. Customize buttons and stick settings below.","dim-label"));gtk_box_append(GTK_BOX(box),GTK_WIDGET(u->source_hint));
+    u->source_hint=GTK_LABEL(label(u->saved_source==0?"Keyboard input works while this window is focused. Escape pauses input.":"Standard SDL gamepad mapping. Customize buttons and stick settings below.","dim-label"));gtk_box_append(GTK_BOX(controls_col),GTK_WIDGET(u->source_hint));
     box=page(u,"keyboard","Keyboard bindings","Map keys to controller buttons and both sticks. Duplicate bindings are moved to the new action.");
     u->capture_hint=label("Click a binding to change it. Escape cancels; Backspace clears it.","dim-label");gtk_box_append(GTK_BOX(box),u->capture_hint);
     GtkWidget *presets=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);GtkWidget *wasd=button("WASD defaults",G_CALLBACK(defaults),u),*azerty=button("ZQSD defaults",G_CALLBACK(defaults),u);g_object_set_data(G_OBJECT(azerty),"azerty",GINT_TO_POINTER(1));gtk_box_append(GTK_BOX(presets),wasd);gtk_box_append(GTK_BOX(presets),azerty);gtk_box_append(GTK_BOX(box),presets);
@@ -3222,8 +3266,8 @@ static void activate(GtkApplication *app,gpointer unused) {
     for(int i=0;i<INPUT_BUTTONS;i++){GtkWidget *b=button("",G_CALLBACK(bind_pad),u);u->pad_buttons[i]=GTK_BUTTON(b);g_object_set_data(G_OBJECT(b),"index",GINT_TO_POINTER(i));gtk_widget_add_css_class(b,"binding");row(g,input_action_names[i],NULL,b);}
     box=page(u,"settings","Settings","Fine-tune input response and configure the emulated controller.");
     g=group(box,"Stick response","A radial dead zone avoids drift while preserving direction.");
-    u->deadzone=GTK_SCALE(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,0,50,1));gtk_widget_set_size_request(GTK_WIDGET(u->deadzone),230,-1);gtk_scale_set_digits(u->deadzone,0);row(g,"Dead zone (%)",NULL,GTK_WIDGET(u->deadzone));
-    u->sensitivity=GTK_SCALE(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,25,200,5));gtk_widget_set_size_request(GTK_WIDGET(u->sensitivity),230,-1);gtk_scale_set_digits(u->sensitivity,0);row(g,"Sensitivity (%)",NULL,GTK_WIDGET(u->sensitivity));
+    u->deadzone=GTK_SCALE(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,0,50,1));gtk_widget_set_size_request(GTK_WIDGET(u->deadzone),170,-1);gtk_scale_set_digits(u->deadzone,0);row(g,"Dead zone (%)",NULL,GTK_WIDGET(u->deadzone));
+    u->sensitivity=GTK_SCALE(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,25,200,5));gtk_widget_set_size_request(GTK_WIDGET(u->sensitivity),170,-1);gtk_scale_set_digits(u->sensitivity,0);row(g,"Sensitivity (%)",NULL,GTK_WIDGET(u->sensitivity));
     const char *axes[]={"Invert left X","Invert left Y","Invert right X","Invert right Y"};
     for(int i=0;i<4;i++){u->invert[i]=GTK_SWITCH(gtk_switch_new());row(g,axes[i],NULL,GTK_WIDGET(u->invert[i]));g_signal_connect(u->invert[i],"notify::active",G_CALLBACK(settings_changed),u);}
     u->swap=GTK_SWITCH(gtk_switch_new());row(g,"Swap sticks","Swap the two physical gamepad sticks.",GTK_WIDGET(u->swap));

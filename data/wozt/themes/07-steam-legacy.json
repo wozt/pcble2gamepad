@@ -1,0 +1,27 @@
+{
+  "id": "steam-legacy",
+  "name": "Steam Legacy",
+  "colors": {
+    "background": "#303b30",
+    "panel": "#3e4939",
+    "entry": "#28342c",
+    "border": "#6b785c",
+    "text": "#ecf0df",
+    "muted": "#b6c2a6",
+    "accent": "#c8d486",
+    "button": "#4b5944",
+    "hover": "#56674d",
+    "active": "#637752",
+    "negative": "#ffa34f"
+  },
+  "gamepad": {
+    "background": "#2e392f",
+    "shell": "#53634b",
+    "screen": "#253229",
+    "border": "#819176",
+    "text": "#e9efdf",
+    "muted": "#bdc8ae",
+    "accent": "#d0dd8d",
+    "negative": "#ffa34f"
+  }
+}

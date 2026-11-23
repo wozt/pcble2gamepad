@@ -1,0 +1,27 @@
+{
+  "id": "rose",
+  "name": "Rose",
+  "colors": {
+    "background": "#21161e",
+    "panel": "#30202c",
+    "entry": "#1b1119",
+    "border": "#69465d",
+    "text": "#f6e5ed",
+    "muted": "#cfacc0",
+    "accent": "#ffa3d0",
+    "button": "#4b3043",
+    "hover": "#65405b",
+    "active": "#823f68",
+    "negative": "#ffb663"
+  },
+  "gamepad": {
+    "background": "#24121e",
+    "shell": "#4d2d43",
+    "screen": "#2b1526",
+    "border": "#976782",
+    "text": "#f8e6f0",
+    "muted": "#d4acc1",
+    "accent": "#ff9ac7",
+    "negative": "#ffc06f"
+  }
+}

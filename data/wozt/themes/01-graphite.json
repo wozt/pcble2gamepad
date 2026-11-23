@@ -1,0 +1,27 @@
+{
+  "id": "graphite",
+  "name": "Graphite",
+  "colors": {
+    "background": "#222224",
+    "panel": "#2c2c2f",
+    "entry": "#1b1b1d",
+    "border": "#505053",
+    "text": "#eeeeef",
+    "muted": "#b5b5b8",
+    "accent": "#e4e4e7",
+    "button": "#38383c",
+    "hover": "#46464a",
+    "active": "#59595e",
+    "negative": "#f3a35d"
+  },
+  "gamepad": {
+    "background": "#18181a",
+    "shell": "#343437",
+    "screen": "#1e1e21",
+    "border": "#656569",
+    "text": "#f2f2f3",
+    "muted": "#b5b5b8",
+    "accent": "#e4e4e7",
+    "negative": "#f3a35d"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "id": "lime",
+  "name": "Apple Lime",
+  "colors": {
+    "background": "#202616",
+    "panel": "#303b1c",
+    "entry": "#1b2211",
+    "border": "#67783c",
+    "text": "#f2f8d8",
+    "muted": "#c5d4a3",
+    "accent": "#c6ee46",
+    "button": "#3d5120",
+    "hover": "#506b25",
+    "active": "#708b2d",
+    "negative": "#ffd75b"
+  },
+  "gamepad": {
+    "background": "#222d14",
+    "shell": "#526a29",
+    "screen": "#25341a",
+    "border": "#92b64a",
+    "text": "#eff9d2",
+    "muted": "#c3d89d",
+    "accent": "#cdf24a",
+    "negative": "#ffd75b"
+  }
+}

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <title>pcble2gamepad</title>
+  <rect width="128" height="128" rx="28" fill="#182431"/>
+  <rect x="27" y="15" width="31" height="98" rx="15.5" fill="#67c7e5"/>
+  <rect x="70" y="15" width="31" height="98" rx="15.5" fill="#f58b86"/>
+  <circle cx="43" cy="40" r="10" fill="#1d3643"/>
+  <circle cx="85" cy="76" r="10" fill="#492e35"/>
+  <path d="M43 74v22m-11-11h22" stroke="#1d3643" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="85" cy="37" r="4" fill="#492e35"/>
+  <circle cx="93" cy="45" r="4" fill="#492e35"/>
+  <circle cx="77" cy="45" r="4" fill="#492e35"/>
+  <circle cx="85" cy="53" r="4" fill="#492e35"/>
+</svg>
