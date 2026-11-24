@@ -238,6 +238,15 @@ static void apply_theme(WoztUi *ui) {
         ".wozt-root preferencesgroup { margin:0; padding:0; }"
         ".wozt-root .wozt-dashboard-section { margin:0; padding:0; }"
         ".wozt-root .wozt-dashboard-section > box { margin:0; padding:0; }"
+        /* GTK4/libadwaita: flatten *both* dropdown boundaries and all
+         * inherited rounded backgrounds without changing palette data. */
+        ".wozt-root * { border-radius:0; }"
+        ".wozt-root .wozt-bar dropdown { border:0; background-color:transparent; box-shadow:none; padding:0; }"
+        ".wozt-root .wozt-bar dropdown > button { border-radius:0; box-shadow:none; }"
+        ".wozt-root .wozt-bar dropdown > button > box { border-radius:0; }"
+        ".wozt-root dropdown, .wozt-root popover, .wozt-root switch, .wozt-root trough, .wozt-root slider, .wozt-root row, .wozt-root frame, .wozt-root .card { border-radius:0; box-shadow:none; }"
+        ".wozt-root preferencesgroup dropdown, .wozt-root .card dropdown { border:0; background-color:transparent; }"
+        "popover > contents, tooltip, dialog { border-radius:0; }"
         ".wozt-root .error { color:%s; }"
         "popover > contents, tooltip, dialog { background-color:%s; color:%s; }"
         "popover button:hover { background-color:%s; }",

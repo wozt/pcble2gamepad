@@ -214,46 +214,26 @@ static void dashboard_peer_label_changed(GObject *object,GParamSpec *pspec,gpoin
         gtk_label_get_text(GTK_LABEL(object)));
 }
 static GtkWidget *page(Ui *u,const char *id,const char *title,const char *subtitle) {
-    /* Keep the existing widget construction/callbacks, but not GtkStack pages.
-     * There is one scroll container, shared by every functional section. */
+    /* Always-visible panels. Only the whole dashboard can scroll vertically. */
+    GtkWidget *panel=gtk_box_new(GTK_ORIENTATION_VERTICAL,3);
+    GtkWidget *heading=label(title,"title-1");
     GtkWidget *box=gtk_box_new(GTK_ORIENTATION_VERTICAL,4);
-    gtk_widget_set_hexpand(box,TRUE);
-    if(!strcmp(id,"overview")) {
-        gtk_box_append(GTK_BOX(u->dashboard_preview),box);
-        gtk_widget_set_tooltip_text(box,subtitle);
-        if(active_wozt)
-            wozt_ui_bind_text(active_wozt,G_OBJECT(box),"tooltip-text",subtitle);
-        return box;
-    }
-
-    GtkWidget *panel=gtk_expander_new(title);
     gtk_widget_add_css_class(panel,"wozt-dashboard-section");
     gtk_widget_set_hexpand(panel,TRUE);
-    if(!strcmp(id,"keyboard") || !strcmp(id,"controller")) {
-        /* Mappings can contain dozens of real buttons: keep all of them
-         * reachable without pushing unrelated panels off the dashboard. */
-        GtkWidget *mapping_scroll=gtk_scrolled_window_new();
-        gtk_widget_set_size_request(mapping_scroll,-1,214);
-        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(mapping_scroll),
-            GTK_POLICY_NEVER,GTK_POLICY_AUTOMATIC);
-        gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(mapping_scroll),box);
-        gtk_expander_set_child(GTK_EXPANDER(panel),mapping_scroll);
-    } else {
-        gtk_expander_set_child(GTK_EXPANDER(panel),box);
-    }
-    gtk_expander_set_expanded(GTK_EXPANDER(panel),
-        !strcmp(id,"settings") || !strcmp(id,"diagnostics") ||
-        !strcmp(id,"controller"));
+    gtk_widget_set_hexpand(box,TRUE);
     gtk_widget_set_tooltip_text(panel,subtitle);
+    gtk_box_append(GTK_BOX(panel),heading);
+    gtk_box_append(GTK_BOX(panel),box);
     if(active_wozt) {
-        wozt_ui_bind_text(active_wozt,G_OBJECT(panel),"label",title);
         wozt_ui_bind_text(active_wozt,G_OBJECT(panel),"tooltip-text",subtitle);
     }
-
+    if(!strcmp(id,"overview")) {
+        gtk_box_append(GTK_BOX(u->dashboard_preview),panel);
+        return box;
+    }
     GtkWidget *column=(!strcmp(id,"settings") || !strcmp(id,"keyboard"))
         ?u->dashboard_left:u->dashboard_right;
     gtk_box_append(GTK_BOX(column),panel);
-    /* Settings are immediately available; keyboard bindings remain nearby. */
     if(!strcmp(id,"settings"))
         gtk_box_reorder_child_after(GTK_BOX(column),panel,NULL);
     return box;
@@ -3205,7 +3185,7 @@ static void activate(GtkApplication *app,gpointer unused) {
     dashboard_peer_label_changed(G_OBJECT(u->peer),NULL,NULL);
     gtk_box_append(GTK_BOX(hero),GTK_WIDGET(u->peer));
     u->drawing=gtk_drawing_area_new();
-    gtk_widget_set_size_request(u->drawing,-1,112);
+    gtk_widget_set_size_request(u->drawing,-1,95);
     gtk_widget_set_focusable(u->drawing,TRUE);
     gtk_drawing_area_set_draw_func(
         GTK_DRAWING_AREA(u->drawing),
@@ -3403,7 +3383,7 @@ static void activate(GtkApplication *app,gpointer unused) {
     box=page(u,"diagnostics","Diagnostics","Live session events, association requests and HID initialization. Simulation is always labeled.");
     u->traffic_logs=GTK_SWITCH(gtk_switch_new());gtk_switch_set_active(u->traffic_logs,u->saved_traffic);row(group(box,"Logging",NULL),"Detailed HID traffic","Show repetitive hid_rx packets and periodic status lines. Remembered between launches.",GTK_WIDGET(u->traffic_logs));
     gtk_box_append(GTK_BOX(box),button("Copy diagnostics",G_CALLBACK(copy_logs),u));GtkWidget *view=gtk_text_view_new();gtk_text_view_set_editable(GTK_TEXT_VIEW(view),FALSE);gtk_text_view_set_monospace(GTK_TEXT_VIEW(view),TRUE);gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(view),GTK_WRAP_WORD_CHAR);u->logs=gtk_text_view_get_buffer(GTK_TEXT_VIEW(view));GtkWidget *log_scroll=gtk_scrolled_window_new();
-    gtk_widget_set_size_request(log_scroll,-1,86);
+    gtk_widget_set_size_request(log_scroll,-1,105);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(log_scroll),
         GTK_POLICY_NEVER,GTK_POLICY_AUTOMATIC);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(log_scroll),view);
@@ -3425,4 +3405,4 @@ static void activate(GtkApplication *app,gpointer unused) {
     GtkEventController *keys=gtk_event_controller_key_new();gtk_event_controller_set_propagation_phase(keys,GTK_PHASE_CAPTURE);g_signal_connect(keys,"key-pressed",G_CALLBACK(key_pressed),u);g_signal_connect(keys,"key-released",G_CALLBACK(key_released),u);gtk_widget_add_controller(GTK_WIDGET(u->window),keys);
     controller_selected(NULL,NULL,u);u->timer=g_timeout_add(16,tick,u);request(u,"status");if(u->wozt)wozt_ui_autobind_tree(u->wozt,GTK_WIDGET(u->window));gtk_window_present(u->window);
 }
-int main(int argc,char **argv){AdwApplication *app=adw_application_new("io.github.wozt.pcble2gamepad",G_APPLICATION_DEFAULT_FLAGS);g_signal_connect(app,"activate",G_CALLBACK(activate),NULL);int result=g_application_run(G_APPLICATION(app),argc,argv);g_object_unref(app);SDL_Quit();return result;}
+int main(int argc,char **argv){g_set_prgname("io.github.wozt.pcble2gamepad");AdwApplication *app=adw_application_new("io.github.wozt.pcble2gamepad",G_APPLICATION_DEFAULT_FLAGS);g_signal_connect(app,"activate",G_CALLBACK(activate),NULL);int result=g_application_run(G_APPLICATION(app),argc,argv);g_object_unref(app);SDL_Quit();return result;}
