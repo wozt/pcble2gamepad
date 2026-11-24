@@ -471,8 +471,13 @@ static void wozt_x11_window_identity(GtkWidget *widget,gpointer unused) {
     (void)unused;
     GdkSurface *surface=gtk_native_get_surface(GTK_NATIVE(widget));
     if(!surface || !GDK_IS_X11_SURFACE(surface))return;
+    /* GTK 4.18 marks these X11 accessors as deprecated. The desktop icon
+     * bridge still needs the native X11 Display and Window on X11. Keep
+     * -Werror enabled everywhere else, including the rest of this function. */
+    G_GNUC_BEGIN_IGNORE_DEPRECATIONS
     Display *display=gdk_x11_display_get_xdisplay(gtk_widget_get_display(widget));
     Window xid=gdk_x11_surface_get_xid(surface);
+    G_GNUC_END_IGNORE_DEPRECATIONS
     if(!display || !xid)return;
 
     /* Match StartupWMClass from the installed .desktop file. */
