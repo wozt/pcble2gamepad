@@ -231,6 +231,13 @@ static void apply_theme(WoztUi *ui) {
         ".wozt-root frame, .wozt-root preferencesgroup, .wozt-root .card {"
         " border-radius:0; border-color:%s; margin:0; padding:1px; }"
         ".wozt-root .binding { min-width:72px; }"
+        /* Override oversized libadwaita row padding while keeping its
+         * accessibility, callbacks and the seven existing theme colors. */
+        ".wozt-root .wozt-compact-row { min-height:24px; padding:0 3px; margin:0; border-radius:0; }"
+        ".wozt-root .wozt-compact-row > box { min-height:0; padding:0; margin:0; }"
+        ".wozt-root preferencesgroup { margin:0; padding:0; }"
+        ".wozt-root .wozt-dashboard-section { margin:0; padding:0; }"
+        ".wozt-root .wozt-dashboard-section > box { margin:0; padding:0; }"
         ".wozt-root .error { color:%s; }"
         "popover > contents, tooltip, dialog { background-color:%s; color:%s; }"
         "popover button:hover { background-color:%s; }",

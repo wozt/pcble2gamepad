@@ -53,6 +53,7 @@ typedef struct {
     /* All five existing functional panels share one scrolled dashboard. */
     GtkWidget *dashboard_root,*dashboard_preview,*dashboard_columns;
     GtkWidget *dashboard_left,*dashboard_right,*dashboard_session_columns;
+    GtkWidget *dashboard_top_columns;
 } Ui;
 static WoztUi *active_wozt;
 typedef struct {char *path,*path2;JsonObject *request,*request2;
@@ -189,6 +190,7 @@ static void ui_unref(Ui *u) {
 static GtkWidget *label(const char *s,const char *css) {GtkWidget *w=gtk_label_new(s);gtk_label_set_xalign(GTK_LABEL(w),0);gtk_label_set_wrap(GTK_LABEL(w),TRUE);if(css)gtk_widget_add_css_class(w,css);if(active_wozt)wozt_ui_bind_text(active_wozt,G_OBJECT(w),"label",s);return w;}
 static GtkWidget *row(AdwPreferencesGroup *g,const char *title,const char *subtitle,GtkWidget *suffix) {
     GtkWidget *r=adw_action_row_new();adw_preferences_row_set_title(ADW_PREFERENCES_ROW(r),title);
+    gtk_widget_add_css_class(r,"wozt-compact-row");
     if(subtitle && *subtitle) {
         gtk_widget_set_tooltip_text(r,subtitle);
         if(active_wozt)wozt_ui_bind_text(active_wozt,G_OBJECT(r),"tooltip-text",subtitle);
@@ -206,6 +208,11 @@ static AdwPreferencesGroup *group(GtkWidget *box,const char *title,const char *d
     if(active_wozt)wozt_ui_bind_text(active_wozt,G_OBJECT(g),"title",title);
     gtk_box_append(GTK_BOX(box),GTK_WIDGET(g));return g;
 }
+static void dashboard_peer_label_changed(GObject *object,GParamSpec *pspec,gpointer data) {
+    (void)pspec;(void)data;
+    gtk_widget_set_tooltip_text(GTK_WIDGET(object),
+        gtk_label_get_text(GTK_LABEL(object)));
+}
 static GtkWidget *page(Ui *u,const char *id,const char *title,const char *subtitle) {
     /* Keep the existing widget construction/callbacks, but not GtkStack pages.
      * There is one scroll container, shared by every functional section. */
@@ -222,9 +229,21 @@ static GtkWidget *page(Ui *u,const char *id,const char *title,const char *subtit
     GtkWidget *panel=gtk_expander_new(title);
     gtk_widget_add_css_class(panel,"wozt-dashboard-section");
     gtk_widget_set_hexpand(panel,TRUE);
-    gtk_expander_set_child(GTK_EXPANDER(panel),box);
+    if(!strcmp(id,"keyboard") || !strcmp(id,"controller")) {
+        /* Mappings can contain dozens of real buttons: keep all of them
+         * reachable without pushing unrelated panels off the dashboard. */
+        GtkWidget *mapping_scroll=gtk_scrolled_window_new();
+        gtk_widget_set_size_request(mapping_scroll,-1,214);
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(mapping_scroll),
+            GTK_POLICY_NEVER,GTK_POLICY_AUTOMATIC);
+        gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(mapping_scroll),box);
+        gtk_expander_set_child(GTK_EXPANDER(panel),mapping_scroll);
+    } else {
+        gtk_expander_set_child(GTK_EXPANDER(panel),box);
+    }
     gtk_expander_set_expanded(GTK_EXPANDER(panel),
-        !strcmp(id,"settings") || !strcmp(id,"diagnostics"));
+        !strcmp(id,"settings") || !strcmp(id,"diagnostics") ||
+        !strcmp(id,"controller"));
     gtk_widget_set_tooltip_text(panel,subtitle);
     if(active_wozt) {
         wozt_ui_bind_text(active_wozt,G_OBJECT(panel),"label",title);
@@ -2424,7 +2443,12 @@ static gboolean tick(gpointer data) {
     /* Reorient existing widgets only when crossing an actual breakpoint. */
     int dashboard_width=gtk_widget_get_width(GTK_WIDGET(u->window));
     if(dashboard_width>0) {
-        GtkOrientation sections=dashboard_width<860?
+        GtkOrientation top=dashboard_width<850?
+            GTK_ORIENTATION_VERTICAL:GTK_ORIENTATION_HORIZONTAL;
+        if(u->dashboard_top_columns &&
+           gtk_orientable_get_orientation(GTK_ORIENTABLE(u->dashboard_top_columns))!=top)
+            gtk_orientable_set_orientation(GTK_ORIENTABLE(u->dashboard_top_columns),top);
+        GtkOrientation sections=dashboard_width<830?
             GTK_ORIENTATION_VERTICAL:GTK_ORIENTATION_HORIZONTAL;
         if(u->dashboard_columns &&
            gtk_orientable_get_orientation(GTK_ORIENTABLE(u->dashboard_columns))!=sections)
@@ -3131,7 +3155,7 @@ static void activate(GtkApplication *app,gpointer unused) {
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
         GTK_POLICY_NEVER,GTK_POLICY_AUTOMATIC);
     gtk_box_append(GTK_BOX(outer),scroll);
-    u->dashboard_root=gtk_box_new(GTK_ORIENTATION_VERTICAL,6);
+    u->dashboard_root=gtk_box_new(GTK_ORIENTATION_VERTICAL,4);
     gtk_widget_set_margin_start(u->dashboard_root,7);
     gtk_widget_set_margin_end(u->dashboard_root,7);
     gtk_widget_set_margin_top(u->dashboard_root,5);
@@ -3140,7 +3164,7 @@ static void activate(GtkApplication *app,gpointer unused) {
 
     u->dashboard_preview=gtk_box_new(GTK_ORIENTATION_VERTICAL,2);
     gtk_box_append(GTK_BOX(u->dashboard_root),u->dashboard_preview);
-    u->dashboard_columns=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);
+    u->dashboard_columns=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,6);
     gtk_box_append(GTK_BOX(u->dashboard_root),u->dashboard_columns);
     u->dashboard_left=gtk_box_new(GTK_ORIENTATION_VERTICAL,6);
     u->dashboard_right=gtk_box_new(GTK_ORIENTATION_VERTICAL,6);
@@ -3150,21 +3174,38 @@ static void activate(GtkApplication *app,gpointer unused) {
     gtk_box_append(GTK_BOX(u->dashboard_columns),u->dashboard_right);
     u->toast=ADW_TOAST_OVERLAY(adw_toast_overlay_new());adw_toast_overlay_set_child(u->toast,wozt_ui_wrap(u->wozt,outer));adw_application_window_set_content(ADW_APPLICATION_WINDOW(u->window),GTK_WIDGET(u->toast));
     GtkWidget *box=page(u,"overview","Connection","Choose the controller presented by your PC, connect it to Switch 2, then route keyboard or gamepad input.");
-    GtkWidget *overview_columns=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);
+    GtkWidget *overview_columns=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,6);
+    u->dashboard_top_columns=overview_columns;
     GtkWidget *preview_col=gtk_box_new(GTK_ORIENTATION_VERTICAL,8);
     GtkWidget *controls_col=gtk_box_new(GTK_ORIENTATION_VERTICAL,8);
-    gtk_widget_set_hexpand(preview_col,TRUE);
+    /* WUP Stream-style top row: compact visual/status at left,
+     * live pairing options at right. Never make the visual 960px wide. */
+    gtk_widget_set_hexpand(preview_col,FALSE);
+    gtk_widget_set_size_request(preview_col,252,-1);
     gtk_widget_set_hexpand(controls_col,TRUE);
     gtk_box_append(GTK_BOX(box),overview_columns);
     gtk_box_append(GTK_BOX(overview_columns),preview_col);
     gtk_box_append(GTK_BOX(overview_columns),controls_col);
-    gtk_orientable_set_orientation(GTK_ORIENTABLE(overview_columns),
-        GTK_ORIENTATION_VERTICAL);
-    GtkWidget *hero=gtk_box_new(GTK_ORIENTATION_VERTICAL,2);gtk_widget_add_css_class(hero,"hero");
-    u->status=GTK_LABEL(label("OFFLINE","connection-badge"));gtk_box_append(GTK_BOX(hero),GTK_WIDGET(u->status));u->hero_title=GTK_LABEL(label("Nintendo Switch Pro Controller","title-2"));gtk_box_append(GTK_BOX(hero),GTK_WIDGET(u->hero_title));
-    u->peer=GTK_LABEL(label("Start a Bluetooth session to connect your console.","dim-label"));gtk_box_append(GTK_BOX(hero),GTK_WIDGET(u->peer));
+    /* The width breakpoint is updated in tick(), without
+     * destroying/recreating active input widgets. */
+    GtkWidget *hero=gtk_box_new(GTK_ORIENTATION_VERTICAL,1);gtk_widget_add_css_class(hero,"hero");
+    GtkWidget *headline=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,5);
+    u->status=GTK_LABEL(label("OFFLINE","connection-badge"));
+    gtk_box_append(GTK_BOX(headline),GTK_WIDGET(u->status));
+    u->hero_title=GTK_LABEL(label("Nintendo Switch Pro Controller","title-2"));
+    gtk_label_set_ellipsize(u->hero_title,PANGO_ELLIPSIZE_END);
+    gtk_widget_set_hexpand(GTK_WIDGET(u->hero_title),TRUE);
+    gtk_box_append(GTK_BOX(headline),GTK_WIDGET(u->hero_title));
+    gtk_box_append(GTK_BOX(hero),headline);
+    u->peer=GTK_LABEL(label("Start a Bluetooth session to connect your console.","dim-label"));
+    gtk_label_set_wrap(u->peer,FALSE);
+    gtk_label_set_ellipsize(u->peer,PANGO_ELLIPSIZE_END);
+    g_signal_connect(u->peer,"notify::label",
+        G_CALLBACK(dashboard_peer_label_changed),NULL);
+    dashboard_peer_label_changed(G_OBJECT(u->peer),NULL,NULL);
+    gtk_box_append(GTK_BOX(hero),GTK_WIDGET(u->peer));
     u->drawing=gtk_drawing_area_new();
-    gtk_widget_set_size_request(u->drawing,-1,125);
+    gtk_widget_set_size_request(u->drawing,-1,112);
     gtk_widget_set_focusable(u->drawing,TRUE);
     gtk_drawing_area_set_draw_func(
         GTK_DRAWING_AREA(u->drawing),
@@ -3281,7 +3322,10 @@ static void activate(GtkApplication *app,gpointer unused) {
     gtk_widget_set_hexpand(session_col,TRUE);
     gtk_widget_set_hexpand(routing_col,TRUE);
     gtk_box_append(GTK_BOX(u->dashboard_session_columns),session_col);
-    gtk_box_append(GTK_BOX(u->dashboard_session_columns),routing_col);
+    /* Input selection and enable switch live under the controller preview,
+     * taking advantage of the left side while Bluetooth takes the right. */
+    gtk_widget_set_hexpand(routing_col,TRUE);
+    gtk_box_append(GTK_BOX(preview_col),routing_col);
     AdwPreferencesGroup *g=group(session_col,"Bluetooth session","Starting a session requests administrator authentication and temporarily pauses other Bluetooth services.");
     const char *controllers[]={"Nintendo Switch Pro Controller","Nintendo Joy-Con Pair","Nintendo Switch 2 Joy-Con 2 (L) · BLE","Nintendo Switch 2 Joy-Con 2 (R) · BLE","Joy-Con 1 (L) Classic + Joy-Con 2 (R) BLE",
         "Nintendo Switch 2 Joy-Con 2 Pair (L/R) · BLE",
@@ -3304,7 +3348,7 @@ static void activate(GtkApplication *app,gpointer unused) {
     gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(actions),GTK_SELECTION_NONE);
     gtk_flow_box_set_row_spacing(GTK_FLOW_BOX(actions),3);
     gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(actions),3);
-    gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(actions),3);
+    gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(actions),5);
     u->start=button("Reconnect paired Switch (experimental)",G_CALLBACK(start),u);
     gtk_widget_add_css_class(u->start,"suggested-action");
     u->sync=button("Pair / Sync new Switch",G_CALLBACK(sync_clicked),u);
@@ -3359,7 +3403,7 @@ static void activate(GtkApplication *app,gpointer unused) {
     box=page(u,"diagnostics","Diagnostics","Live session events, association requests and HID initialization. Simulation is always labeled.");
     u->traffic_logs=GTK_SWITCH(gtk_switch_new());gtk_switch_set_active(u->traffic_logs,u->saved_traffic);row(group(box,"Logging",NULL),"Detailed HID traffic","Show repetitive hid_rx packets and periodic status lines. Remembered between launches.",GTK_WIDGET(u->traffic_logs));
     gtk_box_append(GTK_BOX(box),button("Copy diagnostics",G_CALLBACK(copy_logs),u));GtkWidget *view=gtk_text_view_new();gtk_text_view_set_editable(GTK_TEXT_VIEW(view),FALSE);gtk_text_view_set_monospace(GTK_TEXT_VIEW(view),TRUE);gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(view),GTK_WRAP_WORD_CHAR);u->logs=gtk_text_view_get_buffer(GTK_TEXT_VIEW(view));GtkWidget *log_scroll=gtk_scrolled_window_new();
-    gtk_widget_set_size_request(log_scroll,-1,170);
+    gtk_widget_set_size_request(log_scroll,-1,86);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(log_scroll),
         GTK_POLICY_NEVER,GTK_POLICY_AUTOMATIC);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(log_scroll),view);
