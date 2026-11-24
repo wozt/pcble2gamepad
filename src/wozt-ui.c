@@ -3,6 +3,13 @@
 #include <json-glib/json-glib.h>
 #include <glib/gstdio.h>
 #include <string.h>
+/* GTK4/X11: expose actual WM_CLASS and EWMH icon independently of the
+ * in-window title bar. Wayland retains GtkApplication desktop identity. */
+#if defined(PCBLE2GAMEPAD_HAVE_X11) && defined(GDK_WINDOWING_X11)
+#include <gdk/x11/gdkx.h>
+#include <X11/Xatom.h>
+#include <X11/Xutil.h>
+#endif
 
 #define WOZT_APP_ID "io.github.wozt.pcble2gamepad"
 
@@ -253,7 +260,22 @@ static void apply_theme(WoztUi *ui) {
         p[0],p[4], p[1],p[3],p[6], p[1], p[1],p[3],p[6],p[6],p[5],
         p[7],p[4],p[3],p[8],p[9],p[6],p[9],p[4],p[10],
         p[2],p[4],p[3],p[3],p[10],p[1],p[4],p[8]);
-    gtk_css_provider_load_from_string(ui->css,css);
+    /* Widget colors must come from the active JSON palette, never the
+     * default libadwaita blue (especially switch:checked and scale). */
+    g_autofree char *controls_css=g_strdup_printf(
+        ".wozt-root switch { background-color:%s; border:1px solid %s; border-radius:0; }"
+        ".wozt-root switch:checked { background-color:%s; border-color:%s; }"
+        ".wozt-root switch > slider { background-color:%s; border:1px solid %s; border-radius:0; box-shadow:none; }"
+        ".wozt-root switch:checked > slider { background-color:%s; }"
+        ".wozt-root scale trough { background-color:%s; border:1px solid %s; border-radius:0; min-height:5px; }"
+        ".wozt-root scale highlight { background-color:%s; border-radius:0; }"
+        ".wozt-root scale slider { background-color:%s; border:1px solid %s; border-radius:0; min-width:12px; min-height:12px; box-shadow:none; }"
+        ".wozt-root scale slider:hover { background-color:%s; }"
+        ".wozt-root scale:focus-within slider { outline:1px solid %s; }",
+        p[7],p[3],p[9],p[6],p[4],p[3],p[4],
+        p[2],p[3],p[6],p[6],p[3],p[8],p[6]);
+    g_autofree char *complete_css=g_strconcat(css,controls_css,NULL);
+    gtk_css_provider_load_from_string(ui->css,complete_css);
     adw_style_manager_set_color_scheme(adw_style_manager_get_default(),
         !strcmp(theme->id,"light") ? ADW_COLOR_SCHEME_FORCE_LIGHT :
                                        ADW_COLOR_SCHEME_FORCE_DARK);
@@ -417,6 +439,89 @@ static GtkWidget *icon_button(const char *name,const char *tooltip,
     return button;
 }
 
+#if defined(PCBLE2GAMEPAD_HAVE_X11) && defined(GDK_WINDOWING_X11)
+static char *wozt_icon_file(int size) {
+    g_autofree char *folder=g_strdup_printf("%dx%d",size,size);
+    const char *filename=WOZT_APP_ID ".png";
+    const char *appdir=g_getenv("APPDIR");
+    if(appdir && *appdir) {
+        char *path=g_build_filename(appdir,"usr","share","icons","hicolor",
+                                    folder,"apps",filename,NULL);
+        if(g_file_test(path,G_FILE_TEST_IS_REGULAR))return path;
+        g_free(path);
+    }
+    g_autofree char *exe=g_file_read_link("/proc/self/exe",NULL);
+    if(exe) {
+        g_autofree char *binary_dir=g_path_get_dirname(exe);
+        g_autofree char *prefix=g_path_get_dirname(binary_dir);
+        char *path=g_build_filename(prefix,"data","icons","hicolor",
+                                    folder,"apps",filename,NULL);
+        if(g_file_test(path,G_FILE_TEST_IS_REGULAR))return path;
+        g_free(path);
+    }
+    for(const char *const *p=g_get_system_data_dirs();*p;p++) {
+        char *path=g_build_filename(*p,"icons","hicolor",folder,"apps",
+                                    filename,NULL);
+        if(g_file_test(path,G_FILE_TEST_IS_REGULAR))return path;
+        g_free(path);
+    }
+    return NULL;
+}
+static void wozt_x11_window_identity(GtkWidget *widget,gpointer unused) {
+    (void)unused;
+    GdkSurface *surface=gtk_native_get_surface(GTK_NATIVE(widget));
+    if(!surface || !GDK_IS_X11_SURFACE(surface))return;
+    Display *display=gdk_x11_display_get_xdisplay(gtk_widget_get_display(widget));
+    Window xid=gdk_x11_surface_get_xid(surface);
+    if(!display || !xid)return;
+
+    /* Match StartupWMClass from the installed .desktop file. */
+    XClassHint wm_class={.res_name=(char *)WOZT_APP_ID,
+                         .res_class=(char *)WOZT_APP_ID};
+    XSetClassHint(display,xid,&wm_class);
+
+    /* GTK4 does not reliably publish _NET_WM_ICON for undecorated windows.
+     * Populate 64px and 128px ARGB icons, including their alpha channels. */
+    GArray *argb=g_array_new(FALSE,FALSE,sizeof(gulong));
+    const int sizes[]={64,128};
+    for(guint i=0;i<G_N_ELEMENTS(sizes);i++) {
+        g_autofree char *path=wozt_icon_file(sizes[i]);
+        if(!path)continue;
+        g_autoptr(GError) error=NULL;
+        g_autoptr(GdkPixbuf) image=gdk_pixbuf_new_from_file(path,&error);
+        if(!image) {
+            g_warning("Could not load taskbar icon %s: %s",path,
+                      error?error->message:"unknown error");
+            continue;
+        }
+        int width=gdk_pixbuf_get_width(image);
+        int height=gdk_pixbuf_get_height(image);
+        int channels=gdk_pixbuf_get_n_channels(image);
+        int stride=gdk_pixbuf_get_rowstride(image);
+        gboolean alpha=gdk_pixbuf_get_has_alpha(image);
+        const guchar *pixels=gdk_pixbuf_read_pixels(image);
+        gulong val=(gulong)width;
+        g_array_append_val(argb,val);
+        val=(gulong)height;
+        g_array_append_val(argb,val);
+        for(int y=0;y<height;y++)for(int x=0;x<width;x++) {
+            const guchar *px=pixels+(gsize)y*(gsize)stride+(gsize)x*(gsize)channels;
+            gulong a=alpha?(gulong)px[3]:255UL;
+            val=(a<<24)|((gulong)px[0]<<16)|((gulong)px[1]<<8)|(gulong)px[2];
+            g_array_append_val(argb,val);
+        }
+    }
+    if(argb->len) {
+        Atom property=XInternAtom(display,"_NET_WM_ICON",False);
+        XChangeProperty(display,xid,property,XA_CARDINAL,32,PropModeReplace,
+                        (const unsigned char *)argb->data,(int)argb->len);
+    } else {
+        g_warning("No taskbar PNG icons found for %s",WOZT_APP_ID);
+    }
+    g_array_unref(argb);
+    XFlush(display);
+}
+#endif
 WoztUi *wozt_ui_new(GtkWindow *window) {
     WoztUi *ui=g_new0(WoztUi,1);ui->window=window;
     ui->display=g_object_ref(gtk_widget_get_display(GTK_WIDGET(window)));
@@ -446,8 +551,11 @@ WoztUi *wozt_ui_new(GtkWindow *window) {
     gtk_widget_add_css_class(GTK_WIDGET(window),"wozt-root");
     gtk_window_set_decorated(window,FALSE);
     gtk_window_set_resizable(window,TRUE);
-    /* GTK4 4.14 deprecates GtkWindow icon setters: the stable application
-     * ID and installed XDG desktop/icon identity own the taskbar icon. */
+#if defined(PCBLE2GAMEPAD_HAVE_X11) && defined(GDK_WINDOWING_X11)
+    g_signal_connect(window,"realize",G_CALLBACK(wozt_x11_window_identity),NULL);
+    g_signal_connect(window,"map",G_CALLBACK(wozt_x11_window_identity),NULL);
+#endif
+    /* Install icon resources and also publish an actual X11 _NET_WM_ICON. */
     g_autofree char *dev_icon_dir=g_build_filename(g_get_current_dir(),"data",NULL);
     gtk_icon_theme_add_search_path(gtk_icon_theme_get_for_display(ui->display),
                                    dev_icon_dir);

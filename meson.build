@@ -40,9 +40,13 @@ rsvg = dependency('librsvg-2.0', version: '>=2.46', required: get_option('gui'))
 if gtk.found() and adw.found() and rsvg.found()
   sdl = dependency('sdl2', version: '>=2.0.14')
   x11 = dependency('x11', required: false)
+  gui_c_args = []
+  if x11.found()
+    gui_c_args += ['-DPCBLE2GAMEPAD_HAVE_X11=1']
+  endif
   math = meson.get_compiler('c').find_library('m')
   executable('pcble2gamepad-ble-lab', 'src/gui-ble.c', link_with: client, dependencies: [gio, json, gtk, adw], install: true)
-  executable('pcble2gamepad', ['src/gui.c', 'src/input-model.c', 'src/wozt-ui.c'], link_with: client, dependencies: [gio, json, gtk, adw, rsvg, sdl, math, x11], install: true)
+  executable('pcble2gamepad', ['src/gui.c', 'src/input-model.c', 'src/wozt-ui.c'], link_with: client, dependencies: [gio, json, gtk, adw, rsvg, sdl, math, x11], c_args: gui_c_args, install: true)
   install_data(
     [
       'assets/svg/pro-controller.svg',
@@ -54,6 +58,8 @@ if gtk.found() and adw.found() and rsvg.found()
     include_directories: inc, dependencies: [gio, sdl, math]))
   install_subdir('data/wozt', install_dir: get_option('datadir') / 'pcble2gamepad')
   install_data('data/io.github.wozt.pcble2gamepad.svg', install_dir: get_option('datadir') / 'icons/hicolor/scalable/apps')
+  install_data('data/icons/hicolor/64x64/apps/io.github.wozt.pcble2gamepad.png', install_dir: get_option('datadir') / 'icons/hicolor/64x64/apps')
+  install_data('data/icons/hicolor/128x128/apps/io.github.wozt.pcble2gamepad.png', install_dir: get_option('datadir') / 'icons/hicolor/128x128/apps')
   install_data('data/io.github.wozt.pcble2gamepad.desktop', install_dir: get_option('datadir') / 'applications')
 endif
 test('protocol', executable('test-protocol', 'tests/test-protocol.c', include_directories: inc, link_with: protocol, dependencies: gio))

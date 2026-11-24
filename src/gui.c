@@ -213,6 +213,41 @@ static void dashboard_peer_label_changed(GObject *object,GParamSpec *pspec,gpoin
     gtk_widget_set_tooltip_text(GTK_WIDGET(object),
         gtk_label_get_text(GTK_LABEL(object)));
 }
+/* Compact, always-visible mapping grid: two actions per row.
+ * Retain the original GtkButtons and their callbacks and profile state. */
+static GtkWidget *mapping_grid(GtkWidget *parent,const char *title,
+                               const char *description) {
+    GtkWidget *section=gtk_box_new(GTK_ORIENTATION_VERTICAL,2);
+    GtkWidget *heading=label(title,"title-2");
+    GtkWidget *grid=gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(grid),2);
+    gtk_grid_set_column_spacing(GTK_GRID(grid),6);
+    gtk_widget_set_hexpand(grid,TRUE);
+    if(description && *description) {
+        gtk_widget_set_tooltip_text(heading,description);
+        if(active_wozt)wozt_ui_bind_text(active_wozt,
+            G_OBJECT(heading),"tooltip-text",description);
+    }
+    gtk_box_append(GTK_BOX(section),heading);
+    gtk_box_append(GTK_BOX(section),grid);
+    gtk_box_append(GTK_BOX(parent),section);
+    return grid;
+}
+static void mapping_grid_add(GtkWidget *grid,guint index,
+                             const char *title,GtkWidget *button) {
+    GtkWidget *cell=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,3);
+    GtkWidget *caption=label(title,NULL);
+    gtk_label_set_ellipsize(GTK_LABEL(caption),PANGO_ELLIPSIZE_END);
+    gtk_widget_set_tooltip_text(caption,title);
+    gtk_widget_set_hexpand(caption,TRUE);
+    gtk_widget_set_halign(caption,GTK_ALIGN_FILL);
+    gtk_widget_set_size_request(button,76,-1);
+    gtk_widget_set_halign(button,GTK_ALIGN_END);
+    gtk_box_append(GTK_BOX(cell),caption);
+    gtk_box_append(GTK_BOX(cell),button);
+    gtk_widget_set_hexpand(cell,TRUE);
+    gtk_grid_attach(GTK_GRID(grid),cell,(int)(index%2),(int)(index/2),1,1);
+}
 static GtkWidget *page(Ui *u,const char *id,const char *title,const char *subtitle) {
     /* Always-visible panels. Only the whole dashboard can scroll vertically. */
     GtkWidget *panel=gtk_box_new(GTK_ORIENTATION_VERTICAL,3);
@@ -3354,13 +3389,29 @@ static void activate(GtkApplication *app,gpointer unused) {
     box=page(u,"keyboard","Keyboard bindings","Map keys to controller buttons and both sticks. Duplicate bindings are moved to the new action.");
     u->capture_hint=label("Click a binding to change it. Escape cancels; Backspace clears it.","dim-label");gtk_box_append(GTK_BOX(box),u->capture_hint);
     GtkWidget *presets=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);GtkWidget *wasd=button("WASD defaults",G_CALLBACK(defaults),u),*azerty=button("ZQSD defaults",G_CALLBACK(defaults),u);g_object_set_data(G_OBJECT(azerty),"azerty",GINT_TO_POINTER(1));gtk_box_append(GTK_BOX(presets),wasd);gtk_box_append(GTK_BOX(presets),azerty);gtk_box_append(GTK_BOX(box),presets);
-    g=group(box,"Buttons",NULL);
-    for(int i=0;i<INPUT_ACTIONS;i++){if(i==18)g=group(box,"Stick directions",NULL);GtkWidget *b=button("",G_CALLBACK(bind_key),u);u->key_buttons[i]=GTK_BUTTON(b);g_object_set_data(G_OBJECT(b),"index",GINT_TO_POINTER(i));gtk_widget_add_css_class(b,"binding");row(g,input_action_names[i],NULL,b);}
+    GtkWidget *key_grid=mapping_grid(box,"Buttons",NULL);
+    GtkWidget *direction_grid=NULL;
+    for(int i=0;i<INPUT_ACTIONS;i++) {
+        if(i==18)direction_grid=mapping_grid(box,"Stick directions",NULL);
+        GtkWidget *b=button("",G_CALLBACK(bind_key),u);
+        u->key_buttons[i]=GTK_BUTTON(b);
+        g_object_set_data(G_OBJECT(b),"index",GINT_TO_POINTER(i));
+        gtk_widget_add_css_class(b,"binding");
+        mapping_grid_add(i<18?key_grid:direction_grid,
+            (guint)(i<18?i:i-18),input_action_names[i],b);
+    }
     box=page(u,"controller","PC controller","Forward a USB or Bluetooth gamepad through the selected emulated controller. No physical Nintendo controller is needed.");
     g=group(box,"Source device","SDL standard gamepad mapping supports Xbox, PlayStation and many compatible controllers.");
     u->device_names=gtk_string_list_new(NULL);u->devices=GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(u->device_names),NULL));row(g,"Connected controller","Devices update automatically when plugged in or removed.",GTK_WIDGET(u->devices));
-    g=group(box,"Button mapping","Default mapping follows button labels. Click a binding and press the source button or trigger to change it.");
-    for(int i=0;i<INPUT_BUTTONS;i++){GtkWidget *b=button("",G_CALLBACK(bind_pad),u);u->pad_buttons[i]=GTK_BUTTON(b);g_object_set_data(G_OBJECT(b),"index",GINT_TO_POINTER(i));gtk_widget_add_css_class(b,"binding");row(g,input_action_names[i],NULL,b);}
+    GtkWidget *pad_grid=mapping_grid(box,"Button mapping",
+        "Default mapping follows button labels. Click a binding and press the source button or trigger to change it.");
+    for(int i=0;i<INPUT_BUTTONS;i++) {
+        GtkWidget *b=button("",G_CALLBACK(bind_pad),u);
+        u->pad_buttons[i]=GTK_BUTTON(b);
+        g_object_set_data(G_OBJECT(b),"index",GINT_TO_POINTER(i));
+        gtk_widget_add_css_class(b,"binding");
+        mapping_grid_add(pad_grid,(guint)i,input_action_names[i],b);
+    }
     box=page(u,"settings","Settings","Fine-tune input response and configure the emulated controller.");
     g=group(box,"Stick response","A radial dead zone avoids drift while preserving direction.");
     u->deadzone=GTK_SCALE(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,0,50,1));gtk_widget_set_size_request(GTK_WIDGET(u->deadzone),140,-1);gtk_scale_set_digits(u->deadzone,0);row(g,"Dead zone (%)",NULL,GTK_WIDGET(u->deadzone));
