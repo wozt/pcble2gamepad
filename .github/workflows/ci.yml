@@ -71,6 +71,12 @@ jobs:
         with:
           name: pcble2gamepad-x86_64
           path: dist/
+      # Annotated Git tags require a committer identity. Configure it only
+      # in this checkout; never change the runner's global Git settings.
+      - name: Configure release tag identity
+        run: |
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
       - name: Publish unique four-component release
         env:
           GH_TOKEN: ${{ github.token }}
