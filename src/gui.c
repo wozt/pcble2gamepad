@@ -199,14 +199,47 @@ static GtkWidget *row(AdwPreferencesGroup *g,const char *title,const char *subti
     if(suffix){gtk_widget_set_valign(suffix,GTK_ALIGN_CENTER);adw_action_row_add_suffix(ADW_ACTION_ROW(r),suffix);}
     adw_preferences_group_add(g,r);return r;
 }
+/* WOZT v1.2: native frame legend, with translated label and symbolic icon. */
+static const char *section_icon(const char *title) {
+    if(!strcmp(title,"Bluetooth session") || !strcmp(title,"Connection")) return "bluetooth-symbolic";
+    if(!strcmp(title,"Keyboard bindings")) return "input-keyboard-symbolic";
+    if(!strcmp(title,"PC controller") || !strcmp(title,"Controller preview") || !strcmp(title,"Source device")) return "input-gaming-symbolic";
+    if(!strcmp(title,"Diagnostics")) return "utilities-terminal-symbolic";
+    if(!strcmp(title,"Input routing") || !strcmp(title,"Startup and routing")) return "system-run-symbolic";
+    if(!strcmp(title,"Buttons") || !strcmp(title,"Button mapping") || !strcmp(title,"Button layout")) return "input-keyboard-symbolic";
+    if(!strcmp(title,"Stick response") || !strcmp(title,"Stick directions")) return "preferences-system-symbolic";
+    return "emblem-system-symbolic";
+}
+static GtkWidget *wozt_section_frame(const char *title,GtkWidget *child,gboolean major) {
+    GtkWidget *frame=gtk_frame_new(NULL);
+    GtkWidget *legend=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,3);
+    GtkWidget *icon=gtk_image_new_from_icon_name(section_icon(title));
+    GtkWidget *heading=label(title,major?"title-1":"title-2");
+    gtk_widget_add_css_class(frame,"wozt-section-frame");
+    if(!major)gtk_widget_add_css_class(frame,"wozt-subsection");
+    gtk_widget_add_css_class(legend,"wozt-section-legend");
+    gtk_image_set_pixel_size(GTK_IMAGE(icon),13);
+    GtkIconTheme *theme=gtk_icon_theme_get_for_display(gdk_display_get_default());
+    gtk_widget_set_visible(icon,gtk_icon_theme_has_icon(theme,section_icon(title)));
+    gtk_label_set_wrap(GTK_LABEL(heading),FALSE);
+    gtk_label_set_ellipsize(GTK_LABEL(heading),PANGO_ELLIPSIZE_END);
+    gtk_box_append(GTK_BOX(legend),icon);
+    gtk_box_append(GTK_BOX(legend),heading);
+    gtk_frame_set_label_widget(GTK_FRAME(frame),legend);
+    gtk_frame_set_label_align(GTK_FRAME(frame),0.0f);
+    gtk_frame_set_child(GTK_FRAME(frame),child);
+    gtk_widget_set_hexpand(frame,TRUE);
+    gtk_widget_set_valign(frame,GTK_ALIGN_START);
+    return frame;
+}
 static AdwPreferencesGroup *group(GtkWidget *box,const char *title,const char *description) {
-    AdwPreferencesGroup *g=ADW_PREFERENCES_GROUP(adw_preferences_group_new());adw_preferences_group_set_title(g,title);
+    AdwPreferencesGroup *g=ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+    gtk_widget_add_css_class(GTK_WIDGET(g),"wozt-framed-group");
     if(description && *description) {
         gtk_widget_set_tooltip_text(GTK_WIDGET(g),description);
         if(active_wozt)wozt_ui_bind_text(active_wozt,G_OBJECT(g),"tooltip-text",description);
     }
-    if(active_wozt)wozt_ui_bind_text(active_wozt,G_OBJECT(g),"title",title);
-    gtk_box_append(GTK_BOX(box),GTK_WIDGET(g));return g;
+    gtk_box_append(GTK_BOX(box),wozt_section_frame(title,GTK_WIDGET(g),FALSE));return g;
 }
 static void dashboard_peer_label_changed(GObject *object,GParamSpec *pspec,gpointer data) {
     (void)pspec;(void)data;
@@ -217,20 +250,17 @@ static void dashboard_peer_label_changed(GObject *object,GParamSpec *pspec,gpoin
  * Retain the original GtkButtons and their callbacks and profile state. */
 static GtkWidget *mapping_grid(GtkWidget *parent,const char *title,
                                const char *description) {
-    GtkWidget *section=gtk_box_new(GTK_ORIENTATION_VERTICAL,2);
-    GtkWidget *heading=label(title,"title-2");
+
     GtkWidget *grid=gtk_grid_new();
     gtk_grid_set_row_spacing(GTK_GRID(grid),0);
     gtk_grid_set_column_spacing(GTK_GRID(grid),3);
     gtk_widget_set_hexpand(grid,TRUE);
     if(description && *description) {
-        gtk_widget_set_tooltip_text(heading,description);
+        gtk_widget_set_tooltip_text(grid,description);
         if(active_wozt)wozt_ui_bind_text(active_wozt,
-            G_OBJECT(heading),"tooltip-text",description);
+            G_OBJECT(grid),"tooltip-text",description);
     }
-    gtk_box_append(GTK_BOX(section),heading);
-    gtk_box_append(GTK_BOX(section),grid);
-    gtk_box_append(GTK_BOX(parent),section);
+    gtk_box_append(GTK_BOX(parent),wozt_section_frame(title,grid,FALSE));
     return grid;
 }
 static void mapping_grid_add(GtkWidget *grid,guint index,
@@ -251,24 +281,15 @@ static void mapping_grid_add(GtkWidget *grid,guint index,
 }
 static GtkWidget *page(Ui *u,const char *id,const char *title,const char *subtitle) {
     /* Always-visible panels. Only the whole dashboard can scroll vertically. */
-    GtkWidget *panel=gtk_box_new(GTK_ORIENTATION_VERTICAL,3);
-    GtkWidget *heading=label(title,"title-1");
-    GtkWidget *box=gtk_box_new(GTK_ORIENTATION_VERTICAL,4);
-    gtk_widget_add_css_class(panel,"wozt-dashboard-section");
-    gtk_widget_set_hexpand(panel,TRUE);
+    GtkWidget *box=gtk_box_new(GTK_ORIENTATION_VERTICAL,3);
     gtk_widget_set_hexpand(box,TRUE);
-    gtk_widget_set_tooltip_text(panel,subtitle);
-    gtk_box_append(GTK_BOX(panel),heading);
-    gtk_box_append(GTK_BOX(panel),box);
-    if(active_wozt) {
-        wozt_ui_bind_text(active_wozt,G_OBJECT(panel),"tooltip-text",subtitle);
-    }
     if(!strcmp(id,"overview")) {
-        /* Bluetooth session already names this panel: avoid a duplicate heading. */
-        gtk_widget_set_visible(heading,FALSE);
-        gtk_box_append(GTK_BOX(u->dashboard_preview),panel);
+        gtk_box_append(GTK_BOX(u->dashboard_preview),box);
         return box;
     }
+    GtkWidget *panel=wozt_section_frame(title,box,TRUE);
+    gtk_widget_set_tooltip_text(panel,subtitle);
+    if(active_wozt)wozt_ui_bind_text(active_wozt,G_OBJECT(panel),"tooltip-text",subtitle);
     /* All sections remain visible. No tabs/expanders/nested scroll panes. */
     GtkWidget *column=!strcmp(id,"settings") ?u->dashboard_left:
                       !strcmp(id,"keyboard") ?u->dashboard_middle:
@@ -3416,19 +3437,23 @@ static void activate(GtkApplication *app,gpointer unused) {
         GTK_BOX(hero),
         GTK_WIDGET(u->metrics));
 
-    gtk_box_append(GTK_BOX(preview_col),hero);
+    gtk_box_append(GTK_BOX(preview_col),wozt_section_frame("Connection",hero,TRUE));
     u->dashboard_session_columns=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,5);
     gtk_box_append(GTK_BOX(controls_col),u->dashboard_session_columns);
     GtkWidget *session_col=gtk_box_new(GTK_ORIENTATION_VERTICAL,2);
     GtkWidget *routing_col=gtk_box_new(GTK_ORIENTATION_VERTICAL,2);
     gtk_widget_set_hexpand(session_col,TRUE);
     gtk_widget_set_hexpand(routing_col,TRUE);
-    gtk_box_append(GTK_BOX(u->dashboard_session_columns),session_col);
+    gtk_box_append(GTK_BOX(u->dashboard_session_columns),wozt_section_frame("Bluetooth session",session_col,TRUE));
     /* Input selection and enable switch live under the controller preview,
      * taking advantage of the left side while Bluetooth takes the right. */
     gtk_widget_set_hexpand(routing_col,TRUE);
-    gtk_box_append(GTK_BOX(preview_col),routing_col);
-    AdwPreferencesGroup *g=group(session_col,"Bluetooth session","Starting a session requests administrator authentication and temporarily pauses other Bluetooth services.");
+    gtk_box_append(GTK_BOX(preview_col),wozt_section_frame("Startup and routing",routing_col,FALSE));
+    AdwPreferencesGroup *g=ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+    gtk_widget_add_css_class(GTK_WIDGET(g),"wozt-framed-group");
+    gtk_widget_set_tooltip_text(GTK_WIDGET(g),"Starting a session requests administrator authentication and temporarily pauses other Bluetooth services.");
+    if(active_wozt)wozt_ui_bind_text(active_wozt,G_OBJECT(g),"tooltip-text","Starting a session requests administrator authentication and temporarily pauses other Bluetooth services.");
+    gtk_box_append(GTK_BOX(session_col),GTK_WIDGET(g));
     const char *controllers[]={"Nintendo Switch Pro Controller","Nintendo Joy-Con Pair","Nintendo Switch 2 Joy-Con 2 (L) · BLE","Nintendo Switch 2 Joy-Con 2 (R) · BLE","Joy-Con 1 (L) Classic + Joy-Con 2 (R) BLE",
         "Nintendo Switch 2 Joy-Con 2 Pair (L/R) · BLE",
         "Joy-Con 2 (L) BLE + Joy-Con 1 (R) Classic",NULL};u->controllers=GTK_DROP_DOWN(gtk_drop_down_new_from_strings(controllers));row(g,"Emulated controller","Sony and Microsoft profiles can be added to the same controller catalog later.",GTK_WIDGET(u->controllers));

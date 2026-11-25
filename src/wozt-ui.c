@@ -278,7 +278,21 @@ static void apply_theme(WoztUi *ui) {
         ".wozt-root scrollbar slider { border:0; margin:0; padding:0; min-width:6px; min-height:6px; border-radius:0; box-shadow:none; }",
         p[7],p[3],p[9],p[6],p[4],p[3],p[4],
         p[2],p[3],p[6],p[6],p[3],p[8],p[6]);
-    g_autofree char *complete_css=g_strconcat(css,controls_css,NULL);
+    /* Native GtkFrame draws the legend into its own outline. Keep a single
+     * outline and let the inner dropdown button own its control border. */
+    g_autofree char *section_css=g_strdup_printf(
+        ".wozt-root frame.wozt-section-frame { border:1px solid %s; border-radius:0; padding:3px; margin:0; background-color:%s; box-shadow:none; }"
+        ".wozt-root frame.wozt-section-frame > border { border:0; box-shadow:none; }"
+        ".wozt-root frame.wozt-section-frame > .wozt-section-legend { color:%s; padding:0 3px; background-color:%s; }"
+        ".wozt-root frame.wozt-subsection { padding:2px; }"
+        ".wozt-root .hero { border:0; padding:1px; box-shadow:none; }"
+        ".wozt-root .wozt-framed-group, .wozt-root .wozt-framed-group > box, .wozt-root .wozt-framed-group list { border:0; box-shadow:none; padding:0; margin:0; background-color:transparent; }"
+        ".wozt-root dropdown { border:0; padding:0; margin:0; background-color:transparent; box-shadow:none; }"
+        ".wozt-root dropdown > button { border:1px solid %s; border-radius:0; box-shadow:none; padding:0 4px; min-height:17px; }"
+        ".wozt-root dropdown > button > box { border:0; padding:0; box-shadow:none; }"
+        ".wozt-root dropdown > button:focus-visible { outline:1px solid %s; }",
+        p[3],p[0],p[6],p[0],p[3],p[6]);
+    g_autofree char *complete_css=g_strconcat(css,controls_css,section_css,NULL);
     gtk_css_provider_load_from_string(ui->css,complete_css);
     adw_style_manager_set_color_scheme(adw_style_manager_get_default(),
         !strcmp(theme->id,"light") ? ADW_COLOR_SCHEME_FORCE_LIGHT :
