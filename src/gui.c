@@ -52,7 +52,7 @@ typedef struct {
     WoztUi *wozt;
     /* All five existing functional panels share one scrolled dashboard. */
     GtkWidget *dashboard_root,*dashboard_preview,*dashboard_columns;
-    GtkWidget *dashboard_left,*dashboard_right,*dashboard_session_columns;
+    GtkWidget *dashboard_left,*dashboard_middle,*dashboard_right,*dashboard_session_columns;
     GtkWidget *dashboard_top_columns;
 } Ui;
 static WoztUi *active_wozt;
@@ -220,8 +220,8 @@ static GtkWidget *mapping_grid(GtkWidget *parent,const char *title,
     GtkWidget *section=gtk_box_new(GTK_ORIENTATION_VERTICAL,2);
     GtkWidget *heading=label(title,"title-2");
     GtkWidget *grid=gtk_grid_new();
-    gtk_grid_set_row_spacing(GTK_GRID(grid),2);
-    gtk_grid_set_column_spacing(GTK_GRID(grid),6);
+    gtk_grid_set_row_spacing(GTK_GRID(grid),0);
+    gtk_grid_set_column_spacing(GTK_GRID(grid),4);
     gtk_widget_set_hexpand(grid,TRUE);
     if(description && *description) {
         gtk_widget_set_tooltip_text(heading,description);
@@ -237,6 +237,7 @@ static void mapping_grid_add(GtkWidget *grid,guint index,
                              const char *title,GtkWidget *button) {
     GtkWidget *cell=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,3);
     GtkWidget *caption=label(title,NULL);
+    gtk_label_set_wrap(GTK_LABEL(caption),FALSE);
     gtk_label_set_ellipsize(GTK_LABEL(caption),PANGO_ELLIPSIZE_END);
     gtk_widget_set_tooltip_text(caption,title);
     gtk_widget_set_hexpand(caption,TRUE);
@@ -263,14 +264,16 @@ static GtkWidget *page(Ui *u,const char *id,const char *title,const char *subtit
         wozt_ui_bind_text(active_wozt,G_OBJECT(panel),"tooltip-text",subtitle);
     }
     if(!strcmp(id,"overview")) {
+        /* Bluetooth session already names this panel: avoid a duplicate heading. */
+        gtk_widget_set_visible(heading,FALSE);
         gtk_box_append(GTK_BOX(u->dashboard_preview),panel);
         return box;
     }
-    GtkWidget *column=(!strcmp(id,"settings") || !strcmp(id,"keyboard"))
-        ?u->dashboard_left:u->dashboard_right;
+    /* All sections remain visible. No tabs/expanders/nested scroll panes. */
+    GtkWidget *column=!strcmp(id,"settings") ?u->dashboard_left:
+                      !strcmp(id,"keyboard") ?u->dashboard_middle:
+                                               u->dashboard_right;
     gtk_box_append(GTK_BOX(column),panel);
-    if(!strcmp(id,"settings"))
-        gtk_box_reorder_child_after(GTK_BOX(column),panel,NULL);
     return box;
 }
 static void release_input(Ui *u) {
@@ -2463,7 +2466,7 @@ static gboolean tick(gpointer data) {
         if(u->dashboard_top_columns &&
            gtk_orientable_get_orientation(GTK_ORIENTABLE(u->dashboard_top_columns))!=top)
             gtk_orientable_set_orientation(GTK_ORIENTABLE(u->dashboard_top_columns),top);
-        GtkOrientation sections=dashboard_width<830?
+        GtkOrientation sections=dashboard_width<910?
             GTK_ORIENTATION_VERTICAL:GTK_ORIENTATION_HORIZONTAL;
         if(u->dashboard_columns &&
            gtk_orientable_get_orientation(GTK_ORIENTABLE(u->dashboard_columns))!=sections)
@@ -3170,10 +3173,10 @@ static void activate(GtkApplication *app,gpointer unused) {
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
         GTK_POLICY_NEVER,GTK_POLICY_AUTOMATIC);
     gtk_box_append(GTK_BOX(outer),scroll);
-    u->dashboard_root=gtk_box_new(GTK_ORIENTATION_VERTICAL,4);
-    gtk_widget_set_margin_start(u->dashboard_root,7);
-    gtk_widget_set_margin_end(u->dashboard_root,7);
-    gtk_widget_set_margin_top(u->dashboard_root,5);
+    u->dashboard_root=gtk_box_new(GTK_ORIENTATION_VERTICAL,3);
+    gtk_widget_set_margin_start(u->dashboard_root,4);
+    gtk_widget_set_margin_end(u->dashboard_root,4);
+    gtk_widget_set_margin_top(u->dashboard_root,3);
     gtk_widget_set_margin_bottom(u->dashboard_root,7);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll),u->dashboard_root);
 
@@ -3181,22 +3184,26 @@ static void activate(GtkApplication *app,gpointer unused) {
     gtk_box_append(GTK_BOX(u->dashboard_root),u->dashboard_preview);
     u->dashboard_columns=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,6);
     gtk_box_append(GTK_BOX(u->dashboard_root),u->dashboard_columns);
-    u->dashboard_left=gtk_box_new(GTK_ORIENTATION_VERTICAL,6);
-    u->dashboard_right=gtk_box_new(GTK_ORIENTATION_VERTICAL,6);
-    gtk_widget_set_hexpand(u->dashboard_left,TRUE);
+    u->dashboard_left=gtk_box_new(GTK_ORIENTATION_VERTICAL,3);
+    u->dashboard_middle=gtk_box_new(GTK_ORIENTATION_VERTICAL,3);
+    u->dashboard_right=gtk_box_new(GTK_ORIENTATION_VERTICAL,3);
+    gtk_widget_set_size_request(u->dashboard_left,265,-1);
+    gtk_widget_set_hexpand(u->dashboard_left,FALSE);
+    gtk_widget_set_hexpand(u->dashboard_middle,TRUE);
     gtk_widget_set_hexpand(u->dashboard_right,TRUE);
     gtk_box_append(GTK_BOX(u->dashboard_columns),u->dashboard_left);
+    gtk_box_append(GTK_BOX(u->dashboard_columns),u->dashboard_middle);
     gtk_box_append(GTK_BOX(u->dashboard_columns),u->dashboard_right);
     u->toast=ADW_TOAST_OVERLAY(adw_toast_overlay_new());adw_toast_overlay_set_child(u->toast,wozt_ui_wrap(u->wozt,outer));adw_application_window_set_content(ADW_APPLICATION_WINDOW(u->window),GTK_WIDGET(u->toast));
     GtkWidget *box=page(u,"overview","Connection","Choose the controller presented by your PC, connect it to Switch 2, then route keyboard or gamepad input.");
     GtkWidget *overview_columns=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,6);
     u->dashboard_top_columns=overview_columns;
-    GtkWidget *preview_col=gtk_box_new(GTK_ORIENTATION_VERTICAL,8);
-    GtkWidget *controls_col=gtk_box_new(GTK_ORIENTATION_VERTICAL,8);
+    GtkWidget *preview_col=gtk_box_new(GTK_ORIENTATION_VERTICAL,3);
+    GtkWidget *controls_col=gtk_box_new(GTK_ORIENTATION_VERTICAL,3);
     /* WUP Stream-style top row: compact visual/status at left,
      * live pairing options at right. Never make the visual 960px wide. */
     gtk_widget_set_hexpand(preview_col,FALSE);
-    gtk_widget_set_size_request(preview_col,252,-1);
+    gtk_widget_set_size_request(preview_col,238,-1);
     gtk_widget_set_hexpand(controls_col,TRUE);
     gtk_box_append(GTK_BOX(box),overview_columns);
     gtk_box_append(GTK_BOX(overview_columns),preview_col);
@@ -3220,7 +3227,7 @@ static void activate(GtkApplication *app,gpointer unused) {
     dashboard_peer_label_changed(G_OBJECT(u->peer),NULL,NULL);
     gtk_box_append(GTK_BOX(hero),GTK_WIDGET(u->peer));
     u->drawing=gtk_drawing_area_new();
-    gtk_widget_set_size_request(u->drawing,-1,95);
+    gtk_widget_set_size_request(u->drawing,-1,82);
     gtk_widget_set_focusable(u->drawing,TRUE);
     gtk_drawing_area_set_draw_func(
         GTK_DRAWING_AREA(u->drawing),
@@ -3325,6 +3332,12 @@ static void activate(GtkApplication *app,gpointer unused) {
             "Live input preview · no physical controller required",
             "dim-label"));
 
+    /* Keep live metrics readable as a tooltip without multiple wrapped lines. */
+    gtk_label_set_wrap(u->metrics,FALSE);
+    gtk_label_set_ellipsize(u->metrics,PANGO_ELLIPSIZE_END);
+    g_signal_connect(u->metrics,"notify::label",
+        G_CALLBACK(dashboard_peer_label_changed),NULL);
+    dashboard_peer_label_changed(G_OBJECT(u->metrics),NULL,NULL);
     gtk_box_append(
         GTK_BOX(hero),
         GTK_WIDGET(u->metrics));
@@ -3378,9 +3391,26 @@ static void activate(GtkApplication *app,gpointer unused) {
     gtk_flow_box_insert(GTK_FLOW_BOX(actions),button("Refresh adapters",G_CALLBACK(adapters_scan),u),-1);
     gtk_box_append(GTK_BOX(session_col),actions);
     u->error=GTK_LABEL(label("","error"));gtk_box_append(GTK_BOX(session_col),GTK_WIDGET(u->error));
-    g=group(routing_col,"Input routing","Pair / Sync is validated. Reconnect remains available for diagnostics while persistent bonding is unresolved.");
-    const char *sources[]={"Keyboard","PC controller",NULL};u->source=GTK_DROP_DOWN(gtk_drop_down_new_from_strings(sources));gtk_drop_down_set_selected(u->source,u->saved_source);row(g,"Input source",NULL,GTK_WIDGET(u->source));
-    u->arm=gtk_switch_new();gtk_switch_set_active(GTK_SWITCH(u->arm),u->saved_arm);row(g,"Enable input","Remembered between launches. Escape pauses keyboard input.",u->arm);
+    GtkWidget *routing_row=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,4);
+    gtk_widget_set_tooltip_text(routing_row,
+        "Input routing: source and enable switch. Escape pauses keyboard input.");
+    GtkWidget *routing_text=label("Input source",NULL);
+    gtk_box_append(GTK_BOX(routing_row),routing_text);
+    const char *sources[]={"Keyboard","PC controller",NULL};
+    u->source=GTK_DROP_DOWN(gtk_drop_down_new_from_strings(sources));
+    gtk_drop_down_set_selected(u->source,u->saved_source);
+    gtk_widget_set_size_request(GTK_WIDGET(u->source),95,-1);
+    gtk_widget_set_hexpand(GTK_WIDGET(u->source),TRUE);
+    gtk_box_append(GTK_BOX(routing_row),GTK_WIDGET(u->source));
+    u->arm=gtk_switch_new();
+    gtk_switch_set_active(GTK_SWITCH(u->arm),u->saved_arm);
+    gtk_widget_set_valign(u->arm,GTK_ALIGN_CENTER);
+    gtk_widget_set_tooltip_text(u->arm,
+        "Enable input. Remembered between launches; Escape pauses keyboard input.");
+    gtk_accessible_update_property(GTK_ACCESSIBLE(u->arm),
+        GTK_ACCESSIBLE_PROPERTY_LABEL,"Enable input",-1);
+    gtk_box_append(GTK_BOX(routing_row),u->arm);
+    gtk_box_append(GTK_BOX(routing_col),routing_row);
     u->source_hint=GTK_LABEL(label(u->saved_source==0?"Keyboard input works while this window is focused. Escape pauses input.":"Standard SDL gamepad mapping. Customize buttons and stick settings below.","dim-label"));
     gtk_box_append(GTK_BOX(routing_col),GTK_WIDGET(u->source_hint));
     gtk_widget_set_visible(GTK_WIDGET(u->source_hint),FALSE);
@@ -3417,7 +3447,26 @@ static void activate(GtkApplication *app,gpointer unused) {
     u->deadzone=GTK_SCALE(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,0,50,1));gtk_widget_set_size_request(GTK_WIDGET(u->deadzone),140,-1);gtk_scale_set_digits(u->deadzone,0);row(g,"Dead zone (%)",NULL,GTK_WIDGET(u->deadzone));
     u->sensitivity=GTK_SCALE(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,25,200,5));gtk_widget_set_size_request(GTK_WIDGET(u->sensitivity),140,-1);gtk_scale_set_digits(u->sensitivity,0);row(g,"Sensitivity (%)",NULL,GTK_WIDGET(u->sensitivity));
     const char *axes[]={"Invert left X","Invert left Y","Invert right X","Invert right Y"};
-    for(int i=0;i<4;i++){u->invert[i]=GTK_SWITCH(gtk_switch_new());row(g,axes[i],NULL,GTK_WIDGET(u->invert[i]));g_signal_connect(u->invert[i],"notify::active",G_CALLBACK(settings_changed),u);}
+    GtkWidget *invert_grid=gtk_grid_new();
+    gtk_grid_set_column_spacing(GTK_GRID(invert_grid),4);
+    gtk_grid_set_row_spacing(GTK_GRID(invert_grid),1);
+    gtk_widget_set_hexpand(invert_grid,TRUE);
+    adw_preferences_group_add(g,invert_grid);
+    for(int i=0;i<4;i++) {
+        GtkWidget *invert_cell=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,2);
+        GtkWidget *invert_label=label(axes[i],NULL);
+        gtk_label_set_wrap(GTK_LABEL(invert_label),FALSE);
+        gtk_label_set_ellipsize(GTK_LABEL(invert_label),PANGO_ELLIPSIZE_END);
+        gtk_widget_set_tooltip_text(invert_label,axes[i]);
+        gtk_widget_set_hexpand(invert_label,TRUE);
+        u->invert[i]=GTK_SWITCH(gtk_switch_new());
+        gtk_widget_set_valign(GTK_WIDGET(u->invert[i]),GTK_ALIGN_CENTER);
+        gtk_box_append(GTK_BOX(invert_cell),invert_label);
+        gtk_box_append(GTK_BOX(invert_cell),GTK_WIDGET(u->invert[i]));
+        gtk_widget_set_hexpand(invert_cell,TRUE);
+        gtk_grid_attach(GTK_GRID(invert_grid),invert_cell,i%2,i/2,1,1);
+        g_signal_connect(u->invert[i],"notify::active",G_CALLBACK(settings_changed),u);
+    }
     u->swap=GTK_SWITCH(gtk_switch_new());row(g,"Swap sticks","Swap the two physical gamepad sticks.",GTK_WIDGET(u->swap));
 
     g=group(box,"Button layout","Translate SDL gamepad buttons to the Nintendo face-button convention.");
@@ -3432,14 +3481,29 @@ static void activate(GtkApplication *app,gpointer unused) {
     row(g,"Automatic release","Buttons and sticks return to neutral within 500 ms if input updates stop.",NULL);
     row(g,"Session lifetime","Stopping or closing this window stops the backend and restores normal Bluetooth.",NULL);
     box=page(u,"diagnostics","Diagnostics","Live session events, association requests and HID initialization. Simulation is always labeled.");
-    u->traffic_logs=GTK_SWITCH(gtk_switch_new());gtk_switch_set_active(u->traffic_logs,u->saved_traffic);row(group(box,"Logging",NULL),"Detailed HID traffic","Show repetitive hid_rx packets and periodic status lines. Remembered between launches.",GTK_WIDGET(u->traffic_logs));
-    gtk_box_append(GTK_BOX(box),button("Copy diagnostics",G_CALLBACK(copy_logs),u));GtkWidget *view=gtk_text_view_new();gtk_text_view_set_editable(GTK_TEXT_VIEW(view),FALSE);gtk_text_view_set_monospace(GTK_TEXT_VIEW(view),TRUE);gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(view),GTK_WRAP_WORD_CHAR);u->logs=gtk_text_view_get_buffer(GTK_TEXT_VIEW(view));GtkWidget *log_scroll=gtk_scrolled_window_new();
-    gtk_widget_set_size_request(log_scroll,-1,105);
+    GtkWidget *diag_actions=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,4);
+    GtkWidget *diag_caption=label("Detailed HID traffic",NULL);
+    gtk_widget_set_hexpand(diag_caption,TRUE);
+    gtk_widget_set_tooltip_text(diag_caption,
+        "Show repetitive hid_rx packets and periodic status lines. Remembered between launches.");
+    u->traffic_logs=GTK_SWITCH(gtk_switch_new());
+    gtk_switch_set_active(u->traffic_logs,u->saved_traffic);
+    gtk_widget_set_valign(GTK_WIDGET(u->traffic_logs),GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(diag_actions),diag_caption);
+    gtk_box_append(GTK_BOX(diag_actions),GTK_WIDGET(u->traffic_logs));
+    gtk_box_append(GTK_BOX(diag_actions),button("Copy diagnostics",G_CALLBACK(copy_logs),u));
+    gtk_box_append(GTK_BOX(box),diag_actions);
+    GtkWidget *view=gtk_text_view_new();gtk_text_view_set_editable(GTK_TEXT_VIEW(view),FALSE);gtk_text_view_set_monospace(GTK_TEXT_VIEW(view),TRUE);gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(view),GTK_WRAP_WORD_CHAR);u->logs=gtk_text_view_get_buffer(GTK_TEXT_VIEW(view));GtkWidget *log_scroll=gtk_scrolled_window_new();
+    gtk_widget_set_size_request(log_scroll,-1,82);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(log_scroll),
         GTK_POLICY_NEVER,GTK_POLICY_AUTOMATIC);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(log_scroll),view);
     gtk_box_append(GTK_BOX(box),log_scroll);
-    row(group(box,"Current scope",NULL),"Nintendo controller profiles","Switch Pro Controller is verified on Switch 2. Joy-Con (L/R) wire formats and dual-adapter routing are implemented but cannot be hardware-tested until a second adapter is connected. Joy-Con 2 (L/R) over Bluetooth LE follows the community protocol and is not yet console-validated by this project. Sony and Microsoft profiles remain future additions.",NULL);
+    /* Informational scope stays accessible, not an extra tall empty row. */
+    gtk_widget_set_tooltip_text(log_scroll,
+        "Switch Pro Controller is verified on Switch 2. Joy-Con (L/R) wire formats "
+        "and dual-adapter routing are implemented. Joy-Con 2 over Bluetooth LE "
+        "follows the community protocol. Sony and Microsoft profiles are future additions.");
     refresh_bindings(u);profile_scan(u);devices_scan(u);adapters_scan(NULL,u);
     g_signal_connect(u->profiles,"notify::selected",G_CALLBACK(profile_selected),u);
     g_signal_connect(u->devices,"notify::selected",G_CALLBACK(device_selected),u);
