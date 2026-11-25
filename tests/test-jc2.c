@@ -206,11 +206,82 @@ static void reports(void)
     g_assert_cmpuint(adv[5 + 0x12], ==, 0x0f);
 }
 
+/* Regression: an upright left Joy-Con owns LX/LY, the right owns RX/RY.
+ * This is exercised by joycon2-pair and mixed Classic/BLE profiles. */
+static void upright_sticks_independent(void)
+{
+    static const uint16_t neutral_sticks[4] = {2159, 1916, 2070, 2013};
+    static const uint8_t buttons[3] = {0, 0, 0};
+    uint16_t sticks[4];
+    Jc2Input left, right, left_neutral, right_neutral;
+    Jc2Input left_only, right_only;
+
+    jc2_neutral(JC2_LEFT, &left_neutral);
+    jc2_neutral(JC2_RIGHT, &right_neutral);
+
+    /* Both neutral: no drift on either side. */
+    memcpy(sticks, neutral_sticks, sizeof(sticks));
+    jc2_from_pro_frame_vertical(JC2_LEFT, buttons, sticks, &left);
+    jc2_from_pro_frame_vertical(JC2_RIGHT, buttons, sticks, &right);
+    g_assert_cmpuint(left.stick_x, ==, left_neutral.stick_x);
+    g_assert_cmpuint(left.stick_y, ==, left_neutral.stick_y);
+    g_assert_cmpuint(right.stick_x, ==, right_neutral.stick_x);
+    g_assert_cmpuint(right.stick_y, ==, right_neutral.stick_y);
+
+    /* Left alone controls movement, never the right camera stick. */
+    sticks[0] = 2759;
+    sticks[1] = 1516;
+    jc2_from_pro_frame_vertical(JC2_LEFT, buttons, sticks, &left_only);
+    jc2_from_pro_frame_vertical(JC2_RIGHT, buttons, sticks, &right);
+    g_assert_cmpuint(left_only.stick_x, !=, left_neutral.stick_x);
+    g_assert_cmpuint(left_only.stick_y, !=, left_neutral.stick_y);
+    g_assert_cmpuint(right.stick_x, ==, right_neutral.stick_x);
+    g_assert_cmpuint(right.stick_y, ==, right_neutral.stick_y);
+
+    /* Right alone controls the camera, never the left movement stick. */
+    memcpy(sticks, neutral_sticks, sizeof(sticks));
+    sticks[2] = 1570;
+    sticks[3] = 2413;
+    jc2_from_pro_frame_vertical(JC2_LEFT, buttons, sticks, &left);
+    jc2_from_pro_frame_vertical(JC2_RIGHT, buttons, sticks, &right_only);
+    g_assert_cmpuint(left.stick_x, ==, left_neutral.stick_x);
+    g_assert_cmpuint(left.stick_y, ==, left_neutral.stick_y);
+    g_assert_cmpuint(right_only.stick_x, !=, right_neutral.stick_x);
+    g_assert_cmpuint(right_only.stick_y, !=, right_neutral.stick_y);
+
+    /* Both at once: each side matches its corresponding solo movement. */
+    sticks[0] = 2759;
+    sticks[1] = 1516;
+    jc2_from_pro_frame_vertical(JC2_LEFT, buttons, sticks, &left);
+    jc2_from_pro_frame_vertical(JC2_RIGHT, buttons, sticks, &right);
+    g_assert_cmpuint(left.stick_x, ==, left_only.stick_x);
+    g_assert_cmpuint(left.stick_y, ==, left_only.stick_y);
+    g_assert_cmpuint(right.stick_x, ==, right_only.stick_x);
+    g_assert_cmpuint(right.stick_y, ==, right_only.stick_y);
+
+    /* A small movement inside the old 0.01-radius fallback still belongs
+     * to its own Joy-Con; it must not be replaced by the opposite stick. */
+    memcpy(sticks, neutral_sticks, sizeof(sticks));
+    sticks[0] += 50;
+    jc2_from_pro_frame_vertical(JC2_LEFT, buttons, sticks, &left);
+    jc2_from_pro_frame_vertical(JC2_RIGHT, buttons, sticks, &right);
+    g_assert_cmpuint(left.stick_x, !=, left_neutral.stick_x);
+    g_assert_cmpuint(right.stick_x, ==, right_neutral.stick_x);
+
+    memcpy(sticks, neutral_sticks, sizeof(sticks));
+    sticks[2] -= 50;
+    jc2_from_pro_frame_vertical(JC2_LEFT, buttons, sticks, &left);
+    jc2_from_pro_frame_vertical(JC2_RIGHT, buttons, sticks, &right);
+    g_assert_cmpuint(left.stick_x, ==, left_neutral.stick_x);
+    g_assert_cmpuint(right.stick_x, !=, right_neutral.stick_x);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
     g_test_add_func("/jc2/discovery", discovery);
     g_test_add_func("/jc2/pairing-flow", pairing_flow);
     g_test_add_func("/jc2/reports", reports);
+    g_test_add_func("/jc2/upright-sticks-independent", upright_sticks_independent);
     return g_test_run();
 }
