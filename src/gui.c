@@ -3041,7 +3041,59 @@ static gboolean close_window(GtkWindow *w,Ui *u) {
 static void copy_logs(GtkButton *b,Ui *u){(void)b;GtkTextIter a,z;gtk_text_buffer_get_bounds(u->logs,&a,&z);char *text=gtk_text_buffer_get_text(u->logs,&a,&z,FALSE);gdk_clipboard_set_text(gtk_widget_get_clipboard(GTK_WIDGET(u->window)),text);g_free(text);toast(u,"Diagnostics copied");}
 static void defaults(GtkButton *b,Ui *u){neutral(u);int controller=u->profile.emulated_controller;input_profile_defaults(&u->profile,GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b),"azerty")));u->profile.emulated_controller=controller;refresh_bindings(u);toast(u,"Defaults restored; save to keep them");}
 static GtkWidget *button(const char *text,GCallback callback,Ui *u){GtkWidget *b=gtk_button_new_with_label(text);if(active_wozt)wozt_ui_bind_text(active_wozt,G_OBJECT(b),"label",text);g_signal_connect(b,"clicked",callback,u);return b;}
+/* AppImage must not depend on the desktop's selected icon theme. */
+static void configure_bundled_icons(void) {
+    const char *dir=g_getenv("PCBLE2GAMEPAD_BUNDLED_ICONS");
+    if(!dir || !*dir)return;
+    GdkDisplay *display=gdk_display_get_default();
+    if(!display)return;
+    GtkIconTheme *theme=gtk_icon_theme_get_for_display(display);
+    const char *paths[]={dir,NULL};
+    gtk_icon_theme_set_search_path(theme,paths);
+    g_object_set(gtk_settings_get_for_display(display),"gtk-icon-theme-name","Adwaita",NULL);
+}
+
+/* Hardware-free test executed from the extracted, final AppImage. */
+static int self_test_icons(void) {
+    gtk_init();
+    configure_bundled_icons();
+    GtkIconTheme *theme=gtk_icon_theme_get_for_display(gdk_display_get_default());
+    const char *names[]={"io.github.wozt.pcble2gamepad","pan-down-symbolic",
+        "view-refresh-symbolic","window-minimize-symbolic","window-maximize-symbolic",
+        "window-close-symbolic",NULL};
+    for(unsigned i=0;names[i];i++) {
+        if(!gtk_icon_theme_has_icon(theme,names[i])) {
+            g_printerr("Missing GTK icon: %s\n",names[i]);return 1;
+        }
+        GtkIconPaintable *icon=gtk_icon_theme_lookup_icon(theme,names[i],NULL,24,1,
+            GTK_TEXT_DIR_NONE,0);
+        const char *actual=gtk_icon_paintable_get_icon_name(icon);
+        if(!actual || g_str_equal(actual,"image-missing")) {
+            g_printerr("Fallback GTK icon: %s\n",names[i]);g_object_unref(icon);return 1;
+        }
+        GFile *file=gtk_icon_paintable_get_file(icon);
+        if(file) {
+            GError *error=NULL;
+            GFileInputStream *stream=g_file_read(file,NULL,&error);
+            GdkPixbuf *pix=stream?gdk_pixbuf_new_from_stream(G_INPUT_STREAM(stream),NULL,&error):NULL;
+            if(stream)g_object_unref(stream);
+            g_object_unref(file);
+            if(!pix){g_printerr("Cannot decode %s: %s\n",names[i],error?error->message:"unknown");g_clear_error(&error);g_object_unref(icon);return 1;}
+            g_object_unref(pix);
+        }
+        GtkSnapshot *snapshot=gtk_snapshot_new();
+        gdk_paintable_snapshot(GDK_PAINTABLE(icon),GDK_SNAPSHOT(snapshot),24,24);
+        GskRenderNode *node=gtk_snapshot_free_to_node(snapshot);
+        g_object_unref(icon);
+        if(!node){g_printerr("Empty icon render: %s\n",names[i]);return 1;}
+        gsk_render_node_unref(node);
+        g_print("OK icon: %s\n",names[i]);
+    }
+    return 0;
+}
+
 static void activate(GtkApplication *app,gpointer unused) {
+    configure_bundled_icons();
     (void)unused;GtkWindow *existing=gtk_application_get_active_window(app);if(existing){gtk_window_present(existing);return;}
     Ui *u=g_new0(Ui,1);u->refs=1;u->app=app;u->learn_key=u->learn_pad=-1;u->joystick_count=-1;
     u->keys=g_hash_table_new(g_direct_hash,g_direct_equal);
@@ -3552,4 +3604,4 @@ static void activate(GtkApplication *app,gpointer unused) {
     GtkEventController *keys=gtk_event_controller_key_new();gtk_event_controller_set_propagation_phase(keys,GTK_PHASE_CAPTURE);g_signal_connect(keys,"key-pressed",G_CALLBACK(key_pressed),u);g_signal_connect(keys,"key-released",G_CALLBACK(key_released),u);gtk_widget_add_controller(GTK_WIDGET(u->window),keys);
     controller_selected(NULL,NULL,u);u->timer=g_timeout_add(16,tick,u);request(u,"status");if(u->wozt)wozt_ui_autobind_tree(u->wozt,GTK_WIDGET(u->window));gtk_window_present(u->window);
 }
-int main(int argc,char **argv){g_set_prgname("io.github.wozt.pcble2gamepad");AdwApplication *app=adw_application_new("io.github.wozt.pcble2gamepad",G_APPLICATION_DEFAULT_FLAGS);g_signal_connect(app,"activate",G_CALLBACK(activate),NULL);int result=g_application_run(G_APPLICATION(app),argc,argv);g_object_unref(app);SDL_Quit();return result;}
+int main(int argc,char **argv){if(argc==2 && g_str_equal(argv[1],"--self-test-icons"))return self_test_icons();g_set_prgname("io.github.wozt.pcble2gamepad");AdwApplication *app=adw_application_new("io.github.wozt.pcble2gamepad",G_APPLICATION_DEFAULT_FLAGS);g_signal_connect(app,"activate",G_CALLBACK(activate),NULL);int result=g_application_run(G_APPLICATION(app),argc,argv);g_object_unref(app);SDL_Quit();return result;}
