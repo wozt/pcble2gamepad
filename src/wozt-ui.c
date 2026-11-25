@@ -485,20 +485,30 @@ static void wozt_x11_window_identity(GtkWidget *widget,gpointer unused) {
                          .res_class=(char *)WOZT_APP_ID};
     XSetClassHint(display,xid,&wm_class);
 
-    /* GTK4 does not reliably publish _NET_WM_ICON for undecorated windows.
-     * Populate 64px and 128px ARGB icons, including their alpha channels. */
+    /* WUP_V915_TASKBAR_ICON, ported to GTK4/X11: KDE receives the same
+     * seven icon sizes as WUP Stream, now via _NET_WM_ICON because GTK4
+     * removed gtk_window_set_icon_list(). Load once and scale as needed. */
     GArray *argb=g_array_new(FALSE,FALSE,sizeof(gulong));
-    const int sizes[]={64,128};
-    for(guint i=0;i<G_N_ELEMENTS(sizes);i++) {
-        g_autofree char *path=wozt_icon_file(sizes[i]);
+    static const int sizes[]={16,24,32,48,64,128,256};
+    const int source_sizes[]={128,64};
+    g_autoptr(GdkPixbuf) source=NULL;
+    for(guint i=0;i<G_N_ELEMENTS(source_sizes) && !source;i++) {
+        g_autofree char *path=wozt_icon_file(source_sizes[i]);
         if(!path)continue;
         g_autoptr(GError) error=NULL;
-        g_autoptr(GdkPixbuf) image=gdk_pixbuf_new_from_file(path,&error);
-        if(!image) {
-            g_warning("Could not load taskbar icon %s: %s",path,
+        source=gdk_pixbuf_new_from_file(path,&error);
+        if(!source)
+            g_warning("Taskbar icon: could not read %s: %s",path,
                       error?error->message:"unknown error");
-            continue;
-        }
+    }
+    for(guint i=0;source && i<G_N_ELEMENTS(sizes);i++) {
+        const int size=sizes[i];
+        g_autoptr(GdkPixbuf) image=
+            gdk_pixbuf_get_width(source)==size &&
+            gdk_pixbuf_get_height(source)==size
+                ?g_object_ref(source)
+                :gdk_pixbuf_scale_simple(source,size,size,GDK_INTERP_BILINEAR);
+        if(!image)continue;
         int width=gdk_pixbuf_get_width(image);
         int height=gdk_pixbuf_get_height(image);
         int channels=gdk_pixbuf_get_n_channels(image);
