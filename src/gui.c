@@ -963,6 +963,24 @@ static void settings_changed(GObject *o,GParamSpec *p,Ui *u) {
     save_profile_quiet(u);
 }
 static void scale_changed(GtkRange *r,Ui *u){settings_changed(G_OBJECT(r),NULL,u);}
+/* A value label BEFORE the slider; keep the existing value-changed handler
+ * and make the value follow saved-profile loads as well as mouse input. */
+static void slider_percent_changed(GtkRange *range,GtkLabel *value) {
+    g_autofree char *percent=g_strdup_printf("%.0f%%",gtk_range_get_value(range));
+    gtk_label_set_text(value,percent);
+}
+static GtkWidget *slider_with_left_percent(GtkScale *scale) {
+    GtkWidget *control=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,4);
+    GtkWidget *percent=gtk_label_new(NULL);
+    gtk_label_set_width_chars(GTK_LABEL(percent),4);
+    gtk_label_set_xalign(GTK_LABEL(percent),1.0f);
+    gtk_widget_set_valign(percent,GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(control),percent);
+    gtk_box_append(GTK_BOX(control),GTK_WIDGET(scale));
+    g_signal_connect(scale,"value-changed",G_CALLBACK(slider_percent_changed),percent);
+    slider_percent_changed(GTK_RANGE(scale),GTK_LABEL(percent));
+    return control;
+}
 static void refresh_bindings(Ui *u) {
     for(int i=0;i<INPUT_ACTIONS;i++) {
         const char *name=u->profile.keys[i]?gdk_keyval_name(u->profile.keys[i]):"Unbound";
@@ -3454,8 +3472,8 @@ static void activate(GtkApplication *app,gpointer unused) {
     }
     box=page(u,"settings","Settings","Fine-tune input response and configure the emulated controller.");
     g=group(box,"Stick response","A radial dead zone avoids drift while preserving direction.");
-    u->deadzone=GTK_SCALE(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,0,50,1));gtk_widget_set_size_request(GTK_WIDGET(u->deadzone),140,-1);gtk_scale_set_digits(u->deadzone,0);row(g,"Dead zone (%)",NULL,GTK_WIDGET(u->deadzone));
-    u->sensitivity=GTK_SCALE(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,25,200,5));gtk_widget_set_size_request(GTK_WIDGET(u->sensitivity),140,-1);gtk_scale_set_digits(u->sensitivity,0);row(g,"Sensitivity (%)",NULL,GTK_WIDGET(u->sensitivity));
+    u->deadzone=GTK_SCALE(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,0,50,1));gtk_widget_set_size_request(GTK_WIDGET(u->deadzone),102,-1);gtk_scale_set_digits(u->deadzone,0);row(g,"Dead zone (%)",NULL,slider_with_left_percent(u->deadzone));
+    u->sensitivity=GTK_SCALE(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL,25,200,5));gtk_widget_set_size_request(GTK_WIDGET(u->sensitivity),102,-1);gtk_scale_set_digits(u->sensitivity,0);row(g,"Sensitivity (%)",NULL,slider_with_left_percent(u->sensitivity));
     const char *axes[]={"Invert left X","Invert left Y","Invert right X","Invert right Y"};
     GtkWidget *invert_grid=gtk_grid_new();
     gtk_grid_set_column_spacing(GTK_GRID(invert_grid),4);
