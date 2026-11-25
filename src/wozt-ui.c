@@ -271,7 +271,11 @@ static void apply_theme(WoztUi *ui) {
         ".wozt-root scale highlight { background-color:%s; border-radius:0; }"
         ".wozt-root scale slider { background-color:%s; border:1px solid %s; border-radius:0; min-width:12px; min-height:12px; box-shadow:none; }"
         ".wozt-root scale slider:hover { background-color:%s; }"
-        ".wozt-root scale:focus-within slider { outline:1px solid %s; }",
+        ".wozt-root scale:focus-within slider { outline:1px solid %s; }"
+        /* GTK4 + Breeze: prevent negative scrollbar slider requisitions.
+         * Keep the scrollbar colors inherited from the active theme. */
+        ".wozt-root scrollbar trough { border:0; margin:0; padding:0; min-width:6px; min-height:6px; }"
+        ".wozt-root scrollbar slider { border:0; margin:0; padding:0; min-width:6px; min-height:6px; border-radius:0; box-shadow:none; }",
         p[7],p[3],p[9],p[6],p[4],p[3],p[4],
         p[2],p[3],p[6],p[6],p[3],p[8],p[6]);
     g_autofree char *complete_css=g_strconcat(css,controls_css,NULL);
@@ -610,15 +614,17 @@ GtkWidget *wozt_ui_header(WoztUi *ui) {
     ui->header_actions=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,4);
     gtk_box_append(GTK_BOX(bar),ui->header_actions);
     ui->theme_names=gtk_string_list_new(NULL);
+    /* gtk_drop_down_new() takes a full reference to its model. */
     ui->theme_selector=GTK_DROP_DOWN(gtk_drop_down_new(
-        G_LIST_MODEL(ui->theme_names),NULL));
+        G_LIST_MODEL(g_object_ref(ui->theme_names)),NULL));
     gtk_widget_set_tooltip_text(GTK_WIDGET(ui->theme_selector),"Theme (JSON)");
     gtk_widget_set_size_request(GTK_WIDGET(ui->theme_selector),90,-1);
     gtk_box_append(GTK_BOX(bar),GTK_WIDGET(ui->theme_selector));
     g_signal_connect(ui->theme_selector,"notify::selected",G_CALLBACK(change_theme),ui);
     ui->language_names=gtk_string_list_new(NULL);
+    /* Retain the separate application reference until wozt_ui_free(). */
     ui->language_selector=GTK_DROP_DOWN(gtk_drop_down_new(
-        G_LIST_MODEL(ui->language_names),NULL));
+        G_LIST_MODEL(g_object_ref(ui->language_names)),NULL));
     gtk_widget_set_tooltip_text(GTK_WIDGET(ui->language_selector),"Language (JSON)");
     gtk_widget_set_size_request(GTK_WIDGET(ui->language_selector),83,-1);
     gtk_box_append(GTK_BOX(bar),GTK_WIDGET(ui->language_selector));
