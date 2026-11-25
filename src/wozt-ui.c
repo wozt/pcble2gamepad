@@ -485,6 +485,18 @@ static void wozt_x11_window_identity(GtkWidget *widget,gpointer unused) {
                          .res_class=(char *)WOZT_APP_ID};
     XSetClassHint(display,xid,&wm_class);
 
+    /* KDE Plasma's task manager first resolves a window to its desktop
+     * launcher, then takes the icon from that launcher's KService.  WM_CLASS
+     * and _NET_WM_ICON alone may still leave a generic document icon.
+     * Publish the same desktop-file ID used by GtkApplication and
+     * data/io.github.wozt.pcble2gamepad.desktop, without the .desktop suffix.
+     * Keep this on X11 only; GTK handles the Wayland app_id itself. */
+    Atom desktop_file=XInternAtom(display,"_KDE_NET_WM_DESKTOP_FILE",False);
+    Atom utf8_string=XInternAtom(display,"UTF8_STRING",False);
+    XChangeProperty(display,xid,desktop_file,utf8_string,8,PropModeReplace,
+                    (const unsigned char *)WOZT_APP_ID,
+                    (int)strlen(WOZT_APP_ID));
+
     /* WUP_V915_TASKBAR_ICON, ported to GTK4/X11: KDE receives the same
      * seven icon sizes as WUP Stream, now via _NET_WM_ICON because GTK4
      * removed gtk_window_set_icon_list(). Load once and scale as needed. */
