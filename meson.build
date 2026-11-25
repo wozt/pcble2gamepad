@@ -40,12 +40,21 @@ rsvg = dependency('librsvg-2.0', version: '>=2.46', required: get_option('gui'))
 if gtk.found() and adw.found() and rsvg.found()
   sdl = dependency('sdl2', version: '>=2.0.14')
   x11 = dependency('x11', required: false)
-  gui_c_args = []
+  # Ubuntu 24.04 ships GTK 4.14.5, whose gdkdmabufformats.h emits a
+  # -Wpedantic warning in GCC 13 (extra semicolon in a system header).
+  # Keep -Werror globally, but leave this particular diagnostic non-fatal
+  # ONLY for GTK-based targets on affected GTK versions. The warning stays
+  # visible and all other compiler diagnostics remain fatal.
+  gtk_header_compat_args = []
+  if meson.get_compiler('c').get_id() == 'gcc' and gtk.version().version_compare('>=4.14') and gtk.version().version_compare('<4.16')
+    gtk_header_compat_args = ['-Wno-error=pedantic']
+  endif
+  gui_c_args = gtk_header_compat_args
   if x11.found()
     gui_c_args += ['-DPCBLE2GAMEPAD_HAVE_X11=1']
   endif
   math = meson.get_compiler('c').find_library('m')
-  executable('pcble2gamepad-ble-lab', 'src/gui-ble.c', link_with: client, dependencies: [gio, json, gtk, adw], install: true)
+  executable('pcble2gamepad-ble-lab', 'src/gui-ble.c', link_with: client, dependencies: [gio, json, gtk, adw], c_args: gtk_header_compat_args, install: true)
   executable('pcble2gamepad', ['src/gui.c', 'src/input-model.c', 'src/wozt-ui.c'], link_with: client, dependencies: [gio, json, gtk, adw, rsvg, sdl, math, x11], c_args: gui_c_args, install: true)
   install_data(
     [
