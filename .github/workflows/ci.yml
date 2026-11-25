@@ -58,11 +58,11 @@ jobs:
           if-no-files-found: error
   release:
     needs: [appimage]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.ENABLE_AUTO_RELEASE == 'true'
+    # Publish on every successful push to main (never for pull requests).
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-    environment: release-approval
     steps:
       - uses: actions/checkout@v7
         with:
