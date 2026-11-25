@@ -14,6 +14,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+      - name: Test incremental GitHub API release allocator
+        run: python3 -m unittest discover -s tests -p 'test_release_version.py' -v
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -71,13 +73,9 @@ jobs:
         with:
           name: pcble2gamepad-x86_64
           path: dist/
-      # Annotated Git tags require a committer identity. Configure it only
-      # in this checkout; never change the runner's global Git settings.
-      - name: Configure release tag identity
-        run: |
-          git config --local user.name "github-actions[bot]"
-          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
-      - name: Publish unique four-component release
+      # WUP Stream approach: reserve lightweight tags atomically through
+      # the GitHub refs API, without any local git author/committer identity.
+      - name: Publish incremental release via GitHub API
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash tools/publish-incremental-release.sh dist/pcble2gamepad-x86_64.AppImage
+        run: python3 tools/publish_release.py dist/pcble2gamepad-x86_64.AppImage
