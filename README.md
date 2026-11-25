@@ -9,11 +9,13 @@ GTK4/libadwaita **Controller Studio** orchestrates privileged backend processes 
 | Profile | Transport | Status |
 |---|---|---|
 | Nintendo Switch Pro Controller | Classic HID (L2CAP PSM 17/19) | Validated on Switch 2 |
-| Nintendo Joy-Con Pair (1 L + 1 R) | Classic HID, two adapters | Implemented; console validation in progress |
+| Nintendo Joy-Con Pair (1 L + 1 R) | Classic HID, two adapters | Intermittent on Switch 2 |
 | Joy-Con 2 (L) / (R) · BLE | BLE, own HCI backend | Validated on Switch 2 |
 | Joy-Con 1 (L) Classic + Joy-Con 2 (R) BLE | Mixed | Validated on Switch 2 |
-| Joy-Con 2 Pair (L/R) · BLE | BLE, two adapters | Implemented |
-| Joy-Con 2 (L) BLE + Joy-Con 1 (R) Classic | Mixed | Implemented |
+| Joy-Con 2 Pair (L/R) · BLE | BLE, two adapters | Validated on Switch 2 |
+| Joy-Con 2 (L) BLE + Joy-Con 1 (R) Classic | Mixed | Validated on Switch 2 |
+
+All profiles were exercised on a real Switch 2. The Classic Joy-Con 1 pair is the exception: it connects and works only sporadically (roughly once in N attempts), so it is not yet reliable.
 
 Pair profiles require two distinct Bluetooth adapters selected by stable MAC address. The GUI sends L+R automatically during **Change Grip/Order**.
 
