@@ -221,7 +221,7 @@ static GtkWidget *mapping_grid(GtkWidget *parent,const char *title,
     GtkWidget *heading=label(title,"title-2");
     GtkWidget *grid=gtk_grid_new();
     gtk_grid_set_row_spacing(GTK_GRID(grid),0);
-    gtk_grid_set_column_spacing(GTK_GRID(grid),4);
+    gtk_grid_set_column_spacing(GTK_GRID(grid),3);
     gtk_widget_set_hexpand(grid,TRUE);
     if(description && *description) {
         gtk_widget_set_tooltip_text(heading,description);
@@ -235,14 +235,14 @@ static GtkWidget *mapping_grid(GtkWidget *parent,const char *title,
 }
 static void mapping_grid_add(GtkWidget *grid,guint index,
                              const char *title,GtkWidget *button) {
-    GtkWidget *cell=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,3);
+    GtkWidget *cell=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,2);
     GtkWidget *caption=label(title,NULL);
     gtk_label_set_wrap(GTK_LABEL(caption),FALSE);
     gtk_label_set_ellipsize(GTK_LABEL(caption),PANGO_ELLIPSIZE_END);
     gtk_widget_set_tooltip_text(caption,title);
     gtk_widget_set_hexpand(caption,TRUE);
     gtk_widget_set_halign(caption,GTK_ALIGN_FILL);
-    gtk_widget_set_size_request(button,76,-1);
+    gtk_widget_set_size_request(button,72,-1);
     gtk_widget_set_halign(button,GTK_ALIGN_END);
     gtk_box_append(GTK_BOX(cell),caption);
     gtk_box_append(GTK_BOX(cell),button);
@@ -2602,8 +2602,12 @@ static void joycon2_adapters(Ui *u) {
     else if(reverse_mixed_mode(u)){pt="Joy-Con 2 (L) adapter";ps=le;st="Joy-Con 1 (R) adapter";ss="Classic HID, assigned exclusively to the right half.";}
     else if(joycon2_pair_mode(u)){pt="Joy-Con 2 (L) adapter";ps=le;st="Joy-Con 2 (R) adapter";ss=le;}
     else if(joycon2_side(u)){pt="Joy-Con 2 adapter";ps=le;}
-    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(u->primary_row),pt);adw_action_row_set_subtitle(ADW_ACTION_ROW(u->primary_row),ps);
-    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(u->secondary_row),st);adw_action_row_set_subtitle(ADW_ACTION_ROW(u->secondary_row),ss);
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(u->primary_row),pt);
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(u->primary_row),NULL);
+    gtk_widget_set_tooltip_text(u->primary_row,ps);
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(u->secondary_row),st);
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(u->secondary_row),NULL);
+    gtk_widget_set_tooltip_text(u->secondary_row,ss);
     if(u->online || u->launcher)return;
     guint n=u->adapter_ids->len,capable=n;
     for(guint i=0;i<n && capable==n;i++)if(adapter_has_le2m(u,i))capable=i;
@@ -3177,12 +3181,12 @@ static void activate(GtkApplication *app,gpointer unused) {
     gtk_widget_set_margin_start(u->dashboard_root,4);
     gtk_widget_set_margin_end(u->dashboard_root,4);
     gtk_widget_set_margin_top(u->dashboard_root,3);
-    gtk_widget_set_margin_bottom(u->dashboard_root,7);
+    gtk_widget_set_margin_bottom(u->dashboard_root,5);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll),u->dashboard_root);
 
     u->dashboard_preview=gtk_box_new(GTK_ORIENTATION_VERTICAL,2);
     gtk_box_append(GTK_BOX(u->dashboard_root),u->dashboard_preview);
-    u->dashboard_columns=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,6);
+    u->dashboard_columns=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,5);
     gtk_box_append(GTK_BOX(u->dashboard_root),u->dashboard_columns);
     u->dashboard_left=gtk_box_new(GTK_ORIENTATION_VERTICAL,3);
     u->dashboard_middle=gtk_box_new(GTK_ORIENTATION_VERTICAL,3);
@@ -3196,14 +3200,14 @@ static void activate(GtkApplication *app,gpointer unused) {
     gtk_box_append(GTK_BOX(u->dashboard_columns),u->dashboard_right);
     u->toast=ADW_TOAST_OVERLAY(adw_toast_overlay_new());adw_toast_overlay_set_child(u->toast,wozt_ui_wrap(u->wozt,outer));adw_application_window_set_content(ADW_APPLICATION_WINDOW(u->window),GTK_WIDGET(u->toast));
     GtkWidget *box=page(u,"overview","Connection","Choose the controller presented by your PC, connect it to Switch 2, then route keyboard or gamepad input.");
-    GtkWidget *overview_columns=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,6);
+    GtkWidget *overview_columns=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,5);
     u->dashboard_top_columns=overview_columns;
     GtkWidget *preview_col=gtk_box_new(GTK_ORIENTATION_VERTICAL,3);
     GtkWidget *controls_col=gtk_box_new(GTK_ORIENTATION_VERTICAL,3);
     /* WUP Stream-style top row: compact visual/status at left,
      * live pairing options at right. Never make the visual 960px wide. */
     gtk_widget_set_hexpand(preview_col,FALSE);
-    gtk_widget_set_size_request(preview_col,238,-1);
+    gtk_widget_set_size_request(preview_col,232,-1);
     gtk_widget_set_hexpand(controls_col,TRUE);
     gtk_box_append(GTK_BOX(box),overview_columns);
     gtk_box_append(GTK_BOX(overview_columns),preview_col);
@@ -3227,7 +3231,7 @@ static void activate(GtkApplication *app,gpointer unused) {
     dashboard_peer_label_changed(G_OBJECT(u->peer),NULL,NULL);
     gtk_box_append(GTK_BOX(hero),GTK_WIDGET(u->peer));
     u->drawing=gtk_drawing_area_new();
-    gtk_widget_set_size_request(u->drawing,-1,82);
+    gtk_widget_set_size_request(u->drawing,-1,78);
     gtk_widget_set_focusable(u->drawing,TRUE);
     gtk_drawing_area_set_draw_func(
         GTK_DRAWING_AREA(u->drawing),
@@ -3343,10 +3347,10 @@ static void activate(GtkApplication *app,gpointer unused) {
         GTK_WIDGET(u->metrics));
 
     gtk_box_append(GTK_BOX(preview_col),hero);
-    u->dashboard_session_columns=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);
+    u->dashboard_session_columns=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,5);
     gtk_box_append(GTK_BOX(controls_col),u->dashboard_session_columns);
-    GtkWidget *session_col=gtk_box_new(GTK_ORIENTATION_VERTICAL,3);
-    GtkWidget *routing_col=gtk_box_new(GTK_ORIENTATION_VERTICAL,3);
+    GtkWidget *session_col=gtk_box_new(GTK_ORIENTATION_VERTICAL,2);
+    GtkWidget *routing_col=gtk_box_new(GTK_ORIENTATION_VERTICAL,2);
     gtk_widget_set_hexpand(session_col,TRUE);
     gtk_widget_set_hexpand(routing_col,TRUE);
     gtk_box_append(GTK_BOX(u->dashboard_session_columns),session_col);
@@ -3377,18 +3381,24 @@ static void activate(GtkApplication *app,gpointer unused) {
     gtk_flow_box_set_row_spacing(GTK_FLOW_BOX(actions),3);
     gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(actions),3);
     gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(actions),5);
-    u->start=button("Reconnect paired Switch (experimental)",G_CALLBACK(start),u);
+    u->start=button("Reconnect",G_CALLBACK(start),u);
+    gtk_widget_set_tooltip_text(u->start,"Reconnect paired Switch (experimental)");
     gtk_widget_add_css_class(u->start,"suggested-action");
-    u->sync=button("Pair / Sync new Switch",G_CALLBACK(sync_clicked),u);
-    u->finish=button("Finish order/style (A)",G_CALLBACK(finish_grip_clicked),u);
-    u->stop=button("Stop session",G_CALLBACK(stop_clicked),u);
+    u->sync=button("Pair / Sync",G_CALLBACK(sync_clicked),u);
+    gtk_widget_set_tooltip_text(u->sync,"Pair / Sync new Switch");
+    u->finish=button("Finish (A)",G_CALLBACK(finish_grip_clicked),u);
+    gtk_widget_set_tooltip_text(u->finish,"Finish order/style (A)");
+    u->stop=button("Stop",G_CALLBACK(stop_clicked),u);
+    gtk_widget_set_tooltip_text(u->stop,"Stop session");
     gtk_widget_set_sensitive(u->stop,FALSE);
 
     gtk_flow_box_insert(GTK_FLOW_BOX(actions),u->start,-1);
     gtk_flow_box_insert(GTK_FLOW_BOX(actions),u->sync,-1);
     gtk_flow_box_insert(GTK_FLOW_BOX(actions),u->finish,-1);
     gtk_flow_box_insert(GTK_FLOW_BOX(actions),u->stop,-1);
-    gtk_flow_box_insert(GTK_FLOW_BOX(actions),button("Refresh adapters",G_CALLBACK(adapters_scan),u),-1);
+    GtkWidget *refresh=button("Refresh",G_CALLBACK(adapters_scan),u);
+    gtk_widget_set_tooltip_text(refresh,"Refresh adapters");
+    gtk_flow_box_insert(GTK_FLOW_BOX(actions),refresh,-1);
     gtk_box_append(GTK_BOX(session_col),actions);
     u->error=GTK_LABEL(label("","error"));gtk_box_append(GTK_BOX(session_col),GTK_WIDGET(u->error));
     GtkWidget *routing_row=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,4);
@@ -3477,9 +3487,13 @@ static void activate(GtkApplication *app,gpointer unused) {
     u->auto_select=GTK_SWITCH(gtk_switch_new());gtk_switch_set_active(u->auto_select,u->saved_auto_select);
     row(g,"Auto-select PC controller","Prefer the last physical controller by GUID; otherwise select the first available gamepad.",GTK_WIDGET(u->auto_select));
 
-    g=group(box,"Focus and recovery",NULL);u->background=GTK_SWITCH(gtk_switch_new());row(g,"Gamepad input in background","Keyboard input always requires window focus.",GTK_WIDGET(u->background));
-    row(g,"Automatic release","Buttons and sticks return to neutral within 500 ms if input updates stop.",NULL);
-    row(g,"Session lifetime","Stopping or closing this window stops the backend and restores normal Bluetooth.",NULL);
+    g=group(box,"Focus and recovery",NULL);
+    u->background=GTK_SWITCH(gtk_switch_new());
+    row(g,"Gamepad input in background",NULL,GTK_WIDGET(u->background));
+    gtk_widget_set_tooltip_text(GTK_WIDGET(u->background),
+        "Keyboard input requires window focus. Automatic release: buttons and sticks "
+        "return to neutral within 500 ms if updates stop. Session lifetime: stopping "
+        "or closing the window stops the backend and restores normal Bluetooth.");
     box=page(u,"diagnostics","Diagnostics","Live session events, association requests and HID initialization. Simulation is always labeled.");
     GtkWidget *diag_actions=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,4);
     GtkWidget *diag_caption=label("Detailed HID traffic",NULL);
